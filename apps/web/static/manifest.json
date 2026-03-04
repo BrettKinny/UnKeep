@@ -1,0 +1,17 @@
+{
+  "name": "UnKeep",
+  "short_name": "UnKeep",
+  "description": "Your notes. Your storage. Not Google's.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1a1a2e",
+  "theme_color": "#2563eb",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
