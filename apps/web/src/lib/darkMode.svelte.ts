@@ -23,6 +23,7 @@ class DarkMode {
   private apply() {
     if (typeof document !== 'undefined') {
       document.documentElement.classList.toggle('dark', this.enabled);
+      document.documentElement.classList.toggle('light', !this.enabled);
     }
   }
 }

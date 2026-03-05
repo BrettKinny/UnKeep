@@ -27,8 +27,35 @@
 }
 
 /* Dark mode — triggered by either OS preference or manual .dark class */
-@media (prefers-color-scheme: dark) {
-  :root:not(.light) {
+@layer theme {
+  @media (prefers-color-scheme: dark) {
+    :root:not(.light) {
+      --color-surface: #1e1e1e;
+      --color-surface-dim: #2d2d2d;
+      --color-surface-bright: #3a3a3a;
+      --color-on-surface: #e0e0e0;
+      --color-on-surface-muted: #999999;
+      --color-primary: #60a5fa;
+      --color-primary-dim: #3b82f6;
+      --color-on-primary: #1a1a1a;
+      --color-danger: #ef4444;
+      --color-border: #404040;
+
+      --color-note-default: #2d2d2d;
+      --color-note-red: #5c2b29;
+      --color-note-orange: #614a19;
+      --color-note-yellow: #635d19;
+      --color-note-green: #345920;
+      --color-note-teal: #16504b;
+      --color-note-blue: #2d555e;
+      --color-note-purple: #42275e;
+      --color-note-pink: #5b2245;
+      --color-note-brown: #442f19;
+      --color-note-gray: #3c3f43;
+    }
+  }
+
+  :root.dark {
     --color-surface: #1e1e1e;
     --color-surface-dim: #2d2d2d;
     --color-surface-bright: #3a3a3a;
@@ -52,31 +79,6 @@
     --color-note-brown: #442f19;
     --color-note-gray: #3c3f43;
   }
-}
-
-:root.dark {
-  --color-surface: #1e1e1e;
-  --color-surface-dim: #2d2d2d;
-  --color-surface-bright: #3a3a3a;
-  --color-on-surface: #e0e0e0;
-  --color-on-surface-muted: #999999;
-  --color-primary: #60a5fa;
-  --color-primary-dim: #3b82f6;
-  --color-on-primary: #1a1a1a;
-  --color-danger: #ef4444;
-  --color-border: #404040;
-
-  --color-note-default: #2d2d2d;
-  --color-note-red: #5c2b29;
-  --color-note-orange: #614a19;
-  --color-note-yellow: #635d19;
-  --color-note-green: #345920;
-  --color-note-teal: #16504b;
-  --color-note-blue: #2d555e;
-  --color-note-purple: #42275e;
-  --color-note-pink: #5b2245;
-  --color-note-brown: #442f19;
-  --color-note-gray: #3c3f43;
 }
 
 html {

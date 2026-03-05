@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "pnpm --filter @unkeep/web dev",
+    "dev": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/web dev",
     "build": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/web build",
     "preview": "pnpm --filter @unkeep/web preview",
     "check": "pnpm --filter @unkeep/web check",

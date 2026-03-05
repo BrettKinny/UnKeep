@@ -127,7 +127,8 @@ class NoteStore {
   private async persistNote(note: Note) {
     if (!this.adapter) return;
     try {
-      await this.adapter.saveNote(note);
+      await this.adapter.saveNote($state.snapshot(note) as Note);
+      this.syncStatus = 'synced';
     } catch (e) {
       console.error('Failed to save note:', e);
       this.syncStatus = 'error';

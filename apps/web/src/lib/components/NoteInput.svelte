@@ -18,7 +18,7 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
+    if (e.key === 'Escape' || (e.ctrlKey && e.key === 'Enter')) {
       handleClose();
       inputEl?.blur();
     }
@@ -34,12 +34,23 @@
       <textarea
         bind:this={inputEl}
         bind:value={content}
-        onfocusout={handleClose}
+        onfocusout={(e) => {
+          if (e.relatedTarget instanceof HTMLElement && e.relatedTarget.dataset.keepFocus) return;
+          handleClose();
+        }}
         onkeydown={handleKeydown}
         placeholder="Take a note..."
         rows="3"
-        class="w-full p-4 bg-transparent text-on-surface placeholder:text-on-surface-muted resize-none outline-none rounded-lg"
+        class="w-full p-4 pb-1 bg-transparent text-on-surface placeholder:text-on-surface-muted resize-none outline-none rounded-t-lg"
       ></textarea>
+      <div class="flex justify-end px-2 pb-2">
+        <button
+          data-keep-focus="true"
+          onmousedown={(e) => e.preventDefault()}
+          onclick={() => { handleClose(); inputEl?.blur(); }}
+          class="px-4 py-1.5 text-sm text-on-surface-muted hover:text-on-surface rounded hover:bg-surface-dim transition-colors"
+        >Close</button>
+      </div>
     {:else}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div

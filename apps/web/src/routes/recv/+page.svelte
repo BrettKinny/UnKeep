@@ -37,6 +37,7 @@
 <main class="min-h-screen bg-surface flex items-center justify-center p-4">
   <div class="w-full max-w-lg">
     <div class="text-center mb-6">
+      <img src="/icon.svg" alt="UnKeep" class="w-12 h-12 mx-auto mb-2" />
       <h1 class="text-2xl font-bold text-on-surface">UnKeep</h1>
       <p class="text-on-surface-muted text-sm mt-1">Received note</p>
     </div>
