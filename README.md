@@ -1,8 +1,8 @@
 # UnKeep
 
-*Your notes. Your storage. Not Google's.*
+*Your notes. Your storage.*
 
-A privacy-first, open-source PWA for ephemeral note-taking. Clone the speed of Google Keep without the vendor lock-in. Pluggable storage backends, optional end-to-end encryption, and zero server components.
+A privacy-first, open-source PWA for ephemeral note-taking. Fast, lightweight, and free from vendor lock-in. Pluggable storage backends, optional end-to-end encryption, and zero server components.
 
 ## Quick Start
 
@@ -33,7 +33,7 @@ pnpm preview    # preview the production build locally
 
 ### Beyond Keep
 
-- **Google Keep importer** — drag-drop your Takeout ZIP and import all notes, checklists, colors, and timestamps
+- **Takeout importer** — drag-drop a Takeout ZIP and import all notes, checklists, colors, and timestamps
 - **Quick Send** — generate a share link with the note content encoded in the URL fragment (never hits a server)
 - **E2E encryption** — AES-256-GCM with PBKDF2 key derivation; passphrase never stored
 - **Pluggable storage** — swap backends without changing anything else

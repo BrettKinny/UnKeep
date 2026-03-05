@@ -1,7 +1,7 @@
 # UnKeep - Project Status
 
 ## What is it
-A privacy-first note-taking PWA (Google Keep clone). SvelteKit 5 + Tailwind v4, monorepo with `packages/core` (types, adapters) and `apps/web` (frontend).
+A privacy-first note-taking PWA. SvelteKit 5 + Tailwind v4, monorepo with `packages/core` (types, adapters) and `apps/web` (frontend).
 
 ## Running it
 ```bash

@@ -76,7 +76,7 @@
         <button
           onclick={() => showImporter = true}
           class="p-2 rounded-full hover:bg-surface-dim text-on-surface-muted hover:text-on-surface transition-colors"
-          title="Import from Google Keep"
+          title="Import notes"
         >
           <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
         </button>

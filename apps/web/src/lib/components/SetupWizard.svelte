@@ -64,7 +64,7 @@
     <div class="text-center mb-8">
       <img src="/icon.svg" alt="UnKeep" class="w-16 h-16 mx-auto mb-3" />
       <h1 class="text-3xl font-bold text-on-surface">UnKeep</h1>
-      <p class="text-on-surface-muted mt-2">Your notes. Your storage. Not Google's.</p>
+      <p class="text-on-surface-muted mt-2">Your notes. Your storage.</p>
     </div>
 
     {#if step === 'pick'}
