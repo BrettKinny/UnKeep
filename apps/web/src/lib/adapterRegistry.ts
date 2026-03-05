@@ -1,4 +1,4 @@
-import { LocalOnlyAdapter, GitAdapter, S3Adapter, WebDAVAdapter } from '@unkeep/core';
+import { LocalOnlyAdapter, GitAdapter, S3Adapter, WebDAVAdapter, LocalMarkdownAdapter } from '@unkeep/core';
 import type { StorageAdapter } from '@unkeep/core';
 
 export interface AdapterEntry {
@@ -8,6 +8,7 @@ export interface AdapterEntry {
 
 export const adapters: AdapterEntry[] = [
   { id: 'local', create: () => new LocalOnlyAdapter() },
+  { id: 'local-markdown', create: () => new LocalMarkdownAdapter() },
   { id: 'git', create: () => new GitAdapter() },
   { id: 's3', create: () => new S3Adapter() },
   { id: 'webdav', create: () => new WebDAVAdapter() },
