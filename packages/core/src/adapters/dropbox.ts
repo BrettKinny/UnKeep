@@ -5,6 +5,7 @@ import type {
   ValidationResult,
   SyncResult,
   ConfigField,
+  OAuthProviderConfig,
 } from '../adapter.js';
 
 interface DropboxConfig {
@@ -24,15 +25,15 @@ function parseConfig(config: AdapterConfig): DropboxConfig {
 export class DropboxAdapter implements StorageAdapter {
   id = 'dropbox';
   displayName = 'Dropbox';
-  description = 'Store notes in your Dropbox account.';
+  description = 'Store notes in your Dropbox account. Sign in with OAuth.';
 
   configSchema: ConfigField[] = [
     {
-      key: 'accessToken',
-      label: 'Access Token',
-      type: 'password',
-      placeholder: 'sl.B...',
-      helpText: 'Generate an access token from the Dropbox App Console (https://www.dropbox.com/developers/apps). Create an app with "Files and folders" access, then generate a token.',
+      key: 'clientId',
+      label: 'App Key (Client ID)',
+      type: 'text',
+      placeholder: 'your-dropbox-app-key',
+      helpText: 'Create an app at https://www.dropbox.com/developers/apps and copy the App Key.',
       required: true,
     },
     {
@@ -43,6 +44,14 @@ export class DropboxAdapter implements StorageAdapter {
       helpText: 'Folder in Dropbox where notes will be stored. Defaults to "/UnKeep".',
     },
   ];
+
+  oauthConfig: OAuthProviderConfig = {
+    authUrl: 'https://www.dropbox.com/oauth2/authorize',
+    tokenUrl: 'https://api.dropboxapi.com/oauth2/token',
+    scopes: [],
+    requiresSecret: false,
+    extraAuthParams: { token_access_type: 'offline' },
+  };
 
   private config: DropboxConfig | null = null;
 
@@ -56,7 +65,6 @@ export class DropboxAdapter implements StorageAdapter {
 
   async init(config: AdapterConfig): Promise<void> {
     this.config = parseConfig(config);
-    // Ensure the folder exists by creating it (ignores conflict if it already exists)
     try {
       await fetch('https://api.dropboxapi.com/2/files/create_folder_v2', {
         method: 'POST',
@@ -73,9 +81,7 @@ export class DropboxAdapter implements StorageAdapter {
       const c = parseConfig(config);
       const res = await fetch('https://api.dropboxapi.com/2/users/get_current_account', {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${c.accessToken}`,
-        },
+        headers: { Authorization: `Bearer ${c.accessToken}` },
       });
       if (!res.ok) {
         return { valid: false, error: `Authentication failed (${res.status}). Check your access token.` };
@@ -110,7 +116,6 @@ export class DropboxAdapter implements StorageAdapter {
       }
 
       if (!res.ok) {
-        // Empty folder returns a path/not_found error
         const text = await res.text();
         if (text.includes('path/not_found')) return [];
         throw new Error(`Failed to list notes: ${res.status}`);
@@ -133,7 +138,6 @@ export class DropboxAdapter implements StorageAdapter {
 
   async getNote(id: string): Promise<Note> {
     if (!this.config) throw new Error('DropboxAdapter not initialized');
-
     const res = await fetch('https://content.dropboxapi.com/2/files/download', {
       method: 'POST',
       headers: {
@@ -141,14 +145,12 @@ export class DropboxAdapter implements StorageAdapter {
         'Dropbox-API-Arg': JSON.stringify({ path: `${this.config.path}/${id}.json` }),
       },
     });
-
     if (!res.ok) throw new Error(`Failed to get note ${id}: ${res.status}`);
     return res.json();
   }
 
   async saveNote(note: Note): Promise<void> {
     if (!this.config) throw new Error('DropboxAdapter not initialized');
-
     const body = JSON.stringify(note);
     const res = await fetch('https://content.dropboxapi.com/2/files/upload', {
       method: 'POST',
@@ -163,19 +165,16 @@ export class DropboxAdapter implements StorageAdapter {
       },
       body,
     });
-
     if (!res.ok) throw new Error(`Failed to save note ${note.id}: ${res.status}`);
   }
 
   async deleteNote(id: string): Promise<void> {
     if (!this.config) throw new Error('DropboxAdapter not initialized');
-
     const res = await fetch('https://api.dropboxapi.com/2/files/delete_v2', {
       method: 'POST',
       headers: this.headers(),
       body: JSON.stringify({ path: `${this.config.path}/${id}.json` }),
     });
-
     if (!res.ok) throw new Error(`Failed to delete note ${id}: ${res.status}`);
   }
 

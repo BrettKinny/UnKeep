@@ -5,6 +5,7 @@ import type {
   ValidationResult,
   SyncResult,
   ConfigField,
+  OAuthProviderConfig,
 } from '../adapter.js';
 
 interface PCloudConfig {
@@ -27,15 +28,23 @@ function parseConfig(config: AdapterConfig): PCloudConfig {
 export class PCloudAdapter implements StorageAdapter {
   id = 'pcloud';
   displayName = 'pCloud';
-  description = 'Store notes in your pCloud account.';
+  description = 'Store notes in your pCloud account. Sign in with OAuth.';
 
   configSchema: ConfigField[] = [
     {
-      key: 'accessToken',
-      label: 'Access Token',
+      key: 'clientId',
+      label: 'App Key (Client ID)',
+      type: 'text',
+      placeholder: 'your-pcloud-app-key',
+      helpText: 'Create an app at https://docs.pcloud.com/my_apps/ and copy the App Key.',
+      required: true,
+    },
+    {
+      key: 'clientSecret',
+      label: 'App Secret',
       type: 'password',
-      placeholder: '',
-      helpText: 'Your pCloud OAuth access token. Generate one from the pCloud developer console (https://docs.pcloud.com/).',
+      placeholder: 'your-pcloud-app-secret',
+      helpText: 'The App Secret from your pCloud application settings.',
       required: true,
     },
     {
@@ -43,7 +52,7 @@ export class PCloudAdapter implements StorageAdapter {
       label: 'API Hostname',
       type: 'text',
       placeholder: 'api.pcloud.com',
-      helpText: 'API hostname. Use "api.pcloud.com" for US or "eapi.pcloud.com" for EU. Defaults to "api.pcloud.com".',
+      helpText: 'Use "api.pcloud.com" for US or "eapi.pcloud.com" for EU. Defaults to "api.pcloud.com".',
     },
     {
       key: 'path',
@@ -53,6 +62,13 @@ export class PCloudAdapter implements StorageAdapter {
       helpText: 'Folder path in pCloud. Defaults to "/UnKeep".',
     },
   ];
+
+  oauthConfig: OAuthProviderConfig = {
+    authUrl: 'https://my.pcloud.com/oauth2/authorize',
+    tokenUrl: 'https://api.pcloud.com/oauth2_token',
+    scopes: [],
+    requiresSecret: true,
+  };
 
   private config: PCloudConfig | null = null;
 
@@ -70,11 +86,10 @@ export class PCloudAdapter implements StorageAdapter {
 
   async init(config: AdapterConfig): Promise<void> {
     this.config = parseConfig(config);
-    // Ensure folder exists
     try {
       await fetch(this.apiUrl('createfolderifnotexists', { path: this.config.path }));
     } catch {
-      // Ignore errors if folder already exists
+      // Ignore if folder already exists
     }
   }
 
@@ -105,7 +120,7 @@ export class PCloudAdapter implements StorageAdapter {
 
     const data = await res.json();
     if (data.error) {
-      if (data.result === 2005) return []; // Folder not found
+      if (data.result === 2005) return [];
       throw new Error(`Failed to list notes: ${data.error}`);
     }
 
@@ -123,7 +138,6 @@ export class PCloudAdapter implements StorageAdapter {
   async getNote(id: string): Promise<Note> {
     if (!this.config) throw new Error('PCloudAdapter not initialized');
 
-    // First get a file link, then download the content
     const path = `${this.config.path}/${id}.json`;
     const linkRes = await fetch(this.apiUrl('getfilelink', { path }));
     if (!linkRes.ok) throw new Error(`Failed to get note ${id}: ${linkRes.status}`);
@@ -152,18 +166,13 @@ export class PCloudAdapter implements StorageAdapter {
       renameifexists: '0',
     });
 
-    // pCloud doesn't have a direct overwrite — delete first, then upload
     try {
       await this.deleteNote(note.id);
     } catch {
       // File may not exist yet
     }
 
-    const res = await fetch(url, {
-      method: 'POST',
-      body: formData,
-    });
-
+    const res = await fetch(url, { method: 'POST', body: formData });
     if (!res.ok) throw new Error(`Failed to save note ${note.id}: ${res.status}`);
     const data = await res.json();
     if (data.error) throw new Error(`Failed to save note ${note.id}: ${data.error}`);
@@ -178,7 +187,6 @@ export class PCloudAdapter implements StorageAdapter {
 
     const data = await res.json();
     if (data.error && data.result !== 2009) {
-      // 2009 = file not found, which is fine for deletes
       throw new Error(`Failed to delete note ${id}: ${data.error}`);
     }
   }

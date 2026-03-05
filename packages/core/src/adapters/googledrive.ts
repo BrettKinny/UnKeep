@@ -5,6 +5,7 @@ import type {
   ValidationResult,
   SyncResult,
   ConfigField,
+  OAuthProviderConfig,
 } from '../adapter.js';
 
 interface GoogleDriveConfig {
@@ -22,15 +23,23 @@ function parseConfig(config: AdapterConfig): GoogleDriveConfig {
 export class GoogleDriveAdapter implements StorageAdapter {
   id = 'googledrive';
   displayName = 'Google Drive';
-  description = 'Store notes in your Google Drive account.';
+  description = 'Store notes in your Google Drive account. Sign in with OAuth.';
 
   configSchema: ConfigField[] = [
     {
-      key: 'accessToken',
-      label: 'Access Token',
+      key: 'clientId',
+      label: 'Client ID',
+      type: 'text',
+      placeholder: '123456789.apps.googleusercontent.com',
+      helpText: 'Create OAuth credentials at https://console.cloud.google.com/apis/credentials. Use "Web application" type.',
+      required: true,
+    },
+    {
+      key: 'clientSecret',
+      label: 'Client Secret',
       type: 'password',
-      placeholder: 'ya29...',
-      helpText: 'A Google OAuth2 access token with Drive file scope. Generate one via the Google OAuth2 Playground (https://developers.google.com/oauthplayground) with the "Google Drive API v3" scope.',
+      placeholder: 'GOCSPX-...',
+      helpText: 'Google requires a client secret even for browser apps. Your secret stays in your browser only.',
       required: true,
     },
     {
@@ -41,6 +50,14 @@ export class GoogleDriveAdapter implements StorageAdapter {
       helpText: 'Folder name in Google Drive. Will be created if it does not exist. Defaults to "UnKeep".',
     },
   ];
+
+  oauthConfig: OAuthProviderConfig = {
+    authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+    tokenUrl: 'https://oauth2.googleapis.com/token',
+    scopes: ['https://www.googleapis.com/auth/drive.file'],
+    requiresSecret: true,
+    extraAuthParams: { access_type: 'offline', prompt: 'consent' },
+  };
 
   private config: GoogleDriveConfig | null = null;
   private folderId: string | null = null;
@@ -54,7 +71,6 @@ export class GoogleDriveAdapter implements StorageAdapter {
     if (!this.config) throw new Error('GoogleDriveAdapter not initialized');
     if (this.folderId) return this.folderId;
 
-    // Search for existing folder
     const query = encodeURIComponent(
       `name='${this.config.folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`
     );
@@ -62,7 +78,6 @@ export class GoogleDriveAdapter implements StorageAdapter {
       `https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name)`,
       { headers: this.headers() }
     );
-
     if (!searchRes.ok) throw new Error(`Failed to search for folder: ${searchRes.status}`);
     const searchData = await searchRes.json();
 
@@ -71,19 +86,14 @@ export class GoogleDriveAdapter implements StorageAdapter {
       return this.folderId!;
     }
 
-    // Create folder
     const createRes = await fetch('https://www.googleapis.com/drive/v3/files', {
       method: 'POST',
-      headers: {
-        ...this.headers(),
-        'Content-Type': 'application/json',
-      },
+      headers: { ...this.headers(), 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name: this.config.folderName,
         mimeType: 'application/vnd.google-apps.folder',
       }),
     });
-
     if (!createRes.ok) throw new Error(`Failed to create folder: ${createRes.status}`);
     const folderData = await createRes.json();
     this.folderId = folderData.id;
@@ -157,7 +167,6 @@ export class GoogleDriveAdapter implements StorageAdapter {
   async getNote(id: string): Promise<Note> {
     const fileId = await this.findFile(`${id}.json`);
     if (!fileId) throw new Error(`Note ${id} not found`);
-
     const res = await fetch(
       `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
       { headers: this.headers() }
@@ -172,21 +181,16 @@ export class GoogleDriveAdapter implements StorageAdapter {
     const body = JSON.stringify(note);
 
     if (existingId) {
-      // Update existing file
       const res = await fetch(
         `https://www.googleapis.com/upload/drive/v3/files/${existingId}?uploadType=media`,
         {
           method: 'PATCH',
-          headers: {
-            ...this.headers(),
-            'Content-Type': 'application/json',
-          },
+          headers: { ...this.headers(), 'Content-Type': 'application/json' },
           body,
         }
       );
       if (!res.ok) throw new Error(`Failed to update note ${note.id}: ${res.status}`);
     } else {
-      // Create new file with multipart upload
       const folderId = await this.findOrCreateFolder();
       const metadata = {
         name: fileName,
@@ -222,13 +226,9 @@ export class GoogleDriveAdapter implements StorageAdapter {
   async deleteNote(id: string): Promise<void> {
     const fileId = await this.findFile(`${id}.json`);
     if (!fileId) return;
-
     const res = await fetch(
       `https://www.googleapis.com/drive/v3/files/${fileId}`,
-      {
-        method: 'DELETE',
-        headers: this.headers(),
-      }
+      { method: 'DELETE', headers: this.headers() }
     );
     if (!res.ok && res.status !== 404) {
       throw new Error(`Failed to delete note ${id}: ${res.status}`);

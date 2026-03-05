@@ -10,8 +10,16 @@ export type {
   ValidationResult,
   SyncResult,
   ConfigField,
+  OAuthProviderConfig,
+  OAuthTokens,
   StorageAdapter,
 } from './adapter.js';
+
+export {
+  generateCodeVerifier,
+  generateCodeChallenge,
+  generateState,
+} from './oauth.js';
 
 export { LocalOnlyAdapter } from './adapters/local.js';
 export { GitAdapter } from './adapters/git.js';

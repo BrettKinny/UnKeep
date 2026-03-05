@@ -3,24 +3,44 @@
   import { adapters, getAdapter } from '$lib/adapterRegistry';
   import { saveConfig } from '$lib/adapterConfig';
   import { noteStore } from '$lib/noteStore.svelte';
+  import {
+    startOAuthPopup,
+    exchangeCodeForTokens,
+    saveTokens,
+    getRedirectUri,
+  } from '$lib/oauth';
 
   let { onComplete }: { onComplete: () => void } = $props();
 
-  let step = $state<'pick' | 'configure' | 'validating' | 'done'>('pick');
+  let step = $state<'pick' | 'configure' | 'validating' | 'authorizing' | 'done'>('pick');
   let selectedId = $state<string | null>(null);
   let selectedAdapter = $state<StorageAdapter | null>(null);
   let configValues = $state<Record<string, string>>({});
   let validationError = $state<string | null>(null);
+  let oauthComplete = $state(false);
+
+  /** Config fields that the user fills in (excludes accessToken — handled by OAuth). */
+  let visibleConfigFields = $derived.by(() => {
+    if (!selectedAdapter) return [];
+    if (selectedAdapter.oauthConfig) {
+      // Hide accessToken field if present — it comes from OAuth
+      return selectedAdapter.configSchema.filter(f => f.key !== 'accessToken');
+    }
+    return selectedAdapter.configSchema;
+  });
+
+  /** Whether the current adapter uses OAuth. */
+  let usesOAuth = $derived(!!selectedAdapter?.oauthConfig);
 
   function pickAdapter(id: string) {
     selectedId = id;
     selectedAdapter = getAdapter(id);
     configValues = {};
-    // Pre-fill defaults
+    oauthComplete = false;
     for (const field of selectedAdapter.configSchema) {
       configValues[field.key] = '';
     }
-    if (selectedAdapter.configSchema.length === 0) {
+    if (selectedAdapter.configSchema.length === 0 && !selectedAdapter.oauthConfig) {
       // No config needed (e.g. LocalOnlyAdapter) — skip to done
       handleFinish();
     } else {
@@ -28,8 +48,52 @@
     }
   }
 
+  async function handleAuthorize() {
+    if (!selectedAdapter?.oauthConfig || !selectedId) return;
+    validationError = null;
+    step = 'authorizing';
+
+    const clientId = configValues.clientId;
+    if (!clientId) {
+      validationError = 'Client ID is required to start authorization.';
+      step = 'configure';
+      return;
+    }
+
+    try {
+      const flowParams = {
+        oauthConfig: selectedAdapter.oauthConfig,
+        clientId,
+        clientSecret: configValues.clientSecret || undefined,
+        redirectUri: getRedirectUri(),
+      };
+
+      const code = await startOAuthPopup(flowParams);
+      const tokens = await exchangeCodeForTokens(flowParams, code);
+
+      // Inject the access token into config
+      configValues.accessToken = tokens.accessToken;
+      oauthComplete = true;
+
+      // Persist tokens for refresh later
+      saveTokens(selectedId, tokens);
+
+      step = 'configure';
+    } catch (e) {
+      validationError = `Authorization failed: ${e instanceof Error ? e.message : e}`;
+      step = 'configure';
+    }
+  }
+
   async function handleValidate() {
     if (!selectedAdapter || !selectedId) return;
+
+    // For OAuth adapters, ensure authorization happened
+    if (usesOAuth && !oauthComplete) {
+      validationError = 'Please authorize with your cloud provider first.';
+      return;
+    }
+
     step = 'validating';
     validationError = null;
 
@@ -55,6 +119,7 @@
     selectedId = null;
     selectedAdapter = null;
     validationError = null;
+    oauthComplete = false;
   }
 </script>
 
@@ -81,7 +146,7 @@
         {/each}
       </div>
 
-    {:else if step === 'configure' || step === 'validating'}
+    {:else if step === 'configure' || step === 'validating' || step === 'authorizing'}
       <div>
         <button onclick={goBack} class="text-sm text-on-surface-muted hover:text-on-surface mb-4 flex items-center gap-1">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M15 19l-7-7 7-7"/></svg>
@@ -99,7 +164,8 @@
 
         <form onsubmit={(e) => { e.preventDefault(); handleValidate(); }} class="space-y-4">
           {#if selectedAdapter}
-            {#each selectedAdapter.configSchema as field}
+            <!-- Regular config fields -->
+            {#each visibleConfigFields as field}
               <div>
                 <label for={field.key} class="block text-sm font-medium text-on-surface mb-1">
                   {field.label}
@@ -118,11 +184,41 @@
                 {/if}
               </div>
             {/each}
+
+            <!-- OAuth authorize button -->
+            {#if usesOAuth}
+              <div class="pt-2">
+                {#if oauthComplete}
+                  <div class="flex items-center gap-2 p-3 bg-green-500/10 border border-green-500/30 rounded-lg text-sm text-green-400">
+                    <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
+                    </svg>
+                    Authorized successfully
+                  </div>
+                {:else}
+                  <button
+                    type="button"
+                    onclick={handleAuthorize}
+                    disabled={step === 'authorizing'}
+                    class="w-full py-2.5 bg-surface-dim border border-border text-on-surface rounded-lg font-medium hover:border-primary hover:bg-surface transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+                  >
+                    {#if step === 'authorizing'}
+                      <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                      Waiting for authorization...
+                    {:else}
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4M10 17l5-5-5-5M15 12H3"/></svg>
+                      Sign in with {selectedAdapter.displayName}
+                    {/if}
+                  </button>
+                  <p class="text-xs text-on-surface-muted mt-1">Opens a popup to authorize with your account. Make sure popups are allowed.</p>
+                {/if}
+              </div>
+            {/if}
           {/if}
 
           <button
             type="submit"
-            disabled={step === 'validating'}
+            disabled={step === 'validating' || step === 'authorizing' || (usesOAuth && !oauthComplete)}
             class="w-full py-2.5 bg-primary text-on-primary rounded-lg font-medium hover:bg-primary-dim transition-colors disabled:opacity-50"
           >
             {#if step === 'validating'}

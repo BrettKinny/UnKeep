@@ -5,6 +5,7 @@ import type {
   ValidationResult,
   SyncResult,
   ConfigField,
+  OAuthProviderConfig,
 } from '../adapter.js';
 
 interface OneDriveConfig {
@@ -24,15 +25,15 @@ function parseConfig(config: AdapterConfig): OneDriveConfig {
 export class OneDriveAdapter implements StorageAdapter {
   id = 'onedrive';
   displayName = 'OneDrive';
-  description = 'Store notes in your Microsoft OneDrive account.';
+  description = 'Store notes in your Microsoft OneDrive account. Sign in with OAuth.';
 
   configSchema: ConfigField[] = [
     {
-      key: 'accessToken',
-      label: 'Access Token',
-      type: 'password',
-      placeholder: 'EwB...',
-      helpText: 'A Microsoft Graph API access token with Files.ReadWrite scope. Generate one via the Microsoft Graph Explorer (https://developer.microsoft.com/graph/graph-explorer).',
+      key: 'clientId',
+      label: 'Application (Client) ID',
+      type: 'text',
+      placeholder: 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',
+      helpText: 'Register an app at https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps. Use "SPA" redirect type with your callback URL.',
       required: true,
     },
     {
@@ -43,6 +44,13 @@ export class OneDriveAdapter implements StorageAdapter {
       helpText: 'Folder path in OneDrive root. Defaults to "/UnKeep".',
     },
   ];
+
+  oauthConfig: OAuthProviderConfig = {
+    authUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+    tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+    scopes: ['Files.ReadWrite', 'offline_access'],
+    requiresSecret: false,
+  };
 
   private config: OneDriveConfig | null = null;
 
@@ -60,7 +68,6 @@ export class OneDriveAdapter implements StorageAdapter {
 
   async init(config: AdapterConfig): Promise<void> {
     this.config = parseConfig(config);
-    // Ensure folder exists by creating it
     try {
       const parts = this.config.path.split('/').filter(Boolean);
       const folderName = parts[parts.length - 1];
@@ -71,10 +78,7 @@ export class OneDriveAdapter implements StorageAdapter {
 
       await fetch(parentUrl, {
         method: 'POST',
-        headers: {
-          ...this.headers(),
-          'Content-Type': 'application/json',
-        },
+        headers: { ...this.headers(), 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: folderName,
           folder: {},
@@ -109,12 +113,10 @@ export class OneDriveAdapter implements StorageAdapter {
 
     while (url) {
       const res = await fetch(url, { headers: this.headers() });
-
       if (!res.ok) {
         if (res.status === 404) return [];
         throw new Error(`Failed to list notes: ${res.status}`);
       }
-
       const data = await res.json();
       for (const item of data.value || []) {
         if (item.name?.endsWith('.json')) {
@@ -131,39 +133,30 @@ export class OneDriveAdapter implements StorageAdapter {
 
   async getNote(id: string): Promise<Note> {
     if (!this.config) throw new Error('OneDriveAdapter not initialized');
-
     const res = await fetch(`${this.itemByPath(`${id}.json`)}:/content`, {
       headers: this.headers(),
     });
-
     if (!res.ok) throw new Error(`Failed to get note ${id}: ${res.status}`);
     return res.json();
   }
 
   async saveNote(note: Note): Promise<void> {
     if (!this.config) throw new Error('OneDriveAdapter not initialized');
-
     const body = JSON.stringify(note);
     const res = await fetch(`${this.itemByPath(`${note.id}.json`)}:/content`, {
       method: 'PUT',
-      headers: {
-        ...this.headers(),
-        'Content-Type': 'application/json',
-      },
+      headers: { ...this.headers(), 'Content-Type': 'application/json' },
       body,
     });
-
     if (!res.ok) throw new Error(`Failed to save note ${note.id}: ${res.status}`);
   }
 
   async deleteNote(id: string): Promise<void> {
     if (!this.config) throw new Error('OneDriveAdapter not initialized');
-
     const res = await fetch(this.itemByPath(`${id}.json`), {
       method: 'DELETE',
       headers: this.headers(),
     });
-
     if (!res.ok && res.status !== 404) {
       throw new Error(`Failed to delete note ${id}: ${res.status}`);
     }
