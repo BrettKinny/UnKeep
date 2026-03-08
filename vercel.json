@@ -1,5 +1,5 @@
 {
-  "buildCommand": "pnpm build",
+  "buildCommand": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/web build",
   "outputDirectory": "apps/web/build",
   "installCommand": "pnpm install",
   "framework": null,
