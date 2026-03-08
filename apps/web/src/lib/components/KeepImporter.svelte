@@ -61,7 +61,7 @@
     onkeydown={() => {}}
   >
     <div class="flex items-center justify-between p-4 border-b border-border">
-      <h2 class="text-lg font-semibold text-on-surface">Import from Google Keep</h2>
+      <h2 class="text-lg font-semibold text-on-surface">Import Notes</h2>
       <button onclick={onClose} class="p-1 hover:bg-surface-dim rounded-full text-on-surface-muted">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12"/></svg>
       </button>
@@ -70,7 +70,7 @@
     <div class="p-4">
       {#if step === 'upload'}
         <p class="text-sm text-on-surface-muted mb-4">
-          Export your notes from <strong>Google Takeout</strong> (takeout.google.com), select Google Keep, and download the ZIP file. Then upload it here.
+          Upload a Takeout ZIP file containing your exported notes to import them here.
         </p>
 
         <!-- svelte-ignore a11y_no_static_element_interactions -->
