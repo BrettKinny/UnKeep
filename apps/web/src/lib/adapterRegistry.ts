@@ -3,6 +3,7 @@ import {
   GitAdapter,
   S3Adapter,
   WebDAVAdapter,
+  LocalMarkdownAdapter,
   DropboxAdapter,
   GoogleDriveAdapter,
   OneDriveAdapter,
@@ -17,6 +18,7 @@ export interface AdapterEntry {
 
 export const adapters: AdapterEntry[] = [
   { id: 'local', create: () => new LocalOnlyAdapter() },
+  { id: 'local-markdown', create: () => new LocalMarkdownAdapter() },
   { id: 'git', create: () => new GitAdapter() },
   { id: 's3', create: () => new S3Adapter() },
   { id: 'webdav', create: () => new WebDAVAdapter() },
