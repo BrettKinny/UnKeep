@@ -45,7 +45,7 @@ pnpm preview    # preview the production build locally
 | **Local Only** | Browser IndexedDB | None |
 | **Git** | GitHub, Gitea, Forgejo | API URL, owner, repo, token |
 | **S3** | AWS S3, MinIO, Cloudflare R2, Backblaze B2 | Endpoint, bucket, credentials |
-| **WebDAV** | Nextcloud, ownCloud | URL, username, password |
+| **Local Markdown** | Local filesystem (File System Access API) | Directory picker |
 
 All writes hit IndexedDB first (offline-safe, immediate), then sync to the remote adapter.
 
@@ -56,7 +56,7 @@ All writes hit IndexedDB first (offline-safe, immediate), then sync to the remot
 │   └── src/
 │       ├── types.ts       # Note, ChecklistItem, NoteColor
 │       ├── adapter.ts     # StorageAdapter interface
-│       └── adapters/      # local, git, s3, webdav
+│       └── adapters/      # local, local-markdown, git, s3
 ├── apps/web/             # SvelteKit SPA
 │   └── src/
 │       ├── lib/           # Stores, utilities, components

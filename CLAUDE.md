@@ -19,7 +19,7 @@ Core package only: `pnpm --filter @unkeep/core build` (runs `tsc`). Must be buil
 
 **pnpm monorepo** with two workspaces:
 
-- `packages/core` — Pure TypeScript library. Defines the `Note` type, `StorageAdapter` interface, and four adapter implementations (local/IndexedDB, git, s3, webdav). No framework dependencies. Built with `tsc` to `dist/`.
+- `packages/core` — Pure TypeScript library. Defines the `Note` type, `StorageAdapter` interface, and adapter implementations (local/IndexedDB, local-markdown, git, s3). No framework dependencies. Built with `tsc` to `dist/`.
 - `apps/web` — SvelteKit SPA (`adapter-static`, outputs to `apps/web/build/`). Consumes `@unkeep/core` as a workspace dependency.
 
 ### Key patterns
