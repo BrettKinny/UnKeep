@@ -25,11 +25,27 @@ export interface ConfigField {
   required?: boolean;
 }
 
+export interface OAuthProviderConfig {
+  authUrl: string;
+  tokenUrl: string;
+  scopes: string[];
+  requiresSecret: boolean;
+  extraAuthParams?: Record<string, string>;
+  extraTokenParams?: Record<string, string>;
+}
+
+export interface OAuthTokens {
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt?: number;
+}
+
 export interface StorageAdapter {
   id: string;
   displayName: string;
   description: string;
   configSchema: ConfigField[];
+  oauthConfig?: OAuthProviderConfig;
   init(config: AdapterConfig): Promise<void>;
   validate(config: AdapterConfig): Promise<ValidationResult>;
   listNotes(): Promise<NoteMetadata[]>;
