@@ -7,7 +7,8 @@
     "build": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/web build",
     "preview": "pnpm --filter @unkeep/web preview",
     "check": "pnpm --filter @unkeep/web check",
-    "lint": "pnpm --filter @unkeep/web lint"
+    "lint": "pnpm --filter @unkeep/web lint",
+    "test": "pnpm --filter @unkeep/core test && pnpm --filter @unkeep/web test"
   },
   "engines": {
     "node": ">=20"
@@ -16,5 +17,8 @@
     "onlyBuiltDependencies": [
       "esbuild"
     ]
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
   }
 }
