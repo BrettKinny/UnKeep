@@ -1,4 +1,13 @@
-import { LocalOnlyAdapter, GitAdapter, S3Adapter, WebDAVAdapter } from '@unkeep/core';
+import {
+  LocalOnlyAdapter,
+  GitAdapter,
+  S3Adapter,
+  WebDAVAdapter,
+  DropboxAdapter,
+  GoogleDriveAdapter,
+  OneDriveAdapter,
+  PCloudAdapter,
+} from '@unkeep/core';
 import type { StorageAdapter } from '@unkeep/core';
 
 export interface AdapterEntry {
@@ -11,6 +20,10 @@ export const adapters: AdapterEntry[] = [
   { id: 'git', create: () => new GitAdapter() },
   { id: 's3', create: () => new S3Adapter() },
   { id: 'webdav', create: () => new WebDAVAdapter() },
+  { id: 'dropbox', create: () => new DropboxAdapter() },
+  { id: 'googledrive', create: () => new GoogleDriveAdapter() },
+  { id: 'onedrive', create: () => new OneDriveAdapter() },
+  { id: 'pcloud', create: () => new PCloudAdapter() },
 ];
 
 export function getAdapter(id: string): StorageAdapter {

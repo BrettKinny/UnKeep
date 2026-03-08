@@ -3,8 +3,14 @@
   import type { Note } from '@unkeep/core';
   import { noteStore } from '$lib/noteStore.svelte';
   import { darkMode } from '$lib/darkMode.svelte';
-  import { getSavedConfig } from '$lib/adapterConfig';
+  import { getSavedConfig, saveConfig } from '$lib/adapterConfig';
   import { getAdapter } from '$lib/adapterRegistry';
+  import {
+    getSavedTokens,
+    saveTokens,
+    isTokenExpired,
+    refreshAccessToken,
+  } from '$lib/oauth';
   import NoteInput from '$lib/components/NoteInput.svelte';
   import NoteGrid from '$lib/components/NoteGrid.svelte';
   import NoteEditor from '$lib/components/NoteEditor.svelte';
@@ -25,6 +31,33 @@
     if (saved) {
       try {
         const adapter = getAdapter(saved.adapterId);
+
+        // Refresh expired OAuth tokens before initializing
+        const tokens = getSavedTokens();
+        if (tokens && tokens.adapterId === saved.adapterId && adapter.oauthConfig) {
+          if (isTokenExpired(tokens) && tokens.refreshToken) {
+            try {
+              const clientId = saved.config.clientId as string;
+              const clientSecret = saved.config.clientSecret as string | undefined;
+              const refreshed = await refreshAccessToken(
+                adapter.oauthConfig,
+                clientId,
+                tokens.refreshToken,
+                clientSecret,
+              );
+              // Update stored tokens and adapter config with new access token
+              saveTokens(saved.adapterId, refreshed);
+              saved.config.accessToken = refreshed.accessToken;
+              saveConfig(saved.adapterId, saved.config as Record<string, unknown>);
+            } catch (e) {
+              console.error('Token refresh failed, re-auth needed:', e);
+              needsSetup = true;
+              initializing = false;
+              return;
+            }
+          }
+        }
+
         await noteStore.initWithAdapter(adapter, saved.config);
         needsSetup = false;
       } catch (e) {
