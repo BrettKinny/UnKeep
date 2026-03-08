@@ -144,7 +144,7 @@ async function extractZipJsonFiles(buffer: ArrayBuffer): Promise<File[]> {
       let data: Uint8Array;
       if (compMethod === 8) {
         // Deflate — use DecompressionStream
-        const ds = new DecompressionStream('raw');
+        const ds = new DecompressionStream('deflate-raw');
         const writer = ds.writable.getWriter();
         writer.write(rawData);
         writer.close();
@@ -166,7 +166,7 @@ async function extractZipJsonFiles(buffer: ArrayBuffer): Promise<File[]> {
         data = rawData;
       }
       const filename = name.split('/').pop() || name;
-      files.push(new File([data], filename, { type: 'application/json' }));
+      files.push(new File([data as BlobPart], filename, { type: 'application/json' }));
     }
 
     offset = dataStart + compSize;

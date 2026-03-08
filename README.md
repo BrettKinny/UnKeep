@@ -78,7 +78,7 @@ All writes hit IndexedDB first (offline-safe, immediate), then sync to the remot
 
 ### Vercel
 
-Point Vercel at the repo. The `apps/web/vercel.json` handles build commands and SPA rewrites.
+Point Vercel at the repo. The `vercel.json` at the root handles build commands and SPA rewrites.
 
 ### Any Static Host
 
