@@ -2,77 +2,161 @@
 
 *Your notes. Your storage.*
 
-A privacy-first, open-source PWA for ephemeral note-taking. Fast, lightweight, and free from vendor lock-in. Pluggable storage backends, optional end-to-end encryption, and zero server components.
+UnKeep is a privacy-first, open-source note-taking app that runs entirely in your browser. There are no accounts, no servers collecting your data, and no vendor lock-in. You pick where your notes live — your browser's local storage, a Git repo, an S3 bucket, or plain Markdown files on disk — and UnKeep handles the rest.
+
+It's built as a static single-page app (SPA). You can host it on any static file server or use it as an installable PWA on your phone or desktop. Everything — encryption, sync, ZIP parsing, S3 request signing — happens client-side with zero runtime dependencies beyond the browser itself.
 
 ## Quick Start
 
 ```bash
+git clone https://github.com/AkosLukworking/UnKeep.git
+cd UnKeep
 pnpm install
-pnpm dev        # http://localhost:5173
+pnpm dev          # → http://localhost:5173
 ```
 
-Build for production:
+`pnpm dev` builds the core library first, then starts the SvelteKit dev server with hot reload.
+
+For a production build:
 
 ```bash
-pnpm build
-pnpm preview    # preview the production build locally
+pnpm build        # outputs to apps/web/build/
+pnpm preview      # preview the production build locally
+```
+
+Other useful commands:
+
+```bash
+pnpm check        # type-check the SvelteKit app
+pnpm lint         # eslint on the web app
 ```
 
 ## Features
 
-- **Instant note-taking** — open, type, close. Auto-saves with 500ms debounce
-- **Checklist notes** — toggle between text and checklist mode per note
-- **Masonry card grid** with pinned notes at top
-- **Note colors** — 11-color Keep-style palette
-- **Archive & soft delete** with undo snackbar
-- **Search** across all note content (client-side)
-- **Dark mode** — follows OS preference, manually toggleable
-- **Markdown preview** — per-note toggle
-- **Copy to clipboard** — one tap
-- **PWA** — installable on iOS, Android, desktop with full offline support
+- **Instant note-taking** — open, type, close. Auto-saves with 500ms debounce.
+- **Checklist notes** — toggle between text and checklist mode per note.
+- **Masonry card grid** — pinned notes float to the top.
+- **Note colors** — 11-color palette (just like Google Keep).
+- **Archive & soft delete** — with undo snackbar so you can recover mistakes.
+- **Search** — full-text client-side search across all notes.
+- **Dark mode** — follows OS preference, manually toggleable.
+- **Markdown preview** — per-note toggle for rendered Markdown.
+- **PWA** — installable on iOS, Android, and desktop with full offline support.
+- **Takeout importer** — drag-drop a Google Takeout ZIP to import all your Keep notes, checklists, colors, and timestamps.
+- **Quick Send** — share a note via URL. The content is compressed and encoded in the URL fragment (`#`), so it never touches a server.
+- **E2E encryption** — AES-256-GCM with PBKDF2 key derivation (600k iterations). The passphrase is never stored.
 
-### Beyond Keep
+## Architecture
 
-- **Takeout importer** — drag-drop a Takeout ZIP and import all notes, checklists, colors, and timestamps
-- **Quick Send** — generate a share link with the note content encoded in the URL fragment (never hits a server)
-- **E2E encryption** — AES-256-GCM with PBKDF2 key derivation; passphrase never stored
-- **Pluggable storage** — swap backends without changing anything else
+UnKeep is a **pnpm monorepo** with two packages:
+
+```
+UnKeep/
+├── packages/core/          ← Pure TypeScript library (no framework deps)
+│   └── src/
+│       ├── types.ts         # Note, ChecklistItem, NoteColor
+│       ├── adapter.ts       # StorageAdapter interface
+│       ├── adapters/        # Adapter implementations
+│       │   ├── local.ts     #   IndexedDB (default, offline-first)
+│       │   ├── local-markdown.ts  #   File System Access API
+│       │   ├── git.ts       #   GitHub / Gitea / Forgejo
+│       │   └── s3.ts        #   AWS S3 / MinIO / R2 / B2
+│       ├── markdown.ts      # Note ↔ Markdown conversion
+│       └── validation.ts    # Input sanitization
+│
+├── apps/web/               ← SvelteKit SPA (adapter-static)
+│   └── src/
+│       ├── lib/
+│       │   ├── noteStore.svelte.ts   # Central state (Svelte 5 runes)
+│       │   ├── adapterRegistry.ts    # Adapter discovery + factory
+│       │   ├── encryption.ts         # AES-256-GCM via Web Crypto
+│       │   ├── quickSend.ts          # Compress + base64url encode
+│       │   ├── keepImporter.ts       # Google Takeout ZIP parser
+│       │   └── components/           # UI components
+│       └── routes/                   # SvelteKit pages
+│
+├── pnpm-workspace.yaml
+└── package.json
+```
+
+### How the pieces connect
+
+1. **`@unkeep/core`** defines the data model (`Note` type) and the `StorageAdapter` interface. It has no framework dependencies — it's just TypeScript compiled with `tsc`. You need to build it before the web app can use it (`pnpm --filter @unkeep/core build`).
+
+2. **`apps/web`** is the SvelteKit frontend. It imports `@unkeep/core` as a workspace dependency and uses it to read/write notes through whichever adapter the user has configured.
+
+3. **`noteStore`** (`apps/web/src/lib/noteStore.svelte.ts`) is the singleton reactive store that owns all note state. It uses Svelte 5 runes (`$state`, `$derived`) for reactivity. When you create, edit, or delete a note, the store debounces the write (500ms) and delegates persistence to the active `StorageAdapter`.
+
+4. **`adapterRegistry`** (`apps/web/src/lib/adapterRegistry.ts`) maps adapter IDs to factory functions. Remote adapters (Git, S3) are lazily imported so they don't bloat the initial bundle.
+
+### Data flow
+
+```
+User action (type, pin, delete, …)
+  → noteStore.updateNote()
+    → debounced save (500ms)
+      → adapter.saveNote()
+        → IndexedDB (always, for offline safety)
+        → remote backend (Git API / S3 PUT / filesystem write)
+```
+
+All writes hit IndexedDB first. This means the app is always usable offline — remote sync happens in the background and can fail without data loss.
 
 ## Storage Adapters
 
-| Adapter | Covers | Config |
-|---------|--------|--------|
-| **Local Only** | Browser IndexedDB | None |
-| **Git** | GitHub, Gitea, Forgejo | API URL, owner, repo, token |
-| **S3** | AWS S3, MinIO, Cloudflare R2, Backblaze B2 | Endpoint, bucket, credentials |
-| **Local Markdown** | Local filesystem (File System Access API) | Directory picker |
+The core abstraction in UnKeep is the **`StorageAdapter` interface** (`packages/core/src/adapter.ts`). Every storage backend implements the same contract:
 
-All writes hit IndexedDB first (offline-safe, immediate), then sync to the remote adapter.
+```typescript
+interface StorageAdapter {
+  id: string;
+  displayName: string;
+  description: string;
+  configSchema: ConfigField[];       // drives the setup wizard UI
 
-## Project Structure
-
-```
-├── packages/core/        # Types, StorageAdapter interface, adapters
-│   └── src/
-│       ├── types.ts       # Note, ChecklistItem, NoteColor
-│       ├── adapter.ts     # StorageAdapter interface
-│       └── adapters/      # local, local-markdown, git, s3
-├── apps/web/             # SvelteKit SPA
-│   └── src/
-│       ├── lib/           # Stores, utilities, components
-│       └── routes/        # Pages (main app + Quick Send receiver)
-├── package.json          # Workspace root
-└── pnpm-workspace.yaml
+  init(config: AdapterConfig): Promise<void>;
+  validate(config: AdapterConfig): Promise<ValidationResult>;
+  listNotes(): Promise<NoteMetadata[]>;
+  getNote(id: string): Promise<Note>;
+  saveNote(note: Note): Promise<void>;
+  deleteNote(id: string): Promise<void>;
+  sync(): Promise<SyncResult>;
+}
 ```
 
-## Tech Stack
+This means you can swap where your notes are stored without changing anything else — the UI, sync logic, and encryption layer don't care which adapter is active.
 
-- **SvelteKit** (SPA mode with `adapter-static`)
-- **Svelte 5** with runes (`$state`, `$derived`, `$props`)
-- **TypeScript** throughout
-- **TailwindCSS v4**
-- **Web Crypto API** for encryption
-- **No external runtime dependencies** for S3 signing, ZIP parsing, or crypto
+### Built-in adapters
+
+| Adapter | What it does | Config needed |
+|---------|-------------|---------------|
+| **Local Only** | Stores notes in browser IndexedDB. No network, no setup. | None |
+| **Local Markdown** | Saves each note as a `.md` file in a folder on your device using the File System Access API. Works in Chrome and Edge. | Pick a directory |
+| **Git** | Stores notes as Markdown files in a GitHub, Gitea, or Forgejo repo. Syncs via the platform's REST API. | API URL, owner, repo, personal access token |
+| **S3** | Stores notes as JSON objects in any S3-compatible bucket. Signs requests client-side using AWS Signature V4 (no SDK needed). | Endpoint, region, bucket, access key, secret key |
+
+### Writing your own adapter
+
+To add a new storage backend:
+
+1. Create a new file in `packages/core/src/adapters/` that implements `StorageAdapter`.
+2. Export it from `packages/core/src/index.ts`.
+3. Register it in `apps/web/src/lib/adapterRegistry.ts` so the setup wizard picks it up.
+
+The `configSchema` array on your adapter drives the setup wizard automatically — each `ConfigField` becomes a form input:
+
+```typescript
+configSchema: [
+  { key: 'apiUrl', label: 'API URL', type: 'url', required: true },
+  { key: 'token', label: 'Access Token', type: 'password', required: true },
+]
+```
+
+## Key Design Decisions
+
+- **No server component.** UnKeep is a static SPA. All storage, encryption, and sync logic runs in the browser. You deploy it to any static host and you're done.
+- **Offline-first.** Every write goes to IndexedDB before hitting any remote backend. The app works without a network connection.
+- **No runtime dependencies for crypto/S3/ZIP.** S3 request signing (AWS Sig V4), AES-256-GCM encryption, PBKDF2 key derivation, and Google Takeout ZIP parsing are all implemented using browser-native APIs (`Web Crypto`, `CompressionStream`, `ReadableStream`). This keeps the bundle small and avoids supply-chain risk.
+- **Svelte 5 runes only.** All reactive state uses `$state`, `$derived`, and `$props`. No legacy `$:` syntax or Svelte stores.
 
 ## Deploying
 
@@ -84,11 +168,19 @@ Point Vercel at the repo. The `vercel.json` at the root handles build commands a
 
 ```bash
 pnpm build
-# Serve apps/web/build/ with any static server
+# Serve apps/web/build/ with any static file server
 # Configure a fallback to index.html for SPA routing
 ```
 
-Works with Netlify, Cloudflare Pages, GitHub Pages, nginx, Caddy, etc.
+Works with Netlify, Cloudflare Pages, GitHub Pages, nginx, Caddy, S3 + CloudFront, etc.
+
+## Tech Stack
+
+- [SvelteKit](https://svelte.dev/docs/kit) — SPA mode with `adapter-static`
+- [Svelte 5](https://svelte.dev/docs/svelte) — runes-based reactivity
+- [TypeScript](https://www.typescriptlang.org/) — throughout both packages
+- [TailwindCSS v4](https://tailwindcss.com/) — via Vite plugin
+- [pnpm](https://pnpm.io/) — workspace management
 
 ## License
 
