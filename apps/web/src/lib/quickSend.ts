@@ -1,4 +1,8 @@
 export async function encodeNote(content: string): Promise<string> {
+  if (content.length > 102400) {
+    throw new Error('Note is too large to share via Quick Send (max 100KB)');
+  }
+
   const data = new TextEncoder().encode(content);
 
   // Compress with deflate-raw
@@ -62,6 +66,10 @@ export async function decodeNote(encoded: string): Promise<string> {
   for (const chunk of chunks) {
     data.set(chunk, pos);
     pos += chunk.length;
+  }
+
+  if (totalLen > 1048576) {
+    throw new Error('Decoded note exceeds 1MB limit — the URL may be malicious');
   }
 
   return new TextDecoder().decode(data);

@@ -27,6 +27,7 @@
       class:border-transparent={selected !== color.name}
       style="background-color: {color.css}"
       title={color.name}
+      aria-label="Set color to {color.name}"
     ></button>
   {/each}
 </div>

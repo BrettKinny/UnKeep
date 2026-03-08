@@ -126,6 +126,7 @@ export async function startOAuthPopup(params: OAuthFlowParams): Promise<string> 
   // Wait for the callback page to post a message back
   return new Promise<string>((resolve, reject) => {
     const handleMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
       if (event.data?.type !== 'unkeep-oauth-callback') return;
 
       window.removeEventListener('message', handleMessage);

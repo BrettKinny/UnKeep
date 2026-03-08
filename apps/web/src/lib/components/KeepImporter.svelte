@@ -57,12 +57,16 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="w-full max-w-lg bg-surface rounded-lg shadow-xl"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Import notes"
+    tabindex="-1"
     onclick={(e) => e.stopPropagation()}
     onkeydown={() => {}}
   >
     <div class="flex items-center justify-between p-4 border-b border-border">
       <h2 class="text-lg font-semibold text-on-surface">Import Notes</h2>
-      <button onclick={onClose} class="p-1 hover:bg-surface-dim rounded-full text-on-surface-muted">
+      <button onclick={onClose} class="p-1 hover:bg-surface-dim rounded-full text-on-surface-muted" aria-label="Close">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12"/></svg>
       </button>
     </div>

@@ -6,65 +6,13 @@ import type {
   SyncResult,
   ConfigField,
 } from '../adapter.js';
+import { noteToMarkdown, markdownToNote } from '../markdown.js';
+import { validateNoteId, isValidNoteId } from '../validation.js';
 
 const HANDLE_DB_NAME = 'unkeep-fs-handles';
 const HANDLE_DB_VERSION = 1;
 const HANDLE_STORE = 'handles';
 const HANDLE_KEY = 'local-markdown-dir';
-
-function noteToMarkdown(note: Note): string {
-  const frontmatter = [
-    '---',
-    `id: ${note.id}`,
-    `createdAt: ${note.createdAt}`,
-    `updatedAt: ${note.updatedAt}`,
-    `pinned: ${note.pinned}`,
-    `archived: ${note.archived}`,
-    note.color ? `color: ${note.color}` : null,
-    note.deleted ? `deleted: ${note.deleted}` : null,
-    note.checkboxes ? `checkboxes: ${JSON.stringify(note.checkboxes)}` : null,
-    '---',
-  ]
-    .filter(Boolean)
-    .join('\n');
-
-  return `${frontmatter}\n\n${note.content}`;
-}
-
-function markdownToNote(content: string): Note {
-  const fmMatch = content.match(/^---\n([\s\S]*?)\n---\n\n?([\s\S]*)$/);
-  if (!fmMatch) throw new Error('Invalid note format: no frontmatter');
-
-  const fm = fmMatch[1];
-  const body = fmMatch[2] || '';
-
-  function getVal(key: string): string | undefined {
-    const m = fm.match(new RegExp(`^${key}:\\s*(.+)$`, 'm'));
-    return m?.[1]?.trim();
-  }
-
-  const checkboxesRaw = getVal('checkboxes');
-  let checkboxes;
-  if (checkboxesRaw) {
-    try {
-      checkboxes = JSON.parse(checkboxesRaw);
-    } catch {
-      /* ignore */
-    }
-  }
-
-  return {
-    id: getVal('id') || '',
-    createdAt: parseInt(getVal('createdAt') || '0', 10),
-    updatedAt: parseInt(getVal('updatedAt') || '0', 10),
-    pinned: getVal('pinned') === 'true',
-    archived: getVal('archived') === 'true',
-    color: (getVal('color') as Note['color']) || undefined,
-    deleted: getVal('deleted') === 'true' ? true : undefined,
-    checkboxes,
-    content: body,
-  };
-}
 
 function openHandleDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -199,6 +147,7 @@ export class LocalMarkdownAdapter implements StorageAdapter {
     for await (const [name, handle] of dir.entries()) {
       if (handle.kind !== 'file' || !name.endsWith('.md')) continue;
       const id = name.replace(/\.md$/, '');
+      if (!isValidNoteId(id)) continue;
       // Read file to get metadata
       try {
         const file = await (handle as FileSystemFileHandle).getFile();
@@ -215,6 +164,7 @@ export class LocalMarkdownAdapter implements StorageAdapter {
   }
 
   async getNote(id: string): Promise<Note> {
+    validateNoteId(id);
     const dir = this.getDir();
     const fileHandle = await dir.getFileHandle(`${id}.md`);
     const file = await fileHandle.getFile();
@@ -223,6 +173,7 @@ export class LocalMarkdownAdapter implements StorageAdapter {
   }
 
   async saveNote(note: Note): Promise<void> {
+    validateNoteId(note.id);
     const dir = this.getDir();
     const fileHandle = await dir.getFileHandle(`${note.id}.md`, { create: true });
     const writable = await fileHandle.createWritable();
@@ -231,6 +182,7 @@ export class LocalMarkdownAdapter implements StorageAdapter {
   }
 
   async deleteNote(id: string): Promise<void> {
+    validateNoteId(id);
     const dir = this.getDir();
     try {
       // Soft delete: update the file with deleted flag
