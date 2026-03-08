@@ -32,9 +32,9 @@
   /** Whether the current adapter uses OAuth. */
   let usesOAuth = $derived(!!selectedAdapter?.oauthConfig);
 
-  function pickAdapter(id: string) {
+  async function pickAdapter(id: string) {
     selectedId = id;
-    selectedAdapter = getAdapter(id);
+    selectedAdapter = await getAdapter(id);
     configValues = {};
     oauthComplete = false;
     for (const field of selectedAdapter.configSchema) {
@@ -136,13 +136,12 @@
       <div class="space-y-3">
         <h2 class="text-lg font-medium text-on-surface mb-4">Choose where to store your notes</h2>
         {#each adapters as entry}
-          {@const adapter = getAdapter(entry.id)}
           <button
             onclick={() => pickAdapter(entry.id)}
             class="w-full text-left p-4 rounded-lg border border-border hover:border-primary hover:bg-surface-dim transition-colors"
           >
-            <div class="font-medium text-on-surface">{adapter.displayName}</div>
-            <div class="text-sm text-on-surface-muted mt-1">{adapter.description}</div>
+            <div class="font-medium text-on-surface">{entry.displayName}</div>
+            <div class="text-sm text-on-surface-muted mt-1">{entry.description}</div>
           </button>
         {/each}
       </div>

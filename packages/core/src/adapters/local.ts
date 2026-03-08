@@ -6,6 +6,7 @@ import type {
   SyncResult,
   ConfigField,
 } from '../adapter.js';
+import { validateNoteId } from '../validation.js';
 
 const DB_NAME = 'unkeep';
 const DB_VERSION = 1;
@@ -80,6 +81,7 @@ export class LocalOnlyAdapter implements StorageAdapter {
   }
 
   async getNote(id: string): Promise<Note> {
+    validateNoteId(id);
     const db = this.getDB();
     const note = await txn<Note | undefined>(db, 'readonly', (store) => store.get(id));
     if (!note) throw new Error(`Note not found: ${id}`);
@@ -87,17 +89,24 @@ export class LocalOnlyAdapter implements StorageAdapter {
   }
 
   async saveNote(note: Note): Promise<void> {
+    validateNoteId(note.id);
     const db = this.getDB();
     await txn(db, 'readwrite', (store) => store.put(note));
   }
 
   async deleteNote(id: string): Promise<void> {
+    validateNoteId(id);
     const db = this.getDB();
     // Soft delete
     const note = await this.getNote(id);
     note.deleted = true;
     note.updatedAt = Date.now();
     await txn(db, 'readwrite', (store) => store.put(note));
+  }
+
+  async getAllNotes(): Promise<Note[]> {
+    const db = this.getDB();
+    return txn<Note[]>(db, 'readonly', (store) => store.getAll());
   }
 
   async sync(): Promise<SyncResult> {

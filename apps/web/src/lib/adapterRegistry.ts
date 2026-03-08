@@ -1,24 +1,50 @@
-import {
-  LocalOnlyAdapter,
-  LocalMarkdownAdapter,
-  GitAdapter,
-  S3Adapter,
-} from '@unkeep/core';
+import { LocalOnlyAdapter } from '@unkeep/core';
 import type { StorageAdapter } from '@unkeep/core';
 
 export interface AdapterEntry {
   id: string;
-  create: () => StorageAdapter;
+  displayName: string;
+  description: string;
+  create: () => StorageAdapter | Promise<StorageAdapter>;
 }
 
 export const adapters: AdapterEntry[] = [
-  { id: 'local', create: () => new LocalOnlyAdapter() },
-  { id: 'local-markdown', create: () => new LocalMarkdownAdapter() },
-  { id: 'git', create: () => new GitAdapter() },
-  { id: 's3', create: () => new S3Adapter() },
+  {
+    id: 'local',
+    displayName: 'Local Only',
+    description: 'Store notes in your browser. No sync, no account needed.',
+    create: () => new LocalOnlyAdapter(),
+  },
+  {
+    id: 'local-markdown',
+    displayName: 'Local Markdown Files',
+    description: 'Save notes as .md files in a folder on your device (Chrome/Edge).',
+    create: async () => {
+      const { LocalMarkdownAdapter } = await import('@unkeep/core');
+      return new LocalMarkdownAdapter();
+    },
+  },
+  {
+    id: 'git',
+    displayName: 'Git Repository',
+    description: 'Store notes as markdown files in a GitHub, Gitea, or Forgejo repository.',
+    create: async () => {
+      const { GitAdapter } = await import('@unkeep/core');
+      return new GitAdapter();
+    },
+  },
+  {
+    id: 's3',
+    displayName: 'S3-Compatible Storage',
+    description: 'Store notes in any S3-compatible bucket (AWS S3, MinIO, Cloudflare R2, Backblaze B2).',
+    create: async () => {
+      const { S3Adapter } = await import('@unkeep/core');
+      return new S3Adapter();
+    },
+  },
 ];
 
-export function getAdapter(id: string): StorageAdapter {
+export async function getAdapter(id: string): Promise<StorageAdapter> {
   const entry = adapters.find(a => a.id === id);
   if (!entry) throw new Error(`Unknown adapter: ${id}`);
   return entry.create();

@@ -6,6 +6,7 @@ import type {
   SyncResult,
   ConfigField,
 } from '../adapter.js';
+import { validateNoteId, isValidNoteId } from '../validation.js';
 
 interface S3Config {
   endpoint: string;
@@ -191,6 +192,7 @@ export class S3Adapter implements StorageAdapter {
       const key = match[1];
       if (key.endsWith('.json')) {
         const id = key.replace(this.config.prefix, '').replace(/\.json$/, '');
+        if (!isValidNoteId(id)) continue;
         notes.push({ id, updatedAt: 0 });
       }
     }
@@ -199,6 +201,7 @@ export class S3Adapter implements StorageAdapter {
   }
 
   async getNote(id: string): Promise<Note> {
+    validateNoteId(id);
     if (!this.config) throw new Error('S3Adapter not initialized');
     const key = `${this.config.prefix}${id}.json`;
     const url = this.objectUrl(key);
@@ -211,6 +214,7 @@ export class S3Adapter implements StorageAdapter {
   }
 
   async saveNote(note: Note): Promise<void> {
+    validateNoteId(note.id);
     if (!this.config) throw new Error('S3Adapter not initialized');
     const key = `${this.config.prefix}${note.id}.json`;
     const url = this.objectUrl(key);
@@ -230,6 +234,7 @@ export class S3Adapter implements StorageAdapter {
   }
 
   async deleteNote(id: string): Promise<void> {
+    validateNoteId(id);
     if (!this.config) throw new Error('S3Adapter not initialized');
     const key = `${this.config.prefix}${id}.json`;
     const url = this.objectUrl(key);

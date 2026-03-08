@@ -53,4 +53,5 @@ export interface StorageAdapter {
   saveNote(note: Note): Promise<void>;
   deleteNote(id: string): Promise<void>;
   sync(): Promise<SyncResult>;
+  getAllNotes?(): Promise<Note[]>;
 }

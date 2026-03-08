@@ -1,6 +1,7 @@
 import { nanoid } from 'nanoid';
 import type { Note, NoteColor, ChecklistItem, StorageAdapter } from '@unkeep/core';
 import { LocalOnlyAdapter } from '@unkeep/core';
+import { toastStore } from './toast.svelte';
 
 // Debounce timer for auto-save
 let saveTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
@@ -75,19 +76,24 @@ class NoteStore {
 
   private async loadNotes() {
     if (!this.adapter) return;
-    const metaList = await this.adapter.listNotes();
-    const loaded: Note[] = [];
-    for (const meta of metaList) {
-      if (!meta.deleted) {
-        try {
-          const note = await this.adapter.getNote(meta.id);
-          loaded.push(note);
-        } catch {
-          // Skip notes that fail to load
+    if (this.adapter.getAllNotes) {
+      const all = await this.adapter.getAllNotes();
+      this.notes = all.filter(n => !n.deleted);
+    } else {
+      const metaList = await this.adapter.listNotes();
+      const loaded: Note[] = [];
+      for (const meta of metaList) {
+        if (!meta.deleted) {
+          try {
+            const note = await this.adapter.getNote(meta.id);
+            loaded.push(note);
+          } catch {
+            // Skip notes that fail to load
+          }
         }
       }
+      this.notes = loaded;
     }
-    this.notes = loaded;
   }
 
   createNote(content: string = ''): Note {
@@ -132,6 +138,7 @@ class NoteStore {
     } catch (e) {
       console.error('Failed to save note:', e);
       this.syncStatus = 'error';
+      toastStore.show('Failed to save note');
     }
   }
 
@@ -139,11 +146,21 @@ class NoteStore {
     const idx = this.notes.findIndex(n => n.id === id);
     if (idx === -1) return null;
     const note = { ...this.notes[idx] };
+    const previousUpdatedAt = this.notes[idx].updatedAt;
     // Soft delete
     this.notes[idx].deleted = true;
     this.notes[idx].updatedAt = Date.now();
     if (this.adapter) {
-      await this.adapter.deleteNote(id);
+      try {
+        await this.adapter.deleteNote(id);
+      } catch (e) {
+        console.error('Failed to delete note:', e);
+        // Revert the soft delete
+        this.notes[idx].deleted = false;
+        this.notes[idx].updatedAt = previousUpdatedAt;
+        toastStore.show('Failed to delete note');
+        return null;
+      }
     }
     // Remove from visible array
     this.notes = this.notes.filter(n => n.id !== id || !n.deleted);

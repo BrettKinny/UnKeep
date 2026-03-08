@@ -21,6 +21,10 @@ export {
   generateState,
 } from './oauth.js';
 
+export { validateNoteId, isValidNoteId } from './validation.js';
+
+export { noteToMarkdown, markdownToNote } from './markdown.js';
+
 export { LocalOnlyAdapter } from './adapters/local.js';
 export { LocalMarkdownAdapter } from './adapters/local-markdown.js';
 export { GitAdapter } from './adapters/git.js';

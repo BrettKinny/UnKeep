@@ -6,6 +6,8 @@ import type {
   SyncResult,
   ConfigField,
 } from '../adapter.js';
+import { noteToMarkdown, markdownToNote } from '../markdown.js';
+import { validateNoteId, isValidNoteId } from '../validation.js';
 
 interface GitConfig {
   baseUrl: string;
@@ -23,9 +25,6 @@ interface GitFileInfo {
   content?: string;
 }
 
-// SHA cache for update/delete operations
-const shaCache = new Map<string, string>();
-
 function parseConfig(config: AdapterConfig): GitConfig {
   return {
     baseUrl: (config.baseUrl as string).replace(/\/$/, ''),
@@ -34,54 +33,6 @@ function parseConfig(config: AdapterConfig): GitConfig {
     branch: (config.branch as string) || 'main',
     path: ((config.path as string) || 'notes/').replace(/\/$/, '') + '/',
     token: config.token as string,
-  };
-}
-
-function noteToMarkdown(note: Note): string {
-  const frontmatter = [
-    '---',
-    `id: ${note.id}`,
-    `createdAt: ${note.createdAt}`,
-    `updatedAt: ${note.updatedAt}`,
-    `pinned: ${note.pinned}`,
-    `archived: ${note.archived}`,
-    note.color ? `color: ${note.color}` : null,
-    note.deleted ? `deleted: ${note.deleted}` : null,
-    note.checkboxes ? `checkboxes: ${JSON.stringify(note.checkboxes)}` : null,
-    '---',
-  ].filter(Boolean).join('\n');
-
-  return `${frontmatter}\n\n${note.content}`;
-}
-
-function markdownToNote(content: string): Note {
-  const fmMatch = content.match(/^---\n([\s\S]*?)\n---\n\n?([\s\S]*)$/);
-  if (!fmMatch) throw new Error('Invalid note format: no frontmatter');
-
-  const fm = fmMatch[1];
-  const body = fmMatch[2] || '';
-
-  function getVal(key: string): string | undefined {
-    const m = fm.match(new RegExp(`^${key}:\\s*(.+)$`, 'm'));
-    return m?.[1]?.trim();
-  }
-
-  const checkboxesRaw = getVal('checkboxes');
-  let checkboxes;
-  if (checkboxesRaw) {
-    try { checkboxes = JSON.parse(checkboxesRaw); } catch { /* ignore */ }
-  }
-
-  return {
-    id: getVal('id') || '',
-    createdAt: parseInt(getVal('createdAt') || '0', 10),
-    updatedAt: parseInt(getVal('updatedAt') || '0', 10),
-    pinned: getVal('pinned') === 'true',
-    archived: getVal('archived') === 'true',
-    color: (getVal('color') as Note['color']) || undefined,
-    deleted: getVal('deleted') === 'true' ? true : undefined,
-    checkboxes,
-    content: body,
   };
 }
 
@@ -140,6 +91,7 @@ export class GitAdapter implements StorageAdapter {
   ];
 
   private config: GitConfig | null = null;
+  private shaCache = new Map<string, string>();
 
   private headers(): HeadersInit {
     if (!this.config) throw new Error('GitAdapter not initialized');
@@ -193,7 +145,8 @@ export class GitAdapter implements StorageAdapter {
     for (const file of files) {
       if (!file.name.endsWith('.md')) continue;
       const id = file.name.replace(/\.md$/, '');
-      shaCache.set(id, file.sha);
+      if (!isValidNoteId(id)) continue;
+      this.shaCache.set(id, file.sha);
       // We can't get updatedAt from the listing, so we use 0 and rely on getNote for full data
       notes.push({ id, updatedAt: 0 });
     }
@@ -202,6 +155,7 @@ export class GitAdapter implements StorageAdapter {
   }
 
   async getNote(id: string): Promise<Note> {
+    validateNoteId(id);
     if (!this.config) throw new Error('GitAdapter not initialized');
     const url = this.apiUrl(`${this.config.path}${id}.md`) + `?ref=${this.config.branch}`;
     const res = await fetch(url, { headers: this.headers() });
@@ -209,13 +163,14 @@ export class GitAdapter implements StorageAdapter {
     if (!res.ok) throw new Error(`Failed to get note ${id}: ${res.status}`);
 
     const data = await res.json();
-    shaCache.set(id, data.sha);
+    this.shaCache.set(id, data.sha);
 
-    const content = atob(data.content);
+    const content = decodeURIComponent(escape(atob(data.content.replace(/\n/g, ''))));
     return markdownToNote(content);
   }
 
   async saveNote(note: Note): Promise<void> {
+    validateNoteId(note.id);
     if (!this.config) throw new Error('GitAdapter not initialized');
     const path = `${this.config.path}${note.id}.md`;
     const content = btoa(unescape(encodeURIComponent(noteToMarkdown(note))));
@@ -226,7 +181,7 @@ export class GitAdapter implements StorageAdapter {
       branch: this.config.branch,
     };
 
-    const sha = shaCache.get(note.id);
+    const sha = this.shaCache.get(note.id);
     if (sha) body.sha = sha;
 
     const res = await fetch(this.apiUrl(path), {
@@ -238,14 +193,15 @@ export class GitAdapter implements StorageAdapter {
     if (!res.ok) throw new Error(`Failed to save note ${note.id}: ${res.status}`);
 
     const data = await res.json();
-    shaCache.set(note.id, data.content.sha);
+    this.shaCache.set(note.id, data.content.sha);
   }
 
   async deleteNote(id: string): Promise<void> {
+    validateNoteId(id);
     if (!this.config) throw new Error('GitAdapter not initialized');
     const path = `${this.config.path}${id}.md`;
 
-    let sha = shaCache.get(id);
+    let sha = this.shaCache.get(id);
     if (!sha) {
       // Need to fetch the SHA first
       const url = this.apiUrl(path) + `?ref=${this.config.branch}`;
@@ -266,7 +222,49 @@ export class GitAdapter implements StorageAdapter {
     });
 
     if (!res.ok) throw new Error(`Failed to delete note ${id}: ${res.status}`);
-    shaCache.delete(id);
+    this.shaCache.delete(id);
+  }
+
+  async getAllNotes(): Promise<Note[]> {
+    if (!this.config) throw new Error('GitAdapter not initialized');
+    const url = this.apiUrl(this.config.path) + `?ref=${this.config.branch}`;
+    const res = await fetch(url, { headers: this.headers() });
+
+    if (res.status === 404) return [];
+    if (!res.ok) throw new Error(`Failed to list notes: ${res.status}`);
+
+    const files: GitFileInfo[] = await res.json();
+    const mdFiles = files.filter(
+      (f) => f.name.endsWith('.md') && isValidNoteId(f.name.replace(/\.md$/, ''))
+    );
+
+    // Fetch file contents in parallel, batched in groups of 10
+    const batchSize = 10;
+    const notes: Note[] = [];
+
+    for (let i = 0; i < mdFiles.length; i += batchSize) {
+      const batch = mdFiles.slice(i, i + batchSize);
+      const results = await Promise.all(
+        batch.map(async (file) => {
+          const fileUrl =
+            this.apiUrl(`${this.config!.path}${file.name}`) +
+            `?ref=${this.config!.branch}`;
+          const fileRes = await fetch(fileUrl, { headers: this.headers() });
+          if (!fileRes.ok)
+            throw new Error(`Failed to get note ${file.name}: ${fileRes.status}`);
+          const data = await fileRes.json();
+          const id = file.name.replace(/\.md$/, '');
+          this.shaCache.set(id, data.sha);
+          const content = decodeURIComponent(
+            escape(atob(data.content.replace(/\n/g, '')))
+          );
+          return markdownToNote(content);
+        })
+      );
+      notes.push(...results);
+    }
+
+    return notes;
   }
 
   async sync(): Promise<SyncResult> {
