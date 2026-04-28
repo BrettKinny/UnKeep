@@ -9,7 +9,7 @@ It's built as a static single-page app (SPA). You can host it on any static file
 ## Quick Start
 
 ```bash
-git clone https://github.com/AkosLukworking/UnKeep.git
+git clone https://github.com/BrettKinny/UnKeep.git
 cd UnKeep
 pnpm install
 pnpm dev          # → http://localhost:5173
