@@ -2,32 +2,39 @@
 
 *Your notes. Your storage.*
 
-UnKeep is a privacy-first, open-source note-taking PWA with its own small, self-hostable sync protocol. Notes and images are encrypted in the browser before upload, while every device keeps an IndexedDB working copy for local-first editing.
+UnKeep is a privacy-first, open-source note-taking PWA with its own small, self-hostable sync server. Notes and images are encrypted in the browser before upload, while every device keeps an IndexedDB working copy for local-first editing.
 
-It's built as a static single-page app (SPA). You can host it on any static file server or use it as an installable PWA on your phone or desktop. Everything — encryption, sync, ZIP parsing, S3 request signing — happens client-side with zero runtime dependencies beyond the browser itself.
+Run it as a single Docker container on your own hardware (Unraid, a VPS, a NUC under the desk). The server stores only ciphertext and per-device credential hashes — it never sees your vault key or plaintext.
 
 ## Quick Start
+
+### Self-host (recommended)
 
 ```bash
 git clone https://github.com/BrettKinny/UnKeep.git
 cd UnKeep
-pnpm install
-pnpm dev          # → http://localhost:5173
+export UNKEEP_SETUP_TOKEN="$(openssl rand -base64 32)"
+docker compose up --build -d      # → http://localhost:3000
 ```
 
-`pnpm dev` builds the core library first, then starts the SvelteKit dev server with hot reload.
+Put port 3000 behind an HTTPS reverse proxy, Tailscale Serve, or Cloudflare Tunnel. Browsers block the cryptography and PWA features UnKeep needs on insecure non-local origins.
 
-For a production build:
+Open the HTTPS address. On the first device, enter the setup token once — it's exchanged for a revocable device credential and cannot be reused. Save the recovery kit when prompted. See the [self-hosting guide](docs/self-hosting.md) for pairing additional devices, backups, and Unraid settings.
+
+### Develop locally
 
 ```bash
-pnpm build        # outputs to apps/web/build/
-pnpm preview      # preview the production build locally
+pnpm install
+pnpm dev          # builds core, then starts SvelteKit dev server → http://localhost:5173
 ```
 
 Other useful commands:
 
 ```bash
-pnpm check        # type-check the SvelteKit app
+pnpm build        # build core + web (outputs to apps/web/build/)
+pnpm start        # run the relay server (apps/server)
+pnpm test         # core + web + server tests
+pnpm check        # svelte-kit sync + svelte-check (type checking)
 pnpm lint         # eslint on the web app
 ```
 
@@ -49,46 +56,59 @@ pnpm lint         # eslint on the web app
 
 ## Architecture
 
-UnKeep is a **pnpm monorepo** with two packages:
+UnKeep is a **pnpm monorepo** with three packages:
 
 ```
 UnKeep/
 ├── packages/core/          ← Pure TypeScript library (no framework deps)
 │   └── src/
-│       ├── types.ts         # Note, ChecklistItem, NoteColor
+│       ├── types.ts         # Note, ChecklistItem, NoteColor, NoteImage
 │       ├── adapter.ts       # StorageAdapter interface
-│       ├── adapters/        # Adapter implementations
+│       ├── adapters/        # Legacy adapter implementations
 │       │   ├── local.ts     #   IndexedDB (default, offline-first)
 │       │   ├── local-markdown.ts  #   File System Access API
 │       │   ├── git.ts       #   GitHub / Gitea / Forgejo
 │       │   └── s3.ts        #   AWS S3 / MinIO / R2 / B2
+│       ├── crypto.ts        # AES-256-GCM envelopes, key wrapping, recovery kit
 │       ├── markdown.ts      # Note ↔ Markdown conversion
+│       ├── oauth.ts         # PKCE helpers
 │       └── validation.ts    # Input sanitization
 │
 ├── apps/web/               ← SvelteKit SPA (adapter-static)
 │   └── src/
 │       ├── lib/
 │       │   ├── noteStore.svelte.ts   # Central state (Svelte 5 runes)
-│       │   ├── adapterRegistry.ts    # Adapter discovery + factory
-│       │   ├── encryption.ts         # AES-256-GCM via Web Crypto
+│       │   ├── adapterRegistry.ts    # Legacy adapter discovery + factory
+│       │   ├── encryption.ts         # Browser crypto helpers
+│       │   ├── encryptedSync.ts      # Encrypts records, speaks sync protocol
+│       │   ├── relayClient.ts        # HTTP client for the UnKeep relay
+│       │   ├── keyStore.ts           # Master key wrapping + device trust
+│       │   ├── devicePairing.ts     # Pair new devices via short code
 │       │   ├── quickSend.ts          # Compress + base64url encode
 │       │   ├── keepImporter.ts       # Google Takeout ZIP parser
 │       │   └── components/           # UI components
 │       └── routes/                   # SvelteKit pages
 │
+├── apps/server/            ← Zero-dependency Node 22 relay server
+│   └── src/index.mjs       # SQLite-backed sync API + static PWA host
+│
+├── Dockerfile              # Multi-stage build: pnpm build → node:22-alpine
+├── compose.yaml            # Single-container compose definition
 ├── pnpm-workspace.yaml
 └── package.json
 ```
 
 ### How the pieces connect
 
-1. **`@unkeep/core`** defines the data model (`Note` type) and the `StorageAdapter` interface. It has no framework dependencies — it's just TypeScript compiled with `tsc`. You need to build it before the web app can use it (`pnpm --filter @unkeep/core build`).
+1. **`@unkeep/core`** defines the data model (`Note` type), the `StorageAdapter` interface, and the crypto envelope layer (`crypto.ts`). It has no framework dependencies — it's just TypeScript compiled with `tsc`. You need to build it before the web app can use it (`pnpm --filter @unkeep/core build`).
 
-2. **`apps/web`** is the SvelteKit frontend. It imports `@unkeep/core` as a workspace dependency and uses it to read/write notes through whichever adapter the user has configured.
+2. **`apps/web`** is the SvelteKit frontend. It imports `@unkeep/core` as a workspace dependency and uses it to read/write notes through the active storage path.
 
-3. **`noteStore`** (`apps/web/src/lib/noteStore.svelte.ts`) is the singleton reactive store that owns all note state. It uses Svelte 5 runes (`$state`, `$derived`) for reactivity. When you create, edit, or delete a note, the store debounces the write (500ms) and delegates persistence to the active `StorageAdapter`.
+3. **`noteStore`** (`apps/web/src/lib/noteStore.svelte.ts`) is the singleton reactive store that owns all note state. It uses Svelte 5 runes (`$state`, `$derived`) for reactivity. When you create, edit, or delete a note, the store debounces the write (500ms) and delegates persistence to IndexedDB, then queues an encrypted sync.
 
-4. **`EncryptedSync`** (`apps/web/src/lib/encryptedSync.ts`) encrypts records before they leave the browser and speaks the versioned UnKeep HTTP sync protocol.
+4. **`EncryptedSync`** (`apps/web/src/lib/encryptedSync.ts`) + **`relayClient`** (`apps/web/src/lib/relayClient.ts`) encrypt records before they leave the browser and speak the versioned UnKeep HTTP sync protocol to the relay.
+
+5. **`apps/server`** is a zero-dependency Node 22 server backed by SQLite (`/data/unkeep.sqlite`). It serves the built PWA and the sync API from one container. It stores only ciphertext envelopes, device credential hashes, and pairing state — never the vault key.
 
 ### Data flow
 
@@ -99,20 +119,16 @@ User action (type, pin, delete, …)
       → adapter.saveNote()
         → IndexedDB (always, for offline safety)
         → encrypted pending write
-        → UnKeep sync server
+        → UnKeep relay server
 ```
 
 All writes hit IndexedDB first. This means the app is always usable offline — remote sync happens in the background and can fail without data loss.
 
-## Backend
-
-The reference backend is a zero-dependency Node 22 server using SQLite. It serves the PWA and sync API from one container. See [the self-hosting guide](docs/self-hosting.md).
-
-Legacy experimental adapters remain in `packages/core`, but they are not offered by the PoC onboarding flow.
-
 ## Legacy Storage Adapters
 
-The core abstraction in UnKeep is the **`StorageAdapter` interface** (`packages/core/src/adapter.ts`). Every storage backend implements the same contract:
+Before the self-hosted relay existed, UnKeep supported direct-to-backend storage adapters (Git, S3, File System Access, local-only). These remain in `packages/core` for experimentation, but the default onboarding flow now uses the encrypted relay.
+
+The core abstraction is the **`StorageAdapter` interface** (`packages/core/src/adapter.ts`):
 
 ```typescript
 interface StorageAdapter {
@@ -131,10 +147,6 @@ interface StorageAdapter {
 }
 ```
 
-This means you can swap where your notes are stored without changing anything else — the UI, sync logic, and encryption layer don't care which adapter is active.
-
-### Built-in adapters
-
 | Adapter | What it does | Config needed |
 |---------|-------------|---------------|
 | **Local Only** | Stores notes in browser IndexedDB. No network, no setup. | None |
@@ -142,52 +154,42 @@ This means you can swap where your notes are stored without changing anything el
 | **Git** | Stores notes as Markdown files in a GitHub, Gitea, or Forgejo repo. Syncs via the platform's REST API. | API URL, owner, repo, personal access token |
 | **S3** | Stores notes as JSON objects in any S3-compatible bucket. Signs requests client-side using AWS Signature V4 (no SDK needed). | Endpoint, region, bucket, access key, secret key |
 
-### Writing your own adapter
-
-To add a new storage backend:
-
-1. Create a new file in `packages/core/src/adapters/` that implements `StorageAdapter`.
-2. Export it from `packages/core/src/index.ts`.
-3. Register it in `apps/web/src/lib/adapterRegistry.ts` so the setup wizard picks it up.
-
-The `configSchema` array on your adapter drives the setup wizard automatically — each `ConfigField` becomes a form input:
-
-```typescript
-configSchema: [
-  { key: 'apiUrl', label: 'API URL', type: 'url', required: true },
-  { key: 'token', label: 'Access Token', type: 'password', required: true },
-]
-```
+To add a new adapter: create a file in `packages/core/src/adapters/` implementing `StorageAdapter`, export it from `packages/core/src/index.ts`, and register it in `apps/web/src/lib/adapterRegistry.ts`.
 
 ## Key Design Decisions
 
 - **Client-side encryption, opaque relay.** The UI and all encryption run in the browser. The server stores only ciphertext and per-device credential hashes.
 - **Offline-first.** Every write goes to IndexedDB before hitting any remote backend. The app works without a network connection.
-- **No runtime dependencies for crypto/S3/ZIP.** S3 request signing (AWS Sig V4), AES-256-GCM encryption, PBKDF2 key derivation, and Google Takeout ZIP parsing are all implemented using browser-native APIs (`Web Crypto`, `CompressionStream`, `ReadableStream`). This keeps the bundle small and avoids supply-chain risk.
+- **No runtime dependencies for crypto/S3/ZIP.** S3 request signing (AWS Sig V4), AES-256-GCM encryption, PBKDF2 key derivation, and Google Takeout ZIP parsing are all implemented using browser-native APIs (`Web Crypto`, `CompressionStream`, `ReadableStream`). The relay server likewise ships zero npm dependencies — just Node's built-in `http`, `crypto`, and `node:sqlite`.
 - **Svelte 5 runes only.** All reactive state uses `$state`, `$derived`, and `$props`. No legacy `$:` syntax or Svelte stores.
 
 ## Deploying
 
-### Vercel
+### Docker (recommended)
 
-Point Vercel at the repo. The `vercel.json` at the root handles build commands and SPA rewrites.
+```bash
+export UNKEEP_SETUP_TOKEN="$(openssl rand -base64 32)"
+docker compose up --build -d
+```
 
-### Any Static Host
+The container builds the PWA and relay in one image, serves both on port 3000, and persists data to `/data`. Works on Unraid, Docker on a VPS, or any host with Docker installed. See the [self-hosting guide](docs/self-hosting.md) for Unraid-specific settings, reverse proxy guidance, backups, and device pairing.
+
+### Build from source
 
 ```bash
 pnpm build
-# Serve apps/web/build/ with any static file server
-# Configure a fallback to index.html for SPA routing
+pnpm start        # serves apps/web/build/ + sync API on :3000
 ```
 
-Works with Netlify, Cloudflare Pages, GitHub Pages, nginx, Caddy, S3 + CloudFront, etc.
+Requires Node 22+ (for `node:sqlite`). Set `UNKEEP_DATA_DIR` and `UNKEEP_WEB_DIR` if you need to relocate the database or built PWA.
 
 ## Tech Stack
 
 - [SvelteKit](https://svelte.dev/docs/kit) — SPA mode with `adapter-static`
 - [Svelte 5](https://svelte.dev/docs/svelte) — runes-based reactivity
-- [TypeScript](https://www.typescriptlang.org/) — throughout both packages
+- [TypeScript](https://www.typescriptlang.org/) — throughout core and web
 - [TailwindCSS v4](https://tailwindcss.com/) — via Vite plugin
+- [Node 22](https://nodejs.org/) — relay server with built-in `node:sqlite`
 - [pnpm](https://pnpm.io/) — workspace management
 
 ## License
