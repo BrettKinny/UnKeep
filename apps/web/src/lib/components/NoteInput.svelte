@@ -3,16 +3,14 @@
 
   let expanded = $state(false);
   let content = $state('');
+  let title = $state('');
   let inputEl: HTMLTextAreaElement | undefined = $state();
 
-  function handleFocus() {
-    expanded = true;
-  }
-
   function handleClose() {
-    if (content.trim()) {
-      noteStore.createNote(content.trim());
+    if (content.trim() || title.trim()) {
+      noteStore.createNote(content.trim(), title.trim());
       content = '';
+      title = '';
     }
     expanded = false;
   }
@@ -25,12 +23,19 @@
   }
 </script>
 
-<div class="max-w-xl mx-auto mb-8">
+<div class="mx-auto mb-12 max-w-2xl">
   <div
-    class="border border-border rounded-lg shadow-sm transition-all duration-150"
+    class="rounded-lg border border-border bg-surface shadow-sm transition-all duration-150"
     class:shadow-md={expanded}
   >
     {#if expanded}
+      <input
+        data-keep-focus="true"
+        bind:value={title}
+        placeholder="Title"
+        onkeydown={handleKeydown}
+        class="w-full px-4 pt-3 bg-transparent text-on-surface font-medium placeholder:text-on-surface-muted outline-none rounded-t-lg"
+      />
       <textarea
         bind:this={inputEl}
         bind:value={content}

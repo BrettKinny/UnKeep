@@ -23,7 +23,7 @@ describe('parseKeepFiles', () => {
       createdTimestampUsec: 1699000000000000,
     })];
 
-    const { notes, preview } = await parseKeepFiles(files);
+    const { notes } = await parseKeepFiles(files);
     expect(notes).toHaveLength(1);
     expect(notes[0].content).toBe('Hello world');
     expect(notes[0].updatedAt).toBe(1700000000000);

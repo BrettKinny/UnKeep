@@ -1,0 +1,10 @@
+services:
+  unkeep:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      UNKEEP_SETUP_TOKEN: ${UNKEEP_SETUP_TOKEN:?set a long random setup token}
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

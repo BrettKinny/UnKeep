@@ -3,75 +3,29 @@
   import type { Note } from '@unkeep/core';
   import { noteStore } from '$lib/noteStore.svelte';
   import { darkMode } from '$lib/darkMode.svelte';
-  import { getSavedConfig, saveConfig } from '$lib/adapterConfig';
-  import { getAdapter } from '$lib/adapterRegistry';
-  import {
-    getSavedTokens,
-    saveTokens,
-    isTokenExpired,
-    refreshAccessToken,
-  } from '$lib/oauth';
   import NoteInput from '$lib/components/NoteInput.svelte';
   import NoteGrid from '$lib/components/NoteGrid.svelte';
   import NoteEditor from '$lib/components/NoteEditor.svelte';
   import SearchBar from '$lib/components/SearchBar.svelte';
   import SyncStatus from '$lib/components/SyncStatus.svelte';
   import Toast from '$lib/components/Toast.svelte';
-  import SetupWizard from '$lib/components/SetupWizard.svelte';
+  import AuthVaultGate, { type VaultReady } from '$lib/components/AuthVaultGate.svelte';
   import KeepImporter from '$lib/components/KeepImporter.svelte';
 
   let editingNote: Note | null = $state(null);
   let showArchive = $state(false);
   let showImporter = $state(false);
-  let needsSetup = $state(true);
-  let initializing = $state(true);
+  let sidebarOpen = $state(false);
+  let vaultReady = $state(false);
 
-  onMount(async () => {
-    const saved = getSavedConfig();
-    if (saved) {
-      try {
-        const adapter = await getAdapter(saved.adapterId);
-
-        // Refresh expired OAuth tokens before initializing
-        const tokens = getSavedTokens();
-        if (tokens && tokens.adapterId === saved.adapterId && adapter.oauthConfig) {
-          if (isTokenExpired(tokens) && tokens.refreshToken) {
-            try {
-              const clientId = saved.config.clientId as string;
-              const clientSecret = saved.config.clientSecret as string | undefined;
-              const refreshed = await refreshAccessToken(
-                adapter.oauthConfig,
-                clientId,
-                tokens.refreshToken,
-                clientSecret,
-              );
-              // Update stored tokens and adapter config with new access token
-              saveTokens(saved.adapterId, refreshed);
-              saved.config.accessToken = refreshed.accessToken;
-              saveConfig(saved.adapterId, saved.config as Record<string, unknown>);
-            } catch (e) {
-              console.error('Token refresh failed, re-auth needed:', e);
-              needsSetup = true;
-              initializing = false;
-              return;
-            }
-          }
-        }
-
-        await noteStore.initWithAdapter(adapter, saved.config);
-        needsSetup = false;
-      } catch (e) {
-        console.error('Failed to restore adapter config:', e);
-        needsSetup = true;
-      }
-    } else {
-      needsSetup = true;
-    }
-    initializing = false;
+  onMount(() => {
+    sidebarOpen = window.matchMedia('(min-width: 768px)').matches;
   });
 
-  function handleSetupComplete() {
-    needsSetup = false;
+  async function handleVaultReady(vault: VaultReady) {
+    await noteStore.init();
+    await noteStore.enableEncryptedSync(vault.session, vault.masterKey);
+    vaultReady = true;
   }
 
   function handleEditNote(note: Note) {
@@ -83,32 +37,33 @@
   }
 </script>
 
-{#if initializing}
-  <div class="min-h-screen bg-surface flex items-center justify-center">
-    <svg class="w-8 h-8 animate-spin text-primary" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-  </div>
-{:else if needsSetup}
-  <SetupWizard onComplete={handleSetupComplete} />
-{:else}
+<AuthVaultGate onReady={handleVaultReady} onSignedOut={() => { noteStore.disableEncryptedSync(); vaultReady = false; }} />
+
+{#if vaultReady}
   <main class="min-h-screen bg-surface">
-    <!-- Header -->
-    <header class="sticky top-0 z-10 bg-surface/95 backdrop-blur-sm border-b border-border px-4 py-3 flex items-center gap-3">
+    <header class="sticky top-0 z-30 flex h-16 items-center gap-3 border-b border-border bg-surface/95 px-3 pr-16 backdrop-blur-sm">
+      <button
+        onclick={() => sidebarOpen = !sidebarOpen}
+        class="rounded-full p-3 text-on-surface-muted hover:bg-surface-dim hover:text-on-surface"
+        aria-label="Toggle navigation"
+      >
+        <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+      </button>
       <button
         onclick={() => { showArchive = false; }}
-        class="flex items-center gap-2 text-xl font-semibold text-on-surface hover:text-primary transition-colors"
+        class="flex shrink-0 items-center gap-2 text-xl font-semibold text-on-surface"
       >
-        <img src="/icon.svg" alt="" class="w-7 h-7" />
-        <span class="hidden sm:inline">UnKeep</span>
+        <img src="/icon.svg" alt="" class="h-9 w-9" />
+        <span class="hidden md:inline">UnKeep</span>
       </button>
 
-      <SearchBar />
+      <div class="mx-auto w-full max-w-3xl"><SearchBar /></div>
 
-      <div class="ml-auto flex items-center gap-3">
+      <div class="flex shrink-0 items-center gap-1">
         <SyncStatus />
-
         <button
           onclick={() => showImporter = true}
-          class="p-2 rounded-full hover:bg-surface-dim text-on-surface-muted hover:text-on-surface transition-colors"
+          class="hidden rounded-full p-2 text-on-surface-muted hover:bg-surface-dim hover:text-on-surface sm:block"
           title="Import notes"
           aria-label="Import notes"
         >
@@ -116,17 +71,8 @@
         </button>
 
         <button
-          onclick={() => showArchive = !showArchive}
-          class="p-2 rounded-full hover:bg-surface-dim text-on-surface-muted hover:text-on-surface transition-colors"
-          title={showArchive ? 'Back to notes' : 'Archive'}
-          aria-label={showArchive ? 'Back to notes' : 'Archive'}
-        >
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/></svg>
-        </button>
-
-        <button
           onclick={() => darkMode.toggle()}
-          class="p-2 rounded-full hover:bg-surface-dim text-on-surface-muted hover:text-on-surface transition-colors"
+          class="rounded-full p-2 text-on-surface-muted hover:bg-surface-dim hover:text-on-surface"
           title={darkMode.enabled ? 'Light mode' : 'Dark mode'}
           aria-label={darkMode.enabled ? 'Light mode' : 'Dark mode'}
         >
@@ -139,14 +85,47 @@
       </div>
     </header>
 
-    <!-- Content -->
-    <div class="max-w-5xl mx-auto p-4">
+    {#if sidebarOpen}
+      <button class="fixed inset-0 z-10 bg-black/30 md:hidden" aria-label="Close navigation" onclick={() => sidebarOpen = false}></button>
+    {/if}
+    <aside
+      class="fixed bottom-0 left-0 top-16 z-20 w-64 border-r border-border bg-surface py-3 transition-transform"
+      class:-translate-x-full={!sidebarOpen}
+    >
+      <nav class="space-y-1 pr-3">
+        <button
+          class="flex w-full items-center gap-5 rounded-r-full px-6 py-3 text-sm font-medium {!showArchive ? 'bg-primary/15 text-primary' : ''}"
+          onclick={() => { showArchive = false; sidebarOpen = false; }}
+        >
+          <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 18h6M10 22h4M8 14a7 7 0 118 0c-1 1-2 2-2 4h-4c0-2-1-3-2-4z"/></svg>
+          Notes
+        </button>
+        <button
+          class="flex w-full items-center gap-5 rounded-r-full px-6 py-3 text-sm font-medium {showArchive ? 'bg-primary/15 text-primary' : ''}"
+          onclick={() => { showArchive = true; sidebarOpen = false; }}
+        >
+          <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/></svg>
+          Archive
+        </button>
+        <button
+          class="flex w-full items-center gap-5 rounded-r-full px-6 py-3 text-sm font-medium hover:bg-surface-dim"
+          onclick={() => { showImporter = true; sidebarOpen = false; }}
+        >
+          <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+          Import from Keep
+        </button>
+      </nav>
+      <p class="absolute bottom-4 left-6 text-xs text-on-surface-muted">End-to-end encrypted</p>
+    </aside>
+
+    <div class="px-4 py-8 transition-[margin] md:px-8 {sidebarOpen ? 'md:ml-64' : ''}">
+      <div class="mx-auto max-w-7xl">
       {#if noteStore.loading}
         <div class="flex items-center justify-center py-16">
           <svg class="w-8 h-8 animate-spin text-primary" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
         </div>
       {:else if showArchive}
-        <h2 class="text-lg font-medium text-on-surface mb-4">Archive</h2>
+        <h2 class="mb-5 text-sm font-medium uppercase tracking-wide text-on-surface-muted">Archive</h2>
         <NoteGrid
           pinnedNotes={[]}
           unpinnedNotes={noteStore.archivedNotes}
@@ -161,6 +140,7 @@
           onEdit={handleEditNote}
         />
       {/if}
+      </div>
     </div>
   </main>
 
