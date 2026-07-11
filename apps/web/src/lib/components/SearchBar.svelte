@@ -14,7 +14,7 @@
   }
 </script>
 
-<div class="relative w-full sm:w-64 max-w-xl flex items-center min-w-0">
+<div class="relative flex w-full min-w-0 items-center">
   <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-on-surface-muted" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
   <input
     type="text"
@@ -24,9 +24,9 @@
     aria-label="Search notes"
     onfocus={() => focused = true}
     onfocusout={() => focused = false}
-    class="w-full pl-10 pr-4 py-1 bg-transparent rounded-lg text-sm text-on-surface placeholder:text-on-surface-muted outline-none transition-colors border-b"
+    class="w-full rounded-lg border border-transparent bg-surface-dim py-3 pl-10 pr-4 text-sm text-on-surface outline-none transition-colors placeholder:text-on-surface-muted"
     class:border-primary={focused}
     class:border-transparent={!focused}
-    class:bg-surface-dim={focused}
+    class:shadow-sm={focused}
   />
 </div>

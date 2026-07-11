@@ -2,6 +2,20 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in the private GitHub repository `BrettKinny/UnKeep`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five canonical triage labels without aliases. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repository using a root `CONTEXT.md` and `docs/adr/`. See `docs/agents/domain.md`.
+
 ## Commands
 
 ```bash

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Note, NoteColor } from '@unkeep/core';
+  import type { Note } from '@unkeep/core';
   import { noteStore } from '$lib/noteStore.svelte';
   import { toastStore } from '$lib/toast.svelte';
   import { colorMap } from '$lib/colors';
@@ -53,6 +53,16 @@
     </div>
   {/if}
 
+  {#if note.title}
+    <h3 class="font-semibold text-on-surface mb-2 pr-5">{note.title}</h3>
+  {/if}
+
+  {#if note.images?.some(image => image.url)}
+    {#each note.images.filter(image => image.url).slice(0, 1) as image}
+      <img src={image.url} alt={image.name} class="w-full max-h-48 object-cover rounded mb-2" />
+    {/each}
+  {/if}
+
   {#if note.checkboxes && note.checkboxes.length > 0}
     <ul class="space-y-1 text-sm text-on-surface">
       {#each note.checkboxes.slice(0, 8) as item}
@@ -66,6 +76,14 @@
     </ul>
   {:else}
     <p class="text-sm text-on-surface whitespace-pre-wrap line-clamp-6">{note.content}</p>
+  {/if}
+
+  {#if note.labels?.length}
+    <div class="flex flex-wrap gap-1 mt-2">
+      {#each note.labels as label}
+        <span class="rounded-full bg-black/10 px-2 py-0.5 text-xs text-on-surface-muted">{label}</span>
+      {/each}
+    </div>
   {/if}
 
   <!-- Action buttons - show on hover, focus-within, or touch devices -->

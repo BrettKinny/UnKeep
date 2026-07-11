@@ -4,11 +4,12 @@
   "type": "module",
   "scripts": {
     "dev": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/web dev",
+    "start": "pnpm --filter @unkeep/server start",
     "build": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/web build",
     "preview": "pnpm --filter @unkeep/web preview",
     "check": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/web check",
     "lint": "pnpm --filter @unkeep/web lint",
-    "test": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/core test && pnpm --filter @unkeep/web test"
+    "test": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/core test && pnpm --filter @unkeep/web test && pnpm --filter @unkeep/server test"
   },
   "engines": {
     "node": ">=20"

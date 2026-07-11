@@ -13,7 +13,7 @@
 {#if pinnedNotes.length > 0}
   <div class="mb-6">
     <h2 class="text-xs font-semibold text-on-surface-muted uppercase tracking-wide mb-3 px-1">Pinned</h2>
-    <div class="columns-1 sm:columns-2 md:columns-3 lg:columns-4 gap-3">
+    <div class="columns-1 gap-4 sm:columns-2 lg:columns-3 xl:columns-4 2xl:columns-5">
       {#each pinnedNotes as note (note.id)}
         <NoteCard {note} {onEdit} />
       {/each}
@@ -25,7 +25,7 @@
   {#if pinnedNotes.length > 0}
     <h2 class="text-xs font-semibold text-on-surface-muted uppercase tracking-wide mb-3 px-1">Others</h2>
   {/if}
-  <div class="columns-1 sm:columns-2 md:columns-3 lg:columns-4 gap-3">
+  <div class="columns-1 gap-4 sm:columns-2 lg:columns-3 xl:columns-4 2xl:columns-5">
     {#each unpinnedNotes as note (note.id)}
       <NoteCard {note} {onEdit} />
     {/each}

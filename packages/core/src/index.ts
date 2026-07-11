@@ -3,6 +3,7 @@ export type {
   ChecklistItem,
   NoteColor,
   NoteMetadata,
+  NoteImage,
 } from './types.js';
 
 export type {
@@ -22,6 +23,29 @@ export {
 } from './oauth.js';
 
 export { validateNoteId, isValidNoteId } from './validation.js';
+
+export type {
+  EncryptedEnvelope,
+  EncryptedEnvelopeV1,
+  RecoveryKitV1,
+  NoteEncryptionContext,
+  AttachmentEncryptionContext,
+} from './crypto.js';
+export {
+  assertSupportedEnvelope,
+  generateMasterKey,
+  generateDeviceWrappingKey,
+  wrapMasterKeyForDevice,
+  unwrapMasterKeyForDevice,
+  createRecoveryKit,
+  recoverMasterKey,
+  exportRecoveryKit,
+  importRecoveryKit,
+  encryptNote,
+  decryptNote,
+  encryptAttachment,
+  decryptAttachment,
+} from './crypto.js';
 
 export { noteToMarkdown, markdownToNote } from './markdown.js';
 

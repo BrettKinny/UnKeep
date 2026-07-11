@@ -11,11 +11,17 @@
   // svelte-ignore state_referenced_locally
   let content = $state(note.content);
   // svelte-ignore state_referenced_locally
+  let title = $state(note.title ?? '');
+  // svelte-ignore state_referenced_locally
+  let labelsText = $state((note.labels ?? []).join(', '));
+  // svelte-ignore state_referenced_locally
   let lastNoteId = $state(note.id);
 
   $effect(() => {
     if (note.id !== lastNoteId) {
       content = note.content;
+      title = note.title ?? '';
+      labelsText = (note.labels ?? []).join(', ');
       lastNoteId = note.id;
     }
   });
@@ -28,6 +34,15 @@
 
   function handleContentChange() {
     noteStore.updateNote(note.id, { content });
+  }
+
+  function handleTitleChange() {
+    noteStore.updateNote(note.id, { title });
+  }
+
+  function handleLabelsChange() {
+    const labels = [...new Set(labelsText.split(',').map(label => label.trim()).filter(Boolean))];
+    noteStore.updateNote(note.id, { labels });
   }
 
   function handleCheckboxToggle(itemId: string, checked: boolean) {
@@ -86,6 +101,21 @@
   >
     <!-- Content -->
     <div class="flex-1 overflow-y-auto p-4">
+      <input
+        bind:value={title}
+        oninput={handleTitleChange}
+        class="w-full mb-3 bg-transparent text-lg font-semibold text-on-surface outline-none"
+        placeholder="Title"
+      />
+      {#if note.images?.length}
+        <div class="grid grid-cols-2 gap-2 mb-3">
+          {#each note.images as image}
+            {#if image.url}
+              <img src={image.url} alt={image.name} class="w-full max-h-48 object-cover rounded" />
+            {/if}
+          {/each}
+        </div>
+      {/if}
       {#if note.checkboxes}
         <ul class="space-y-2">
           {#each note.checkboxes as item, i}
@@ -135,10 +165,33 @@
           placeholder="Note content..."
         ></textarea>
       {/if}
+      <input
+        bind:value={labelsText}
+        onchange={handleLabelsChange}
+        class="w-full mt-4 bg-transparent text-sm text-on-surface-muted outline-none"
+        placeholder="Labels, separated by commas"
+      />
     </div>
 
     <!-- Toolbar -->
     <div class="flex items-center gap-1 p-3 border-t border-border/30">
+      <label
+        class="p-1.5 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors cursor-pointer"
+        title="Add image"
+        aria-label="Add image"
+      >
+        <input
+          type="file"
+          accept="image/*"
+          class="sr-only"
+          onchange={(event) => {
+            const file = event.currentTarget.files?.[0];
+            if (file) void noteStore.addImage(note.id, file);
+            event.currentTarget.value = '';
+          }}
+        />
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 16l4-4a2 2 0 012.828 0L16 17m-2-2l1-1a2 2 0 012.828 0L20 16m-5-7h.01M4 5h16v14H4z"/></svg>
+      </label>
       <button
         onclick={() => noteStore.toggleChecklist(note.id)}
         class="p-1.5 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors"

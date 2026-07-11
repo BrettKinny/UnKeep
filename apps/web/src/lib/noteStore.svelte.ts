@@ -2,10 +2,24 @@ import { nanoid } from 'nanoid';
 import type { Note, NoteColor, ChecklistItem, StorageAdapter } from '@unkeep/core';
 import { LocalOnlyAdapter } from '@unkeep/core';
 import { toastStore } from './toast.svelte';
+import { EncryptedSync } from './encryptedSync';
+import type { RelaySession } from './relayClient';
 
 // Debounce timer for auto-save
 let saveTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 const SAVE_DEBOUNCE_MS = 500;
+const PENDING_SYNC_KEY = 'unkeep-pending-note-ids';
+
+function pendingIds(): Set<string> {
+  try { return new Set(JSON.parse(localStorage.getItem(PENDING_SYNC_KEY) ?? '[]') as string[]); }
+  catch { return new Set(); }
+}
+
+function markPending(id: string, pending: boolean): void {
+  const ids = pendingIds();
+  if (pending) ids.add(id); else ids.delete(id);
+  localStorage.setItem(PENDING_SYNC_KEY, JSON.stringify([...ids]));
+}
 
 class NoteStore {
   notes = $state<Note[]>([]);
@@ -13,14 +27,22 @@ class NoteStore {
   adapter: StorageAdapter | null = $state(null);
   loading = $state(true);
   syncStatus = $state<'synced' | 'syncing' | 'offline' | 'error'>('synced');
+  private encryptedSync: EncryptedSync | null = null;
+  private unsubscribeRealtime: (() => void) | null = null;
+  private readonly wakeSync = () => void this.sync();
+  private readonly syncWhenVisible = () => {
+    if (document.visibilityState === 'visible') void this.sync();
+  };
 
   filteredNotes = $derived.by(() => {
     let result = this.notes.filter(n => !n.deleted);
     if (this.searchQuery.trim()) {
       const q = this.searchQuery.toLowerCase();
       result = result.filter(n => {
+        if (n.title?.toLowerCase().includes(q)) return true;
         if (n.content.toLowerCase().includes(q)) return true;
         if (n.checkboxes?.some(c => c.text.toLowerCase().includes(q))) return true;
+        if (n.labels?.some(label => label.toLowerCase().includes(q))) return true;
         return false;
       });
     }
@@ -60,6 +82,30 @@ class NoteStore {
     }
   }
 
+  async enableEncryptedSync(session: RelaySession, masterKey: Uint8Array<ArrayBuffer>) {
+    this.unsubscribeRealtime?.();
+    window.removeEventListener('online', this.wakeSync);
+    document.removeEventListener('visibilitychange', this.syncWhenVisible);
+    this.encryptedSync = new EncryptedSync(session, masterKey);
+    this.unsubscribeRealtime = this.encryptedSync.subscribe(() => void this.sync());
+    window.addEventListener('online', this.wakeSync);
+    document.addEventListener('visibilitychange', this.syncWhenVisible);
+    // One-time migration of notes created before encrypted sync was configured.
+    if (this.encryptedSync.cursor === 0) {
+      for (const note of this.notes) await this.encryptedSync.push($state.snapshot(note) as Note);
+    }
+    await this.sync();
+  }
+
+  disableEncryptedSync() {
+    this.unsubscribeRealtime?.();
+    window.removeEventListener('online', this.wakeSync);
+    document.removeEventListener('visibilitychange', this.syncWhenVisible);
+    this.unsubscribeRealtime = null;
+    this.encryptedSync = null;
+    this.notes = [];
+  }
+
   async initWithAdapter(adapter: StorageAdapter, config: Record<string, unknown>) {
     this.loading = true;
     try {
@@ -96,9 +142,10 @@ class NoteStore {
     }
   }
 
-  createNote(content: string = ''): Note {
+  createNote(content: string = '', title: string = ''): Note {
     const note: Note = {
       id: nanoid(),
+      title,
       content,
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -134,6 +181,17 @@ class NoteStore {
     if (!this.adapter) return;
     try {
       await this.adapter.saveNote($state.snapshot(note) as Note);
+      if (this.encryptedSync) {
+        try {
+          await this.encryptedSync.push($state.snapshot(note) as Note);
+          markPending(note.id, false);
+        } catch (error) {
+          markPending(note.id, true);
+          console.warn('Remote sync queued:', error);
+          this.syncStatus = 'offline';
+          return;
+        }
+      }
       this.syncStatus = 'synced';
     } catch (e) {
       console.error('Failed to save note:', e);
@@ -153,6 +211,16 @@ class NoteStore {
     if (this.adapter) {
       try {
         await this.adapter.deleteNote(id);
+        if (this.encryptedSync) {
+          const tombstone = await this.adapter.getNote(id);
+          try {
+            await this.encryptedSync.push(tombstone);
+            markPending(id, false);
+          } catch {
+            markPending(id, true);
+            this.syncStatus = 'offline';
+          }
+        }
       } catch (e) {
         console.error('Failed to delete note:', e);
         // Revert the soft delete
@@ -249,6 +317,35 @@ class NoteStore {
     this.debouncedSave(note);
   }
 
+  async addImage(noteId: string, file: File): Promise<void> {
+    const note = this.notes.find(n => n.id === noteId);
+    if (!note) return;
+    const image = {
+      id: crypto.randomUUID(),
+      name: file.name,
+      mimeType: file.type || 'application/octet-stream',
+      size: file.size,
+      url: URL.createObjectURL(file),
+    };
+    note.images = [...(note.images ?? []), image];
+    note.updatedAt = Date.now();
+    await this.adapter?.saveNote($state.snapshot(note) as Note);
+    if (this.encryptedSync) {
+      try {
+        await this.encryptedSync.uploadImage(
+          noteId,
+          image,
+          new Uint8Array(await file.arrayBuffer()),
+        );
+        await this.encryptedSync.push($state.snapshot(note) as Note);
+      } catch {
+        markPending(noteId, true);
+        this.syncStatus = 'offline';
+        toastStore.show('Image saved locally and queued for sync');
+      }
+    }
+  }
+
   async importNotes(notes: Note[]) {
     for (const note of notes) {
       this.notes.push(note);
@@ -260,16 +357,26 @@ class NoteStore {
     if (!this.adapter) return;
     this.syncStatus = 'syncing';
     try {
-      const result = await this.adapter.sync();
-      if (result.errors.length > 0) {
-        this.syncStatus = 'error';
+      if (this.encryptedSync) {
+        for (const id of pendingIds()) {
+          try {
+            await this.encryptedSync.push(await this.adapter.getNote(id));
+            markPending(id, false);
+          } catch {
+            // Keep queued. Pulling other revisions is still useful while one write fails.
+          }
+        }
+        const pulled = await this.encryptedSync.pull();
+        for (const note of pulled.notes) await this.adapter.saveNote(note);
+        for (const id of pulled.deletedIds) {
+          try { await this.adapter.deleteNote(id); } catch { /* already absent locally */ }
+        }
+        if (pulled.notes.length || pulled.deletedIds.length) await this.loadNotes();
       } else {
-        this.syncStatus = 'synced';
+        const result = await this.adapter.sync();
+        if (result.errors.length > 0) throw new Error(result.errors.join(', '));
       }
-      // Reload notes after sync
-      if (result.pulled > 0) {
-        await this.loadNotes();
-      }
+      this.syncStatus = 'synced';
     } catch {
       this.syncStatus = 'error';
     }
