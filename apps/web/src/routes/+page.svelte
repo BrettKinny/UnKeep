@@ -41,10 +41,10 @@
 
 {#if vaultReady}
   <main class="min-h-screen bg-surface">
-    <header class="sticky top-0 z-30 flex h-16 items-center gap-3 border-b border-border bg-surface/95 px-3 pr-16 backdrop-blur-sm">
+    <header class="sticky top-0 z-30 flex min-h-16 items-center gap-1.5 border-b border-border bg-surface/95 px-2 pr-12 pt-[env(safe-area-inset-top)] backdrop-blur-sm sm:gap-3 sm:px-3 sm:pr-14">
       <button
         onclick={() => sidebarOpen = !sidebarOpen}
-        class="rounded-full p-3 text-on-surface-muted hover:bg-surface-dim hover:text-on-surface"
+        class="shrink-0 rounded-full p-2.5 text-on-surface-muted hover:bg-surface-dim hover:text-on-surface"
         aria-label="Toggle navigation"
       >
         <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
@@ -53,13 +53,13 @@
         onclick={() => { showArchive = false; }}
         class="flex shrink-0 items-center gap-2 text-xl font-semibold text-on-surface"
       >
-        <img src="/icon.svg" alt="" class="h-9 w-9" />
+        <img src="/icon.svg" alt="" class="h-8 w-8 sm:h-9 sm:w-9" />
         <span class="hidden md:inline">UnKeep</span>
       </button>
 
-      <div class="mx-auto w-full max-w-3xl"><SearchBar /></div>
+      <div class="mx-auto w-full min-w-0 max-w-3xl"><SearchBar /></div>
 
-      <div class="flex shrink-0 items-center gap-1">
+      <div class="flex shrink-0 items-center gap-0.5 sm:gap-1">
         <SyncStatus />
         <button
           onclick={() => showImporter = true}
@@ -89,7 +89,7 @@
       <button class="fixed inset-0 z-10 bg-black/30 md:hidden" aria-label="Close navigation" onclick={() => sidebarOpen = false}></button>
     {/if}
     <aside
-      class="fixed bottom-0 left-0 top-16 z-20 w-64 border-r border-border bg-surface py-3 transition-transform"
+      class="fixed bottom-0 left-0 top-[calc(4rem+env(safe-area-inset-top))] z-20 w-64 border-r border-border bg-surface py-3 transition-transform"
       class:-translate-x-full={!sidebarOpen}
     >
       <nav class="space-y-1 pr-3">
@@ -118,7 +118,7 @@
       <p class="absolute bottom-4 left-6 text-xs text-on-surface-muted">End-to-end encrypted</p>
     </aside>
 
-    <div class="px-4 py-8 transition-[margin] md:px-8 {sidebarOpen ? 'md:ml-64' : ''}">
+    <div class="px-3 pt-6 pb-[calc(2rem+env(safe-area-inset-bottom))] transition-[margin] sm:px-4 sm:pt-8 md:px-8 {sidebarOpen ? 'md:ml-64' : ''}">
       <div class="mx-auto max-w-7xl">
       {#if noteStore.loading}
         <div class="flex items-center justify-center py-16">

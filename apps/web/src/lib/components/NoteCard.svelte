@@ -94,7 +94,7 @@
   >
     <button
       onclick={(e) => { e.stopPropagation(); noteStore.togglePin(note.id); }}
-      class="p-1.5 rounded-full hover:bg-black/10 dark:hover:bg-white/10 text-on-surface-muted hover:text-on-surface transition-colors"
+      class="p-2 rounded-full hover:bg-black/10 dark:hover:bg-white/10 text-on-surface-muted hover:text-on-surface transition-colors"
       title={note.pinned ? 'Unpin' : 'Pin'}
       aria-label={note.pinned ? 'Unpin' : 'Pin'}
     >
@@ -102,7 +102,7 @@
     </button>
     <button
       onclick={(e) => { e.stopPropagation(); noteStore.toggleArchive(note.id); }}
-      class="p-1.5 rounded-full hover:bg-black/10 dark:hover:bg-white/10 text-on-surface-muted hover:text-on-surface transition-colors"
+      class="p-2 rounded-full hover:bg-black/10 dark:hover:bg-white/10 text-on-surface-muted hover:text-on-surface transition-colors"
       title={note.archived ? 'Unarchive' : 'Archive'}
       aria-label={note.archived ? 'Unarchive' : 'Archive'}
     >
@@ -110,7 +110,7 @@
     </button>
     <button
       onclick={(e) => { e.stopPropagation(); showColorPicker = !showColorPicker; }}
-      class="p-1.5 rounded-full hover:bg-black/10 dark:hover:bg-white/10 text-on-surface-muted hover:text-on-surface transition-colors"
+      class="p-2 rounded-full hover:bg-black/10 dark:hover:bg-white/10 text-on-surface-muted hover:text-on-surface transition-colors"
       title="Change color"
       aria-label="Change color"
     >
@@ -118,7 +118,7 @@
     </button>
     <button
       onclick={(e) => { e.stopPropagation(); handleCopy(); }}
-      class="p-1.5 rounded-full hover:bg-black/10 dark:hover:bg-white/10 text-on-surface-muted hover:text-on-surface transition-colors"
+      class="p-2 rounded-full hover:bg-black/10 dark:hover:bg-white/10 text-on-surface-muted hover:text-on-surface transition-colors"
       title="Copy"
       aria-label="Copy"
     >
@@ -126,7 +126,7 @@
     </button>
     <button
       onclick={(e) => { e.stopPropagation(); handleDelete(); }}
-      class="p-1.5 rounded-full hover:bg-black/10 dark:hover:bg-white/10 text-danger transition-colors ml-auto"
+      class="p-2 rounded-full hover:bg-black/10 dark:hover:bg-white/10 text-danger transition-colors ml-auto"
       title="Delete"
       aria-label="Delete"
     >
@@ -149,13 +149,9 @@
     opacity: 1 !important;
   }
 
-  /* On touch devices (no hover), show actions at reduced opacity by default */
+  /* On touch devices (no hover), always show actions — half-faded icons read as broken */
   @media (hover: none) {
     .note-actions {
-      opacity: 0.6 !important;
-    }
-    .note-actions:focus-within,
-    .group:active .note-actions {
       opacity: 1 !important;
     }
   }

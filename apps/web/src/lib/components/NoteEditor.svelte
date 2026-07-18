@@ -90,7 +90,7 @@
 >
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
-    class="w-full max-w-lg rounded-lg shadow-xl max-h-[80vh] flex flex-col"
+    class="w-full max-w-lg rounded-lg shadow-xl max-h-[85dvh] flex flex-col"
     style="background-color: {bgColor()}"
     role="dialog"
     aria-modal="true"
@@ -168,7 +168,7 @@
       <input
         bind:value={labelsText}
         onchange={handleLabelsChange}
-        class="w-full mt-4 bg-transparent text-sm text-on-surface-muted outline-none"
+        class="w-full mt-4 bg-transparent text-base sm:text-sm text-on-surface-muted outline-none"
         placeholder="Labels, separated by commas"
       />
     </div>
@@ -176,7 +176,7 @@
     <!-- Toolbar -->
     <div class="flex items-center gap-1 p-3 border-t border-border/30">
       <label
-        class="p-1.5 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors cursor-pointer"
+        class="p-2 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors cursor-pointer"
         title="Add image"
         aria-label="Add image"
       >
@@ -194,7 +194,7 @@
       </label>
       <button
         onclick={() => noteStore.toggleChecklist(note.id)}
-        class="p-1.5 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors"
+        class="p-2 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors"
         title={note.checkboxes ? 'Convert to text' : 'Convert to checklist'}
         aria-label={note.checkboxes ? 'Convert to text' : 'Convert to checklist'}
       >
@@ -203,7 +203,7 @@
       {#if !note.checkboxes}
         <button
           onclick={() => showMarkdown = !showMarkdown}
-          class="p-1.5 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors"
+          class="p-2 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors"
           class:text-primary={showMarkdown}
           title={showMarkdown ? 'Edit' : 'Preview markdown'}
           aria-label={showMarkdown ? 'Edit' : 'Preview markdown'}
@@ -214,7 +214,7 @@
       <div class="relative">
         <button
           onclick={() => showColorPicker = !showColorPicker}
-          class="p-1.5 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors"
+          class="p-2 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors"
           title="Change color"
           aria-label="Change color"
         >
@@ -231,7 +231,7 @@
       </div>
       <button
         onclick={() => noteStore.togglePin(note.id)}
-        class="p-1.5 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors"
+        class="p-2 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors"
         title={note.pinned ? 'Unpin' : 'Pin'}
         aria-label={note.pinned ? 'Unpin' : 'Pin'}
       >
@@ -247,7 +247,7 @@
           await navigator.clipboard.writeText(url);
           toastStore.show('Share link copied to clipboard');
         }}
-        class="p-1.5 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors"
+        class="p-2 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors"
         title="Quick Send — copy share link"
         aria-label="Quick Send — copy share link"
       >

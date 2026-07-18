@@ -24,7 +24,7 @@
     aria-label="Search notes"
     onfocus={() => focused = true}
     onfocusout={() => focused = false}
-    class="w-full rounded-lg border border-transparent bg-surface-dim py-3 pl-10 pr-4 text-sm text-on-surface outline-none transition-colors placeholder:text-on-surface-muted"
+    class="w-full rounded-lg border border-transparent bg-surface-dim py-2.5 pl-10 pr-3 text-base text-on-surface outline-none transition-colors placeholder:text-on-surface-muted sm:py-3 sm:pr-4 sm:text-sm"
     class:border-primary={focused}
     class:border-transparent={!focused}
     class:shadow-sm={focused}
