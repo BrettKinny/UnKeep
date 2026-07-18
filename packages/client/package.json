@@ -1,5 +1,5 @@
 {
-  "name": "@unkeep/core",
+  "name": "@unkeep/client",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -18,7 +18,11 @@
     "test": "vitest run",
     "test:watch": "vitest"
   },
+  "dependencies": {
+    "@unkeep/core": "workspace:*"
+  },
   "devDependencies": {
+    "@unkeep/server": "workspace:*",
     "typescript": "^5.7.0"
   }
 }

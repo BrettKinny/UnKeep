@@ -1,9 +1,9 @@
 import { nanoid } from 'nanoid';
 import type { Note, NoteColor, ChecklistItem, StorageAdapter } from '@unkeep/core';
 import { LocalOnlyAdapter } from '@unkeep/core';
+import { EncryptedSync, type RelaySession } from '@unkeep/client';
 import { toastStore } from './toast.svelte';
-import { EncryptedSync } from './encryptedSync';
-import type { RelaySession } from './relayClient';
+import { clientStorage } from './clientStorage';
 import { attachmentSizeError } from './attachments';
 
 // Debounce timer for auto-save
@@ -87,12 +87,13 @@ class NoteStore {
     this.unsubscribeRealtime?.();
     window.removeEventListener('online', this.wakeSync);
     document.removeEventListener('visibilitychange', this.syncWhenVisible);
-    this.encryptedSync = new EncryptedSync(session, masterKey);
-    this.unsubscribeRealtime = this.encryptedSync.subscribe(() => void this.sync());
+    this.encryptedSync = new EncryptedSync(session, masterKey, clientStorage);
+    const timer = window.setInterval(() => void this.sync(), 15_000);
+    this.unsubscribeRealtime = () => window.clearInterval(timer);
     window.addEventListener('online', this.wakeSync);
     document.addEventListener('visibilitychange', this.syncWhenVisible);
     // One-time migration of notes created before encrypted sync was configured.
-    if (this.encryptedSync.cursor === 0) {
+    if (await this.encryptedSync.getCursor() === 0) {
       for (const note of this.notes) await this.encryptedSync.push($state.snapshot(note) as Note);
     }
     await this.sync();
@@ -373,6 +374,11 @@ class NoteStore {
           }
         }
         const pulled = await this.encryptedSync.pull();
+        const attachmentBytes = new Map(pulled.attachments.map(value => [`${value.noteId}:${value.attachment.id}`, value]));
+        for (const note of pulled.notes) note.images = note.images?.map(attachment => {
+          const value = attachmentBytes.get(`${note.id}:${attachment.id}`);
+          return value ? { ...attachment, url: URL.createObjectURL(new Blob([value.bytes], { type: attachment.mimeType })) } : attachment;
+        });
         for (const note of pulled.notes) await this.adapter.saveNote(note);
         for (const id of pulled.deletedIds) {
           try { await this.adapter.deleteNote(id); } catch { /* already absent locally */ }

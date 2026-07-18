@@ -16,6 +16,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@unkeep/client':
+        specifier: workspace:*
+        version: link:../../packages/client
       '@unkeep/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -72,11 +75,21 @@ importers:
         specifier: ^6.0.0
         version: 6.4.1(@types/node@26.1.1)(jiti@2.6.1)(lightningcss@1.31.1)
 
-  packages/core:
+  packages/client:
+    dependencies:
+      '@unkeep/core':
+        specifier: workspace:*
+        version: link:../core
     devDependencies:
       '@unkeep/server':
         specifier: workspace:*
         version: link:../../apps/server
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+
+  packages/core:
+    devDependencies:
       typescript:
         specifier: ^5.7.0
         version: 5.9.3

@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import QRCode from 'qrcode';
-  import { downloadRecoveryKit, getDeviceId, provisionFirstDevice, restoreDeviceFromRecovery, unlockDevice } from '$lib/keyStore';
-  import { approvePairingCode, createPairingRequest, waitForPairing, type PairingSession } from '$lib/devicePairing';
-  import { RelayClient, clearRelaySession, defaultRelayEndpoint, loadRelaySession, saveRelayEndpoint, saveRelaySession, type DeviceCredential, type RelaySession, type ServiceCredential } from '$lib/relayClient';
+  import { approvePairingCode, createPairingRequest, waitForPairing, RelayClient, type DeviceCredential, type PairingSession, type RelaySession, type ServiceCredential } from '@unkeep/client';
+  import { deviceKeyStore, relaySessionStore } from '$lib/clientStorage';
+  import { downloadRecoveryKit } from '$lib/recoveryKit';
   import { theme } from '$lib/theme.svelte';
   const themeModes = ['system', 'light', 'dark'] as const;
 
@@ -14,20 +14,20 @@
   let devices=$state<DeviceCredential[]>([]),serviceCredentials=$state<ServiceCredential[]>([]),serviceName=$state(''),mintedServiceCredential=$state(''),credentialsBusy=$state(false);
   let activeKey=$state<Uint8Array<ArrayBuffer>|null>(null),activeSession=$state<RelaySession|null>(null),abort:AbortController|null=null;
 
-  onMount(()=>{endpoint=defaultRelayEndpoint();void boot();return()=>abort?.abort()});
+  onMount(()=>{void (async()=>{try{endpoint=await relaySessionStore.defaultEndpoint(window.location.origin)}catch{endpoint=window.location.origin}await boot()})();return()=>abort?.abort()});
   async function ready(session:RelaySession,key:Uint8Array<ArrayBuffer>){activeSession=session;activeKey=key;view='ready';await onReady({ownerId:session.instanceId,masterKey:key,session})}
-  async function boot(){try{const session=loadRelaySession();const key=await unlockDevice();if(session&&key){await new RelayClient(session.endpoint,session.credential).vault();endpoint=session.endpoint;await ready(session,key);return}view='connect'}catch(e){error=e instanceof Error?e.message:String(e);view='connect'}}
-  async function connect(){busy=true;error=null;try{saveRelayEndpoint(endpoint);const status=await new RelayClient(endpoint).status();view=status.initialized?'choose':'setup'}catch(e){error=e instanceof Error?e.message:String(e)}finally{busy=false}}
-  async function claim(){busy=true;error=null;try{const deviceId=getDeviceId();const result=await new RelayClient(endpoint).claimSetup(setupToken,deviceId,navigator.userAgent.slice(0,100));setupToken='';const session={endpoint,instanceId:result.instanceId,deviceId,credential:result.deviceCredential};saveRelaySession(session);const existing=await unlockDevice();if(existing){await ready(session,existing)}else{const provisioned=await provisionFirstDevice();recoveryKit=provisioned.recoveryKit;activeKey=provisioned.masterKey;activeSession=session;view='recovery-confirm'}}catch(e){error=e instanceof Error?e.message:String(e)}finally{busy=false}}
-  async function startPairing(){busy=true;error=null;try{pairing=await createPairingRequest(endpoint);pairingQr=await QRCode.toDataURL(JSON.stringify({type:'unkeep-pair',endpoint,code:pairing.code}));view='pairing';abort=new AbortController();const result=await waitForPairing(pairing,abort.signal);await ready(result.session,result.masterKey)}catch(e){if((e as Error).name!=='AbortError')error=e instanceof Error?e.message:String(e)}finally{busy=false}}
-  async function restore(file:File){busy=true;error=null;try{const key=await restoreDeviceFromRecovery(await file.text());activeKey=key;notice='Key restored. Approve this device from an existing device to receive server access.';await startPairing()}catch(e){error=e instanceof Error?e.message:String(e)}finally{busy=false}}
+  async function boot(){try{const session=await relaySessionStore.load();const key=await deviceKeyStore.unlockDevice();if(session&&key){await new RelayClient(session.endpoint,session.credential).vault();endpoint=session.endpoint;await ready(session,key);return}view='connect'}catch(e){error=e instanceof Error?e.message:String(e);view='connect'}}
+  async function connect(){busy=true;error=null;try{await relaySessionStore.saveEndpoint(endpoint);const status=await new RelayClient(endpoint).status();view=status.initialized?'choose':'setup'}catch(e){error=e instanceof Error?e.message:String(e)}finally{busy=false}}
+  async function claim(){busy=true;error=null;try{const deviceId=await deviceKeyStore.getDeviceId();const result=await new RelayClient(endpoint).claimSetup(setupToken,deviceId,navigator.userAgent.slice(0,100));setupToken='';const session={endpoint,instanceId:result.instanceId,deviceId,credential:result.deviceCredential};await relaySessionStore.save(session);const existing=await deviceKeyStore.unlockDevice();if(existing){await ready(session,existing)}else{const provisioned=await deviceKeyStore.provisionFirstDevice();recoveryKit=provisioned.recoveryKit;activeKey=provisioned.masterKey;activeSession=session;view='recovery-confirm'}}catch(e){error=e instanceof Error?e.message:String(e)}finally{busy=false}}
+  async function startPairing(){busy=true;error=null;try{pairing=await createPairingRequest(endpoint,deviceKeyStore,navigator.userAgent.slice(0,100));pairingQr=await QRCode.toDataURL(JSON.stringify({type:'unkeep-pair',endpoint,code:pairing.code}));view='pairing';abort=new AbortController();const result=await waitForPairing(pairing,{keyStore:deviceKeyStore,sessionStore:relaySessionStore,signal:abort.signal});await ready(result.session,result.masterKey)}catch(e){if((e as Error).name!=='AbortError')error=e instanceof Error?e.message:String(e)}finally{busy=false}}
+  async function restore(file:File){busy=true;error=null;try{const key=await deviceKeyStore.restoreDeviceFromRecovery(await file.text());activeKey=key;notice='Key restored. Approve this device from an existing device to receive server access.';await startPairing()}catch(e){error=e instanceof Error?e.message:String(e)}finally{busy=false}}
   async function approve(){if(!activeSession||!activeKey)return;busy=true;error=null;try{await approvePairingCode(activeSession,pairingCode,activeKey);notice='Device approved';pairingCode=''}catch(e){error=e instanceof Error?e.message:String(e)}finally{busy=false}}
   async function loadCredentials(){if(!activeSession)return;credentialsBusy=true;error=null;try{const relay=new RelayClient(activeSession.endpoint,activeSession.credential);const [deviceList,serviceList]=await Promise.all([relay.devices(),relay.serviceCredentials()]);devices=deviceList.devices;serviceCredentials=serviceList.serviceCredentials}catch(e){error=e instanceof Error?e.message:String(e)}finally{credentialsBusy=false}}
   async function toggleMenu(){menu=!menu;if(menu)await loadCredentials()}
   async function mintService(){if(!activeSession||!serviceName.trim())return;credentialsBusy=true;error=null;notice=null;try{const result=await new RelayClient(activeSession.endpoint,activeSession.credential).mintServiceCredential(serviceName);mintedServiceCredential=result.serviceCredential;serviceName='';notice='Copy this credential now. It will not be shown again.';await loadCredentials()}catch(e){error=e instanceof Error?e.message:String(e)}finally{credentialsBusy=false}}
   async function revokeService(id:string){if(!activeSession)return;credentialsBusy=true;error=null;try{await new RelayClient(activeSession.endpoint,activeSession.credential).revokeServiceCredential(id);await loadCredentials()}catch(e){error=e instanceof Error?e.message:String(e)}finally{credentialsBusy=false}}
   async function finishRecovery(){if(!recoverySaved||!activeSession||!activeKey)return;await ready(activeSession,activeKey)}
-  async function disconnect(){clearRelaySession();activeKey=null;activeSession=null;menu=false;await onSignedOut?.();view='connect'}
+  async function disconnect(){await relaySessionStore.clear();activeKey=null;activeSession=null;menu=false;await onSignedOut?.();view='connect'}
 </script>
 
 {#if view==='ready'}
