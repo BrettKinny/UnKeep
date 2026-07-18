@@ -87,7 +87,7 @@ async function testContext(): Promise<{
 async function invoke(
   arguments_: string[],
   environment: Record<string, string>,
-  options: { stdin?: CliInput; now?: () => number; cwd?: string } = {},
+  options: { stdin?: CliInput; now?: () => number; cwd?: string; configDir?: string } = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   const stdout = new Capture();
   const stderr = new Capture();
@@ -98,6 +98,7 @@ async function invoke(
     stderr,
     now: options.now,
     cwd: options.cwd,
+    configDir: options.configDir,
   });
   return { code, stdout: stdout.value, stderr: stderr.value };
 }
@@ -199,6 +200,89 @@ test('login refuses to prompt when stdio is not a TTY', async () => {
   expect(result.code).toBe(1);
   expect(result.stdout).toBe('');
   expect(result.stderr).toContain('interactive terminal');
+});
+
+test('provisions env-only agents, lists credentials, and revokes access on the next request', async () => {
+  const context = await testContext();
+  const freshConfig = await mkdtemp(join(tmpdir(), 'unkeep-cli-agent-'));
+  cleanups.push(() => rm(freshConfig, { recursive: true, force: true }));
+
+  let result = await invoke(['provision', '--name', 'JSON agent', '--json'], context.environment);
+  expect(result.code).toBe(0);
+  expect(result.stderr).toBe('');
+  const bundle = JSON.parse(result.stdout) as Record<string, string>;
+  expect(bundle).toEqual({
+    UNKEEP_ENDPOINT: new URL(context.relay.endpoint).origin,
+    UNKEEP_CREDENTIAL: expect.any(String),
+    UNKEEP_VAULT_KEY: encodeVaultKey(context.masterKey),
+  });
+
+  result = await invoke(['provision', '--name', 'Env agent'], context.environment);
+  expect(result.code).toBe(0);
+  expect(result.stderr).toBe('');
+  const envLines = result.stdout.trim().split('\n');
+  expect(envLines.map(line => line.slice(0, line.indexOf('=')))).toEqual([
+    'UNKEEP_ENDPOINT',
+    'UNKEEP_CREDENTIAL',
+    'UNKEEP_VAULT_KEY',
+  ]);
+  expect(Object.fromEntries(envLines.map(line => line.split('=', 2)))).toMatchObject({
+    UNKEEP_ENDPOINT: bundle.UNKEEP_ENDPOINT,
+    UNKEEP_VAULT_KEY: bundle.UNKEEP_VAULT_KEY,
+  });
+
+  // The new process receives no owner config or pairing state, only the emitted bundle.
+  result = await invoke(
+    ['put', 'agent-note', '--content', 'written non-interactively', '--json'],
+    bundle,
+    { configDir: freshConfig, now: () => 700 },
+  );
+  expect(result.code).toBe(0);
+  expect(result.stderr).toBe('');
+  expect(JSON.parse(result.stdout)).toMatchObject({ id: 'agent-note', content: 'written non-interactively' });
+
+  result = await invoke(['get', 'agent-note', '--json'], context.environment);
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({ id: 'agent-note', content: 'written non-interactively' });
+
+  result = await invoke(['credentials', 'list'], context.environment);
+  expect(result.code).toBe(0);
+  expect(result.stdout).toContain('\tdevice\tCLI test owner\t');
+  expect(result.stdout).toContain('\tservice\tJSON agent\t');
+  expect(result.stdout).toContain('\tservice\tEnv agent\t');
+
+  result = await invoke(['credentials', 'list', '--json'], context.environment);
+  expect(result.code).toBe(0);
+  const credentials = JSON.parse(result.stdout) as Array<{
+    id: string;
+    name: string;
+    kind: 'device' | 'service';
+    createdAt?: string;
+    revokedAt: string | null;
+  }>;
+  expect(credentials).toEqual(expect.arrayContaining([
+    expect.objectContaining({ name: 'CLI test owner', kind: 'device', revokedAt: null }),
+    expect.objectContaining({ name: 'JSON agent', kind: 'service', createdAt: expect.any(String), revokedAt: null }),
+  ]));
+  const service = credentials.find(credential => credential.name === 'JSON agent');
+  expect(service).toBeDefined();
+
+  result = await invoke(['credentials', 'revoke', service!.id, '--json'], context.environment);
+  expect(result).toEqual({
+    code: 0,
+    stdout: `${JSON.stringify({ id: service!.id, revoked: true })}\n`,
+    stderr: '',
+  });
+
+  result = await invoke(['sync', '--json'], bundle, { configDir: freshConfig });
+  expect(result.code).toBe(1);
+  expect(result.stdout).toBe('');
+  expect(result.stderr).toMatch(/invalid_(?:device|service)_credential/);
+
+  result = await invoke(['credentials', 'list', '--json'], context.environment);
+  const revoked = (JSON.parse(result.stdout) as typeof credentials)
+    .find(credential => credential.id === service!.id);
+  expect(revoked?.revokedAt).toEqual(expect.any(String));
 });
 
 test('clips binary files and pastes the latest or a selected clip on a second client', async () => {

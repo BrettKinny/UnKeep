@@ -1,6 +1,6 @@
 import type { ConfigFlags } from './config.js';
 
-export type CommandName = 'login' | 'list' | 'get' | 'put' | 'sync' | 'clip' | 'paste';
+export type CommandName = 'login' | 'provision' | 'credentials' | 'list' | 'get' | 'put' | 'sync' | 'clip' | 'paste';
 
 export interface ParsedArguments extends ConfigFlags {
   command?: CommandName;
@@ -21,7 +21,7 @@ export interface ParsedArguments extends ConfigFlags {
   positionals: string[];
 }
 
-const commands = new Set<CommandName>(['login', 'list', 'get', 'put', 'sync', 'clip', 'paste']);
+const commands = new Set<CommandName>(['login', 'provision', 'credentials', 'list', 'get', 'put', 'sync', 'clip', 'paste']);
 
 function booleanValue(option: string, value: string | undefined): boolean {
   if (value === undefined || value === '') return true;

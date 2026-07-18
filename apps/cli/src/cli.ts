@@ -18,6 +18,7 @@ import {
   resolveConfiguration,
   unkeepConfigDirectory,
   type FileConfiguration,
+  type ResolvedConfiguration,
 } from './config.js';
 import { HELP, VERSION } from './help.js';
 import { JsonFileClientStorage } from './storage.js';
@@ -92,6 +93,29 @@ interface SyncSummary {
   deleted: number;
 }
 
+interface ProvisioningBundle {
+  UNKEEP_ENDPOINT: string;
+  UNKEEP_CREDENTIAL: string;
+  UNKEEP_VAULT_KEY: string;
+}
+
+interface ListedDeviceCredential {
+  id: string;
+  name: string;
+  kind: 'device';
+  revokedAt: string | null;
+}
+
+interface ListedServiceCredential {
+  id: string;
+  name: string;
+  kind: 'service';
+  createdAt: string;
+  revokedAt: string | null;
+}
+
+type ListedCredential = ListedDeviceCredential | ListedServiceCredential;
+
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -105,7 +129,10 @@ async function fileConfiguration(storage: JsonFileClientStorage): Promise<FileCo
   return await storage.entries() as FileConfiguration;
 }
 
-async function connectedVault(context: CommandContext): Promise<ConnectedVault> {
+async function configuredRelay(context: CommandContext): Promise<{
+  configuration: ResolvedConfiguration;
+  relay: RelayClient;
+}> {
   const stored = await fileConfiguration(context.storage);
   const configuration = resolveConfiguration(context.arguments, context.environment, stored);
   const endpoint = requireValue(
@@ -116,12 +143,16 @@ async function connectedVault(context: CommandContext): Promise<ConnectedVault> 
     configuration.credential,
     'Missing device credential; use --credential, UNKEEP_CREDENTIAL, or login',
   );
+  return { configuration, relay: new RelayClient(endpoint, credential) };
+}
+
+async function connectedVault(context: CommandContext): Promise<ConnectedVault> {
+  const { configuration, relay } = await configuredRelay(context);
   const masterKey = decodeVaultKey(requireValue(
     configuration.vaultKey,
     'Missing vault key; use --vault-key, UNKEEP_VAULT_KEY, or login',
   ));
 
-  const relay = new RelayClient(endpoint, credential);
   const [status, vault] = await Promise.all([relay.status(), relay.vault()]);
   if (status.instanceId !== vault.vaultId) throw new Error('Relay returned inconsistent vault identity');
   let deviceId = await context.storage.get<string>(DEVICE_ID_KEY);
@@ -133,7 +164,7 @@ async function connectedVault(context: CommandContext): Promise<ConnectedVault> 
     endpoint: relay.endpoint,
     instanceId: status.instanceId,
     deviceId,
-    credential,
+    credential: requireValue(configuration.credential, 'Missing device credential'),
   };
   return { session, masterKey, sync: new EncryptedSync(session, masterKey, context.storage) };
 }
@@ -268,6 +299,68 @@ async function handleLogin(context: CommandContext): Promise<void> {
   } else {
     context.stdout.write(`Paired ${session.deviceId} with ${session.endpoint}\n`);
   }
+}
+
+async function handleProvision(context: CommandContext): Promise<void> {
+  if (context.arguments.positionals.length) throw new Error('provision does not accept positional arguments');
+  const name = context.arguments.name?.trim();
+  if (!name) throw new Error('provision requires --name <name>');
+
+  const { configuration, relay } = await configuredRelay(context);
+  const vaultKey = encodeVaultKey(decodeVaultKey(requireValue(
+    configuration.vaultKey,
+    'Missing vault key; use --vault-key, UNKEEP_VAULT_KEY, or login',
+  )));
+  const minted = await relay.mintServiceCredential(name);
+  const bundle: ProvisioningBundle = {
+    UNKEEP_ENDPOINT: relay.endpoint,
+    UNKEEP_CREDENTIAL: minted.serviceCredential,
+    UNKEEP_VAULT_KEY: vaultKey,
+  };
+
+  if (context.arguments.json) {
+    writeJson(context.stdout, bundle);
+    return;
+  }
+  for (const [key, value] of Object.entries(bundle)) context.stdout.write(`${key}=${value}\n`);
+}
+
+async function handleCredentials(context: CommandContext): Promise<void> {
+  const [subcommand, id, ...extra] = context.arguments.positionals;
+  if (!subcommand) throw new Error('credentials requires list or revoke <id>');
+  const { relay } = await configuredRelay(context);
+
+  if (subcommand === 'list') {
+    if (id || extra.length) throw new Error('credentials list does not accept additional arguments');
+    const [{ devices }, { serviceCredentials }] = await Promise.all([
+      relay.devices(),
+      relay.serviceCredentials(),
+    ]);
+    const credentials: ListedCredential[] = [
+      ...devices.map(device => ({ ...device, kind: 'device' as const })),
+      ...serviceCredentials.map(service => ({ ...service, kind: 'service' as const })),
+    ];
+    if (context.arguments.json) {
+      writeJson(context.stdout, credentials);
+      return;
+    }
+    for (const credential of credentials) {
+      const createdAt = credential.kind === 'service' ? credential.createdAt : '-';
+      context.stdout.write(`${credential.id}\t${credential.kind}\t${credential.name}\t${createdAt}\t${credential.revokedAt ?? '-'}\n`);
+    }
+    return;
+  }
+
+  if (subcommand === 'revoke') {
+    if (!id) throw new Error('credentials revoke requires a service credential ID');
+    if (extra.length) throw new Error('credentials revoke accepts only one service credential ID');
+    await relay.revokeServiceCredential(id);
+    if (context.arguments.json) writeJson(context.stdout, { id, revoked: true });
+    else context.stdout.write(`Revoked ${id}\n`);
+    return;
+  }
+
+  throw new Error(`Unknown credentials command: ${subcommand}`);
 }
 
 async function handleSync(context: CommandContext): Promise<void> {
@@ -485,6 +578,8 @@ export async function runCli(arguments_: readonly string[], options: RunCliOptio
     };
     switch (argumentsParsed.command) {
       case 'login': await handleLogin(context); break;
+      case 'provision': await handleProvision(context); break;
+      case 'credentials': await handleCredentials(context); break;
       case 'list': await handleList(context); break;
       case 'get': await handleGet(context); break;
       case 'put': await handlePut(context); break;

@@ -4,6 +4,10 @@ export const HELP = `Usage: unkeep [connection options] <command> [options]
 
 Commands:
   login                 Pair this terminal with an existing UnKeep device
+  provision --name <n>  Mint a service credential and emit an agent bundle
+  credentials list      List device and service credentials
+  credentials revoke <id>
+                        Revoke a service credential
   list                  List notes
   get <id>              Print a note's content
   put <id> [content]    Create or update a note (reads content from stdin when omitted)
@@ -18,9 +22,12 @@ Connection options (flags override environment and config file):
   --config-dir <path>    Override the standard UnKeep config directory
 
 Output options:
-  --json                 Emit stable JSON on stdout
+  --json                 Emit stable JSON on stdout (including provision bundles)
   -h, --help             Show help
   --version              Show version
+
+Provision options:
+  --name <name>          Name the new service credential
 
 List options:
   --label <label>        Require a label (repeatable)
