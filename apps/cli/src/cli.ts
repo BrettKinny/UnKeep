@@ -1,0 +1,353 @@
+import { join } from 'node:path';
+import {
+  createPairingRequest,
+  DeviceKeyStore,
+  EncryptedSync,
+  MemoryClientStorage,
+  RelayClient,
+  RelaySessionStore,
+  waitForPairing,
+  type RelaySession,
+} from '@unkeep/client';
+import { validateNoteId, type Note } from '@unkeep/core';
+import { parseArguments, type ParsedArguments } from './arguments.js';
+import {
+  decodeVaultKey,
+  encodeVaultKey,
+  resolveConfiguration,
+  unkeepConfigDirectory,
+  type FileConfiguration,
+} from './config.js';
+import { HELP, VERSION } from './help.js';
+import { JsonFileClientStorage } from './storage.js';
+
+const DEVICE_ID_KEY = 'unkeep-cli-device-id';
+const NOTES_PREFIX = 'unkeep-cli-notes:';
+
+export interface CliInput extends AsyncIterable<string | Uint8Array> {
+  isTTY?: boolean;
+}
+
+export interface CliOutput {
+  isTTY?: boolean;
+  write(value: string): unknown;
+}
+
+export interface RunCliOptions {
+  stdin?: CliInput;
+  stdout?: CliOutput;
+  stderr?: CliOutput;
+  environment?: Record<string, string | undefined>;
+  configDir?: string;
+  signal?: AbortSignal;
+  now?: () => number;
+  onPairingCode?: (code: string) => void | Promise<void>;
+}
+
+interface CommandContext {
+  arguments: ParsedArguments;
+  storage: JsonFileClientStorage;
+  stdin: CliInput;
+  stdout: CliOutput;
+  stderr: CliOutput;
+  environment: Record<string, string | undefined>;
+  signal?: AbortSignal;
+  now: () => number;
+  onPairingCode?: (code: string) => void | Promise<void>;
+}
+
+interface ConnectedVault {
+  session: RelaySession;
+  masterKey: Uint8Array<ArrayBuffer>;
+  sync: EncryptedSync;
+}
+
+interface SyncSummary {
+  cursor: number;
+  pulled: number;
+  deleted: number;
+}
+
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function requireValue(value: string | undefined, description: string): string {
+  if (!value) throw new Error(description);
+  return value;
+}
+
+async function fileConfiguration(storage: JsonFileClientStorage): Promise<FileConfiguration> {
+  return await storage.entries() as FileConfiguration;
+}
+
+async function connectedVault(context: CommandContext): Promise<ConnectedVault> {
+  const stored = await fileConfiguration(context.storage);
+  const configuration = resolveConfiguration(context.arguments, context.environment, stored);
+  const endpoint = requireValue(
+    configuration.endpoint,
+    'Missing relay endpoint; use --endpoint, UNKEEP_ENDPOINT, or endpoint in the config file',
+  );
+  const credential = requireValue(
+    configuration.credential,
+    'Missing device credential; use --credential, UNKEEP_CREDENTIAL, or login',
+  );
+  const masterKey = decodeVaultKey(requireValue(
+    configuration.vaultKey,
+    'Missing vault key; use --vault-key, UNKEEP_VAULT_KEY, or login',
+  ));
+
+  const relay = new RelayClient(endpoint, credential);
+  const [status, vault] = await Promise.all([relay.status(), relay.vault()]);
+  if (status.instanceId !== vault.vaultId) throw new Error('Relay returned inconsistent vault identity');
+  let deviceId = await context.storage.get<string>(DEVICE_ID_KEY);
+  if (!deviceId) {
+    deviceId = globalThis.crypto.randomUUID();
+    await context.storage.set(DEVICE_ID_KEY, deviceId);
+  }
+  const session: RelaySession = {
+    endpoint: relay.endpoint,
+    instanceId: status.instanceId,
+    deviceId,
+    credential,
+  };
+  return { session, masterKey, sync: new EncryptedSync(session, masterKey, context.storage) };
+}
+
+function isNote(value: unknown): value is Note {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<Note>;
+  return typeof candidate.id === 'string' && typeof candidate.content === 'string';
+}
+
+async function loadNotes(storage: JsonFileClientStorage, instanceId: string): Promise<Record<string, Note>> {
+  const value = await storage.get<unknown>(NOTES_PREFIX + instanceId);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, Note] => isNote(entry[1])));
+}
+
+function saveNotes(storage: JsonFileClientStorage, instanceId: string, notes: Record<string, Note>): Promise<void> {
+  return storage.set(NOTES_PREFIX + instanceId, notes);
+}
+
+async function syncNotes(vault: ConnectedVault, storage: JsonFileClientStorage): Promise<SyncSummary> {
+  const notes = await loadNotes(storage, vault.session.instanceId);
+  let cursor = await vault.sync.getCursor();
+  let pulled = 0;
+  let deleted = 0;
+
+  // The relay pages changes at 1,000 rows. Pull until a request no longer advances the cursor.
+  for (let page = 0; page < 100; page += 1) {
+    const previousCursor = cursor;
+    const result = await vault.sync.pull();
+    cursor = result.cursor;
+    for (const note of result.notes) notes[note.id] = note;
+    for (const id of result.deletedIds) delete notes[id];
+    pulled += result.notes.length;
+    deleted += result.deletedIds.length;
+    if (result.notes.length || result.deletedIds.length) {
+      await saveNotes(storage, vault.session.instanceId, notes);
+    }
+    if (cursor === previousCursor) return { cursor, pulled, deleted };
+  }
+  throw new Error('Sync did not converge after 100 pages');
+}
+
+function stableNote(note: Note): Note {
+  const result: Note = {
+    id: note.id,
+    content: note.content,
+    createdAt: note.createdAt,
+    updatedAt: note.updatedAt,
+    pinned: note.pinned,
+    archived: note.archived,
+  };
+  if (note.title !== undefined) result.title = note.title;
+  if (note.color !== undefined) result.color = note.color;
+  if (note.checkboxes !== undefined) result.checkboxes = note.checkboxes;
+  if (note.labels !== undefined) result.labels = note.labels;
+  if (note.images !== undefined) result.images = note.images;
+  if (note.deleted !== undefined) result.deleted = note.deleted;
+  return result;
+}
+
+function writeJson(output: CliOutput, value: unknown): void {
+  output.write(`${JSON.stringify(value)}\n`);
+}
+
+async function readStdin(input: CliInput): Promise<string> {
+  let value = '';
+  for await (const chunk of input) value += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
+  return value;
+}
+
+function labels(values: readonly string[]): string[] {
+  return [...new Set(values.flatMap(value => value.split(',')).map(value => value.trim()).filter(Boolean))];
+}
+
+async function handleLogin(context: CommandContext): Promise<void> {
+  if (context.stdin.isTTY !== true || context.stdout.isTTY !== true) {
+    throw new Error('Login requires an interactive terminal');
+  }
+  const stored = await fileConfiguration(context.storage);
+  const configuration = resolveConfiguration(context.arguments, context.environment, stored);
+  const endpoint = requireValue(
+    configuration.endpoint,
+    'Missing relay endpoint; use --endpoint, UNKEEP_ENDPOINT, or endpoint in the config file',
+  );
+  const normalizedEndpoint = new RelayClient(endpoint).endpoint;
+
+  const memory = new MemoryClientStorage();
+  const existingDeviceId = await context.storage.get<string>(DEVICE_ID_KEY);
+  if (existingDeviceId) await memory.set('unkeep-device-id', existingDeviceId);
+  const keyStore = new DeviceKeyStore(memory);
+  const sessions = new RelaySessionStore(context.storage);
+  const pairing = await createPairingRequest(normalizedEndpoint, keyStore, context.arguments.name ?? 'UnKeep CLI');
+  context.stderr.write(`Pairing code: ${pairing.code}\nWaiting for approval…\n`);
+  await context.onPairingCode?.(pairing.code);
+  const { masterKey, session } = await waitForPairing(pairing, {
+    keyStore,
+    sessionStore: sessions,
+    signal: context.signal,
+  });
+
+  await context.storage.set('endpoint', session.endpoint);
+  await context.storage.set('credential', session.credential);
+  await context.storage.set('vaultKey', encodeVaultKey(masterKey));
+  await context.storage.set(DEVICE_ID_KEY, session.deviceId);
+  if (context.arguments.json) {
+    writeJson(context.stdout, { endpoint: session.endpoint, deviceId: session.deviceId, paired: true });
+  } else {
+    context.stdout.write(`Paired ${session.deviceId} with ${session.endpoint}\n`);
+  }
+}
+
+async function handleSync(context: CommandContext): Promise<void> {
+  if (context.arguments.positionals.length) throw new Error('sync does not accept positional arguments');
+  const vault = await connectedVault(context);
+  const summary = await syncNotes(vault, context.storage);
+  if (context.arguments.json) writeJson(context.stdout, summary);
+  else context.stdout.write(`Synced ${summary.pulled} note(s), removed ${summary.deleted}; cursor ${summary.cursor}\n`);
+}
+
+async function handleList(context: CommandContext): Promise<void> {
+  const vault = await connectedVault(context);
+  await syncNotes(vault, context.storage);
+  const requiredLabels = labels(context.arguments.labels);
+  const search = (context.arguments.search ?? context.arguments.positionals.join(' ')).trim().toLocaleLowerCase();
+  const notes = Object.values(await loadNotes(context.storage, vault.session.instanceId))
+    .filter(note => context.arguments.archived === undefined || note.archived === context.arguments.archived)
+    .filter(note => requiredLabels.every(label => note.labels?.includes(label)))
+    .filter(note => !search || [note.title, note.content, ...(note.labels ?? [])]
+      .some(value => value?.toLocaleLowerCase().includes(search)))
+    .sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id))
+    .map(stableNote);
+
+  if (context.arguments.json) {
+    writeJson(context.stdout, notes);
+    return;
+  }
+  for (const note of notes) {
+    const summary = note.title?.trim() || note.content.split(/\r?\n/, 1)[0].trim() || '(empty)';
+    context.stdout.write(`${note.id}\t${summary}\n`);
+  }
+}
+
+async function handleGet(context: CommandContext): Promise<void> {
+  const id = context.arguments.id ?? context.arguments.positionals[0];
+  if (!id) throw new Error('get requires a note ID');
+  if (context.arguments.positionals.length > (context.arguments.id ? 0 : 1)) throw new Error('get accepts only one note ID');
+  validateNoteId(id);
+  const vault = await connectedVault(context);
+  await syncNotes(vault, context.storage);
+  const note = (await loadNotes(context.storage, vault.session.instanceId))[id];
+  if (!note) throw new Error(`Note not found: ${id}`);
+  if (context.arguments.json) writeJson(context.stdout, stableNote(note));
+  else context.stdout.write(`${note.content}\n`);
+}
+
+async function handlePut(context: CommandContext): Promise<void> {
+  const id = context.arguments.id ?? context.arguments.positionals[0];
+  if (!id) throw new Error('put requires a note ID (positional or --id)');
+  validateNoteId(id);
+  if (id.length > 128) throw new Error('Note ID cannot exceed 128 characters');
+  const contentArguments = context.arguments.id ? context.arguments.positionals : context.arguments.positionals.slice(1);
+  if (context.arguments.content !== undefined && contentArguments.length) {
+    throw new Error('Specify note content with either --content or positional arguments, not both');
+  }
+
+  const vault = await connectedVault(context);
+  await syncNotes(vault, context.storage);
+  const notes = await loadNotes(context.storage, vault.session.instanceId);
+  const existing = notes[id];
+  let content = context.arguments.content ?? (contentArguments.length ? contentArguments.join(' ') : undefined);
+  if (content === undefined && context.stdin.isTTY !== true) content = await readStdin(context.stdin);
+  if (content === undefined) {
+    if (!existing) throw new Error('New notes require content as an argument, --content, or stdin');
+    content = existing.content;
+  }
+
+  const timestamp = context.now();
+  const requestedLabels = labels(context.arguments.labels);
+  const note: Note = {
+    ...existing,
+    id,
+    content,
+    createdAt: existing?.createdAt ?? timestamp,
+    updatedAt: timestamp,
+    pinned: context.arguments.pinned ?? existing?.pinned ?? false,
+    archived: context.arguments.archived ?? existing?.archived ?? false,
+  };
+  if (context.arguments.title !== undefined) note.title = context.arguments.title;
+  if (context.arguments.labels.length) note.labels = requestedLabels;
+
+  await vault.sync.push(note);
+  notes[id] = note;
+  await saveNotes(context.storage, vault.session.instanceId, notes);
+  if (context.arguments.json) writeJson(context.stdout, stableNote(note));
+  else context.stdout.write(`${id}\n`);
+}
+
+export async function runCli(arguments_: readonly string[], options: RunCliOptions = {}): Promise<number> {
+  const stdout = options.stdout ?? process.stdout;
+  const stderr = options.stderr ?? process.stderr;
+  const environment = options.environment ?? process.env;
+  try {
+    const argumentsParsed = parseArguments(arguments_);
+    if (!argumentsParsed.command && argumentsParsed.positionals.length && !argumentsParsed.help && !argumentsParsed.version) {
+      throw new Error(`Unknown command: ${argumentsParsed.positionals[0]}`);
+    }
+    if (argumentsParsed.help || (!argumentsParsed.command && !argumentsParsed.version)) {
+      stdout.write(HELP);
+      return 0;
+    }
+    if (argumentsParsed.version) {
+      stdout.write(`${VERSION}\n`);
+      return 0;
+    }
+    const configDirectory = unkeepConfigDirectory(environment, options.configDir ?? argumentsParsed.configDir);
+    const context: CommandContext = {
+      arguments: argumentsParsed,
+      storage: new JsonFileClientStorage(join(configDirectory, 'config.json')),
+      stdin: options.stdin ?? process.stdin,
+      stdout,
+      stderr,
+      environment,
+      signal: options.signal,
+      now: options.now ?? Date.now,
+      onPairingCode: options.onPairingCode,
+    };
+    switch (argumentsParsed.command) {
+      case 'login': await handleLogin(context); break;
+      case 'list': await handleList(context); break;
+      case 'get': await handleGet(context); break;
+      case 'put': await handlePut(context); break;
+      case 'sync': await handleSync(context); break;
+      default: throw new Error(`Unknown command: ${String(argumentsParsed.command)}`);
+    }
+    return 0;
+  } catch (error) {
+    stderr.write(`unkeep: ${message(error)}\n`);
+    return 1;
+  }
+}
