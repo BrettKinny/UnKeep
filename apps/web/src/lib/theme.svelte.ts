@@ -5,8 +5,14 @@ class Theme {
 
   constructor() {
     if (typeof window !== 'undefined') {
-      // Legacy explicit light/dark toggle — cleared so everyone defaults to system
-      localStorage.removeItem('unkeep-dark-mode');
+      // Migrate the legacy explicit light/dark toggle so an existing choice survives
+      const legacy = localStorage.getItem('unkeep-dark-mode');
+      if (legacy !== null) {
+        localStorage.removeItem('unkeep-dark-mode');
+        if (localStorage.getItem('unkeep-theme') === null) {
+          localStorage.setItem('unkeep-theme', legacy === 'true' ? 'dark' : 'light');
+        }
+      }
       const stored = localStorage.getItem('unkeep-theme');
       if (stored === 'light' || stored === 'dark') this.mode = stored;
       this.apply();
