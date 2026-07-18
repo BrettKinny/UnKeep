@@ -8,6 +8,8 @@ export interface RelaySession {
 }
 
 export interface RelayStatus { protocol: number; instanceId: string; initialized: boolean }
+export interface DeviceCredential { id:string; name:string; revokedAt:string|null }
+export interface ServiceCredential { id:string; name:string; createdAt:string; revokedAt:string|null }
 
 function cleanEndpoint(value: string): string {
   const url = new URL(value || window.location.origin);
@@ -36,6 +38,10 @@ export class RelayClient {
     return this.request<{instanceId:string;deviceCredential:string}>('/setup/claim', { method:'POST', body:JSON.stringify({deviceId,name}) }, `Setup ${setupToken}`);
   }
   vault() { return this.request<{vaultId:string}>('/vault'); }
+  devices() { return this.request<{devices:DeviceCredential[]}>('/devices'); }
+  serviceCredentials() { return this.request<{serviceCredentials:ServiceCredential[]}>('/service-credentials'); }
+  mintServiceCredential(name:string) { return this.request<{id:string;name:string;createdAt:string;serviceCredential:string}>('/service-credentials',{method:'POST',body:JSON.stringify({name})}); }
+  revokeServiceCredential(id:string) { return this.request(`/service-credentials/${encodeURIComponent(id)}`,{method:'DELETE'}); }
   changes(since: number) { return this.request<{changes:Array<{kind:'note'|'attachment';id:string;noteId?:string;envelope:unknown;deleted:boolean;revision:number}>;cursor:number}>(`/changes?since=${since}`); }
   putNote(id:string, value:unknown) { return this.request<{revision:number}>(`/notes/${encodeURIComponent(id)}`, {method:'PUT',body:JSON.stringify(value)}); }
   putAttachment(id:string, value:unknown) { return this.request<{revision:number}>(`/attachments/${encodeURIComponent(id)}`, {method:'PUT',body:JSON.stringify(value)}); }
