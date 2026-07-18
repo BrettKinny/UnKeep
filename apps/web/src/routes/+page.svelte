@@ -2,7 +2,6 @@
   import { onMount } from 'svelte';
   import type { Note } from '@unkeep/core';
   import { noteStore } from '$lib/noteStore.svelte';
-  import { darkMode } from '$lib/darkMode.svelte';
   import NoteInput from '$lib/components/NoteInput.svelte';
   import NoteGrid from '$lib/components/NoteGrid.svelte';
   import NoteEditor from '$lib/components/NoteEditor.svelte';
@@ -41,10 +40,10 @@
 
 {#if vaultReady}
   <main class="min-h-screen bg-surface">
-    <header class="sticky top-0 z-30 flex h-16 items-center gap-3 border-b border-border bg-surface/95 px-3 pr-16 backdrop-blur-sm">
+    <header class="sticky top-0 z-30 flex min-h-16 items-center gap-1.5 border-b border-border bg-surface/95 px-2 pr-12 pt-[env(safe-area-inset-top)] backdrop-blur-sm sm:gap-3 sm:px-3 sm:pr-14">
       <button
         onclick={() => sidebarOpen = !sidebarOpen}
-        class="rounded-full p-3 text-on-surface-muted hover:bg-surface-dim hover:text-on-surface"
+        class="shrink-0 rounded-full p-2.5 text-on-surface-muted hover:bg-surface-dim hover:text-on-surface"
         aria-label="Toggle navigation"
       >
         <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
@@ -53,13 +52,13 @@
         onclick={() => { showArchive = false; }}
         class="flex shrink-0 items-center gap-2 text-xl font-semibold text-on-surface"
       >
-        <img src="/icon.svg" alt="" class="h-9 w-9" />
+        <img src="/icon.svg" alt="" class="h-8 w-8 sm:h-9 sm:w-9" />
         <span class="hidden md:inline">UnKeep</span>
       </button>
 
-      <div class="mx-auto w-full max-w-3xl"><SearchBar /></div>
+      <div class="mx-auto w-full min-w-0 max-w-3xl"><SearchBar /></div>
 
-      <div class="flex shrink-0 items-center gap-1">
+      <div class="flex shrink-0 items-center gap-0.5 sm:gap-1">
         <SyncStatus />
         <button
           onclick={() => showImporter = true}
@@ -69,19 +68,6 @@
         >
           <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
         </button>
-
-        <button
-          onclick={() => darkMode.toggle()}
-          class="rounded-full p-2 text-on-surface-muted hover:bg-surface-dim hover:text-on-surface"
-          title={darkMode.enabled ? 'Light mode' : 'Dark mode'}
-          aria-label={darkMode.enabled ? 'Light mode' : 'Dark mode'}
-        >
-          {#if darkMode.enabled}
-            <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707zm1.414 8.486l-.707.707a1 1 0 01-1.414-1.414l.707-.707a1 1 0 011.414 1.414zM4 11a1 1 0 100-2H3a1 1 0 000 2h1z" clip-rule="evenodd"/></svg>
-          {:else}
-            <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z"/></svg>
-          {/if}
-        </button>
       </div>
     </header>
 
@@ -89,7 +75,7 @@
       <button class="fixed inset-0 z-10 bg-black/30 md:hidden" aria-label="Close navigation" onclick={() => sidebarOpen = false}></button>
     {/if}
     <aside
-      class="fixed bottom-0 left-0 top-16 z-20 w-64 border-r border-border bg-surface py-3 transition-transform"
+      class="fixed bottom-0 left-0 top-[calc(4rem+env(safe-area-inset-top))] z-20 w-64 border-r border-border bg-surface py-3 transition-transform"
       class:-translate-x-full={!sidebarOpen}
     >
       <nav class="space-y-1 pr-3">
@@ -118,7 +104,7 @@
       <p class="absolute bottom-4 left-6 text-xs text-on-surface-muted">End-to-end encrypted</p>
     </aside>
 
-    <div class="px-4 py-8 transition-[margin] md:px-8 {sidebarOpen ? 'md:ml-64' : ''}">
+    <div class="px-3 pt-6 pb-[calc(2rem+env(safe-area-inset-bottom))] transition-[margin] sm:px-4 sm:pt-8 md:px-8 {sidebarOpen ? 'md:ml-64' : ''}">
       <div class="mx-auto max-w-7xl">
       {#if noteStore.loading}
         <div class="flex items-center justify-center py-16">

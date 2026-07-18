@@ -23,7 +23,7 @@
   }
 </script>
 
-<div class="mx-auto mb-12 max-w-2xl">
+<div class="mx-auto mb-8 max-w-2xl sm:mb-12">
   <div
     class="rounded-lg border border-border bg-surface shadow-sm transition-all duration-150"
     class:shadow-md={expanded}
