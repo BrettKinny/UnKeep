@@ -74,6 +74,9 @@ importers:
 
   packages/core:
     devDependencies:
+      '@unkeep/server':
+        specifier: workspace:*
+        version: link:../../apps/server
       typescript:
         specifier: ^5.7.0
         version: 5.9.3

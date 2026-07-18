@@ -3,6 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "exports": {
+    "./test": {
+      "types": "./test/harness.d.mts",
+      "import": "./test/harness.mjs"
+    }
+  },
   "scripts": {
     "start": "node src/index.mjs",
     "test": "node --test test/*.test.mjs"
