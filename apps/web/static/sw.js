@@ -1,4 +1,4 @@
-const CACHE_NAME = 'unkeep-v4';
+const CACHE_NAME = 'unkeep-v5';
 const PRECACHE_URLS = [
   '/',
   '/manifest.json',
@@ -29,6 +29,13 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
+
+  // API responses contain live vault and pairing state. Never replay them from
+  // the offline cache, even when a previous response was successful.
+  if (url.pathname.startsWith('/api/')) {
+    event.respondWith(fetch(event.request));
+    return;
+  }
 
   const isNavigation = event.request.mode === 'navigate';
 
