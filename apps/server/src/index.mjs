@@ -10,6 +10,11 @@ const DATA_DIR = resolve(process.env.UNKEEP_DATA_DIR || './data');
 const WEB_DIR = resolve(process.env.UNKEEP_WEB_DIR || join(dirname(fileURLToPath(import.meta.url)), '../../web/build'));
 const SETUP_TOKEN = process.env.UNKEEP_SETUP_TOKEN || '';
 const MAX_BODY = 35 * 1024 * 1024;
+const DEFAULT_MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024;
+const configuredAttachmentSize = Number(process.env.UNKEEP_MAX_ATTACHMENT_SIZE || DEFAULT_MAX_ATTACHMENT_SIZE);
+const MAX_ATTACHMENT_SIZE = Number.isSafeInteger(configuredAttachmentSize) && configuredAttachmentSize > 0 ? configuredAttachmentSize : DEFAULT_MAX_ATTACHMENT_SIZE;
+const AES_GCM_TAG_SIZE = 16;
+const MAX_ATTACHMENT_BODY = 4 * Math.ceil((MAX_ATTACHMENT_SIZE + AES_GCM_TAG_SIZE) / 3) + 64 * 1024;
 mkdirSync(DATA_DIR, { recursive: true });
 
 const db = new DatabaseSync(join(DATA_DIR, 'unkeep.sqlite'));
@@ -17,6 +22,7 @@ db.exec(`
   PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
   CREATE TABLE IF NOT EXISTS instance (id TEXT PRIMARY KEY, initialized INTEGER NOT NULL DEFAULT 0);
   CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, revoked_at TEXT);
+  CREATE TABLE IF NOT EXISTS service_credentials (id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT (datetime('now')), revoked_at TEXT);
   CREATE TABLE IF NOT EXISTS records (kind TEXT NOT NULL, id TEXT NOT NULL, note_id TEXT, envelope TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL, PRIMARY KEY(kind,id));
   CREATE TABLE IF NOT EXISTS mutations (id TEXT PRIMARY KEY, payload_hash TEXT NOT NULL, revision INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS pairing_requests (id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, device_id TEXT NOT NULL, device_name TEXT NOT NULL, public_key TEXT NOT NULL, poll_hash TEXT NOT NULL, response TEXT, device_token TEXT, expires_at INTEGER NOT NULL, consumed_at INTEGER);
@@ -37,15 +43,24 @@ function json(res, status, body) {
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', 'unkeep-protocol-version': '1' });
   res.end(JSON.stringify(body));
 }
-async function body(req) {
+async function body(req, limit = MAX_BODY) {
   const chunks = []; let size = 0;
-  for await (const chunk of req) { size += chunk.length; if (size > MAX_BODY) throw Object.assign(new Error('Request too large'), { status: 413 }); chunks.push(chunk); }
+  for await (const chunk of req) { size += chunk.length; if (size > limit) throw Object.assign(new Error('Request too large'), { status: 413 }); chunks.push(chunk); }
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
 }
-function bearer(req) { return (req.headers.authorization || '').match(/^Device (.+)$/)?.[1] || ''; }
-function requireDevice(req) {
+function decodedBase64Size(value) {
+  if (typeof value !== 'string') return 0;
+  const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
+  return Math.floor(value.length * 3 / 4) - padding;
+}
+function bearer(req) { return (req.headers.authorization || '').match(/^(?:Device|Service) (.+)$/)?.[1] || ''; }
+function requireCredential(req) {
   const credential = bearer(req); if (!credential) return null;
-  return db.prepare('SELECT id,name FROM devices WHERE token_hash=? AND revoked_at IS NULL').get(hash(credential)) || null;
+  const tokenHash = hash(credential);
+  const device = db.prepare('SELECT id,name FROM devices WHERE token_hash=? AND revoked_at IS NULL').get(tokenHash);
+  if (device) return { ...device, kind: 'device' };
+  const service = db.prepare('SELECT id,name FROM service_credentials WHERE token_hash=? AND revoked_at IS NULL').get(tokenHash);
+  return service ? { ...service, kind: 'service' } : null;
 }
 function nextRevision() { return Number(db.prepare('SELECT COALESCE(MAX(revision),0)+1 AS value FROM records').get().value); }
 function validId(value) { return typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value); }
@@ -83,9 +98,30 @@ async function api(req, res, url) {
   }
   if (pairMatch && req.method === 'POST' && url.pathname.endsWith('/consume')) { /* matched below by explicit regex */ }
 
-  const device = requireDevice(req);
-  if (!device) return json(res, 401, { error: 'invalid_device_credential' });
+  const credential = requireCredential(req);
+  if (!credential) return json(res, 401, { error: (req.headers.authorization || '').startsWith('Service ') ? 'invalid_service_credential' : 'invalid_device_credential' });
   if (req.method === 'GET' && url.pathname === '/api/v1/vault') return json(res, 200, { vaultId: instance.id });
+  if (url.pathname === '/api/v1/service-credentials') {
+    if (credential.kind !== 'device') return json(res, 403, { error: 'device_credential_required' });
+    if (req.method === 'GET') {
+      return json(res, 200, { serviceCredentials: db.prepare('SELECT id,name,created_at AS createdAt,revoked_at AS revokedAt FROM service_credentials ORDER BY name').all() });
+    }
+    if (req.method === 'POST') {
+      const value = await body(req); const name = typeof value.name === 'string' ? value.name.trim().slice(0,100) : '';
+      if (!name) return json(res, 400, { error: 'invalid_service_credential_name' });
+      const id = randomUUID(); const serviceCredential = token();
+      db.prepare('INSERT INTO service_credentials(id,name,token_hash) VALUES(?,?,?)').run(id,name,hash(serviceCredential));
+      const created = db.prepare('SELECT created_at AS createdAt FROM service_credentials WHERE id=?').get(id);
+      return json(res, 201, { id, name, createdAt: created.createdAt, serviceCredential });
+    }
+  }
+  const serviceRevoke = url.pathname.match(/^\/api\/v1\/service-credentials\/([0-9a-f-]+)$/);
+  if (serviceRevoke && req.method === 'DELETE') {
+    if (credential.kind !== 'device') return json(res, 403, { error: 'device_credential_required' });
+    db.prepare("UPDATE service_credentials SET revoked_at=datetime('now') WHERE id=? AND revoked_at IS NULL").run(serviceRevoke[1]);
+    return json(res, 204, {});
+  }
+  if (credential.kind !== 'device' && (url.pathname.startsWith('/api/v1/devices') || url.pathname.startsWith('/api/v1/pairings/'))) return json(res, 403, { error: 'device_credential_required' });
   if (req.method === 'GET' && url.pathname === '/api/v1/devices') {
     return json(res, 200, { devices: db.prepare('SELECT id,name,revoked_at AS revokedAt FROM devices ORDER BY name').all() });
   }
@@ -99,8 +135,9 @@ async function api(req, res, url) {
   }
   const record = url.pathname.match(/^\/api\/v1\/(notes|attachments)\/([A-Za-z0-9_-]+)$/);
   if (record && req.method === 'PUT') {
-    const kind = record[1] === 'notes' ? 'note' : 'attachment'; const id = record[2]; const value = await body(req);
+    const kind = record[1] === 'notes' ? 'note' : 'attachment'; const id = record[2]; const value = await body(req, kind === 'attachment' ? MAX_ATTACHMENT_BODY : MAX_BODY);
     if (!value.envelope || (kind === 'attachment' && !validId(value.noteId))) return json(res, 400, { error: 'invalid_record' });
+    if (kind === 'attachment' && decodedBase64Size(value.envelope.ciphertext) > MAX_ATTACHMENT_SIZE + AES_GCM_TAG_SIZE) return json(res, 413, { error: 'attachment_too_large' });
     const payloadHash = hash(JSON.stringify(value)); const mutationId = String(value.mutationId || randomUUID());
     const prior = db.prepare('SELECT payload_hash,revision FROM mutations WHERE id=?').get(mutationId);
     if (prior) return prior.payload_hash === payloadHash ? json(res, 200, { revision: prior.revision }) : json(res, 409, { error: 'mutation_conflict' });

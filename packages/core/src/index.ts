@@ -3,6 +3,7 @@ export type {
   ChecklistItem,
   NoteColor,
   NoteMetadata,
+  NoteAttachment,
   NoteImage,
 } from './types.js';
 

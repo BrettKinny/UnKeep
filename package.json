@@ -4,13 +4,13 @@
   "type": "module",
   "packageManager": "pnpm@10.33.4",
   "scripts": {
-    "dev": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/web dev",
+    "dev": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/client build && pnpm --filter @unkeep/web dev",
     "start": "pnpm --filter @unkeep/server start",
-    "build": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/web build",
+    "build": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/client build && pnpm --filter @unkeep/cli build && pnpm --filter @unkeep/web build",
     "preview": "pnpm --filter @unkeep/web preview",
-    "check": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/web check",
+    "check": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/client build && pnpm --filter @unkeep/cli check && pnpm --filter @unkeep/web check",
     "lint": "pnpm --filter @unkeep/web lint",
-    "test": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/core test && pnpm --filter @unkeep/web test && pnpm --filter @unkeep/server test"
+    "test": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/client build && pnpm --filter @unkeep/core test && pnpm --filter @unkeep/client test && pnpm --filter @unkeep/cli test && pnpm --filter @unkeep/web test && pnpm --filter @unkeep/server test"
   },
   "engines": {
     "node": ">=20"

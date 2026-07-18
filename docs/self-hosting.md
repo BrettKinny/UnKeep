@@ -36,5 +36,6 @@ Back up the whole `/data` volume. It contains ciphertext and device records. Als
 - Web UI / container port: `3000`
 - Persistent path: `/data`
 - Required variable: `UNKEEP_SETUP_TOKEN`
+- Optional variable: `UNKEEP_MAX_ATTACHMENT_SIZE` (maximum plaintext attachment size in bytes; defaults to 25 MiB)
 - Reverse proxy: HTTPS is required
 - Tailscale: prefer Tailscale Serve on the Unraid host; avoid an ephemeral sidecar that must reauthenticate after every restart. The Unraid UI may already own port 443, so use a free HTTPS port such as 3443.

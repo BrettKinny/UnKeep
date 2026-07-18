@@ -1,5 +1,5 @@
 {
-  "name": "@unkeep/core",
+  "name": "@unkeep/cli",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -12,13 +12,26 @@
       "default": "./dist/index.js"
     }
   },
+  "bin": {
+    "unkeep": "./dist/bin.js"
+  },
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch",
+    "check": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
   },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@unkeep/client": "workspace:*",
+    "@unkeep/core": "workspace:*"
+  },
   "devDependencies": {
-    "typescript": "^5.7.0"
+    "@types/node": "^26.0.0",
+    "@unkeep/server": "workspace:*",
+    "typescript": "^5.7.0",
+    "vitest": "^4.0.18"
   }
 }

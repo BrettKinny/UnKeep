@@ -28,10 +28,10 @@ function waitForReady(child,logs) {
   });
 }
 
-export async function startTestServer({setupToken=randomBytes(24).toString('base64url')}={}) {
+export async function startTestServer({setupToken=randomBytes(24).toString('base64url'),env={}}={}) {
   const dataDir=await mkdtemp(join(tmpdir(),'unkeep-test-'));let output='';
   const child=spawn(process.execPath,[childScript],{
-    env:{...process.env,NODE_ENV:'test',UNKEEP_DATA_DIR:dataDir,UNKEEP_SETUP_TOKEN:setupToken},
+    env:{...process.env,NODE_ENV:'test',UNKEEP_DATA_DIR:dataDir,UNKEEP_SETUP_TOKEN:setupToken,...env},
     stdio:['ignore','pipe','pipe','ipc'],
   });
   child.stdout.on('data',chunk=>output+=chunk);child.stderr.on('data',chunk=>output+=chunk);

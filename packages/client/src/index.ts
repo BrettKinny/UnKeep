@@ -1,0 +1,12 @@
+export type { ClientStorage } from './storage.js';
+export { MemoryClientStorage } from './storage.js';
+export type { RelaySession, RelayStatus, DeviceCredential, ServiceCredential, RelayChange, RelayClientOptions } from './relay.js';
+export { RelayClient, cleanRelayEndpoint } from './relay.js';
+export { RelaySessionStore } from './session.js';
+export type { ProvisionedKeys } from './deviceKeys.js';
+export { DeviceKeyStore } from './deviceKeys.js';
+export { encrypt, decrypt, isEncrypted } from './encryption.js';
+export type { PairingSession, WaitForPairingOptions } from './pairing.js';
+export { createPairingRequest, approvePairingCode, waitForPairing } from './pairing.js';
+export type { PulledAttachment, PulledNotes } from './sync.js';
+export { EncryptedSync } from './sync.js';

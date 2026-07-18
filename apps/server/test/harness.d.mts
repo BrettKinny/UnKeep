@@ -6,6 +6,7 @@ export interface TestServer {
 
 export interface TestServerOptions {
   setupToken?: string;
+  env?: Record<string, string>;
 }
 
 export function startTestServer(options?: TestServerOptions): Promise<TestServer>;
