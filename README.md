@@ -194,4 +194,4 @@ Requires Node 22+ (for `node:sqlite`). Set `UNKEEP_DATA_DIR` and `UNKEEP_WEB_DIR
 
 ## License
 
-MIT
+[MIT](LICENSE)
