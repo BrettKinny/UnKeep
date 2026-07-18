@@ -12,3 +12,12 @@ test('claims a server once and syncs opaque records', async t => {
   response=await fetch(`${api}/notes/note-one`,{method:'PUT',headers,body:JSON.stringify({mutationId:'mutation-one',envelope,deleted:false})});assert.equal(response.status,200);
   response=await fetch(`${api}/changes?since=0`,{headers});const changes=await response.json();assert.equal(changes.changes.length,1);assert.deepEqual(changes.changes[0].envelope,envelope);
 });
+
+test('rejects attachments over the configured size limit', async t => {
+  const relay=await startTestServer({setupToken:'test-setup-token',env:{UNKEEP_MAX_ATTACHMENT_SIZE:'8'}});t.after(relay.stop);const api=relay.endpoint;
+  let response=await fetch(`${api}/setup/claim`,{method:'POST',headers:{authorization:'Setup test-setup-token','content-type':'application/json'},body:JSON.stringify({deviceId:'device-one',name:'Test'})});const claimed=await response.json();
+  const headers={authorization:`Device ${claimed.deviceCredential}`,'content-type':'application/json'};
+  const envelope={version:1,algorithm:'AES-GCM',keyId:'file-one',iv:'opaque',ciphertext:Buffer.alloc(25).toString('base64')};
+  response=await fetch(`${api}/attachments/file-one`,{method:'PUT',headers,body:JSON.stringify({mutationId:'mutation-one',noteId:'note-one',envelope,deleted:false})});
+  assert.equal(response.status,413);assert.deepEqual(await response.json(),{error:'attachment_too_large'});
+});

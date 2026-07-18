@@ -4,6 +4,7 @@ import { LocalOnlyAdapter } from '@unkeep/core';
 import { toastStore } from './toast.svelte';
 import { EncryptedSync } from './encryptedSync';
 import type { RelaySession } from './relayClient';
+import { attachmentSizeError } from './attachments';
 
 // Debounce timer for auto-save
 let saveTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
@@ -317,31 +318,36 @@ class NoteStore {
     this.debouncedSave(note);
   }
 
-  async addImage(noteId: string, file: File): Promise<void> {
+  async addAttachment(noteId: string, file: File): Promise<void> {
+    const sizeError = attachmentSizeError(file);
+    if (sizeError) {
+      toastStore.show(sizeError);
+      return;
+    }
     const note = this.notes.find(n => n.id === noteId);
     if (!note) return;
-    const image = {
+    const attachment = {
       id: crypto.randomUUID(),
       name: file.name,
       mimeType: file.type || 'application/octet-stream',
       size: file.size,
       url: URL.createObjectURL(file),
     };
-    note.images = [...(note.images ?? []), image];
+    note.images = [...(note.images ?? []), attachment];
     note.updatedAt = Date.now();
     await this.adapter?.saveNote($state.snapshot(note) as Note);
     if (this.encryptedSync) {
       try {
-        await this.encryptedSync.uploadImage(
+        await this.encryptedSync.uploadAttachment(
           noteId,
-          image,
+          attachment,
           new Uint8Array(await file.arrayBuffer()),
         );
         await this.encryptedSync.push($state.snapshot(note) as Note);
       } catch {
         markPending(noteId, true);
         this.syncStatus = 'offline';
-        toastStore.show('Image saved locally and queued for sync');
+        toastStore.show('Attachment saved locally and queued for sync');
       }
     }
   }

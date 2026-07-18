@@ -3,6 +3,8 @@
   import { noteStore } from '$lib/noteStore.svelte';
   import { toastStore } from '$lib/toast.svelte';
   import { colorMap } from '$lib/colors';
+  import { isImageAttachment } from '$lib/attachments';
+  import AttachmentChip from './AttachmentChip.svelte';
   import ColorPicker from './ColorPicker.svelte';
 
   let { note, onEdit }: { note: Note; onEdit: (note: Note) => void } = $props();
@@ -57,10 +59,18 @@
     <h3 class="font-semibold text-on-surface mb-2 pr-5">{note.title}</h3>
   {/if}
 
-  {#if note.images?.some(image => image.url)}
-    {#each note.images.filter(image => image.url).slice(0, 1) as image}
-      <img src={image.url} alt={image.name} class="w-full max-h-48 object-cover rounded mb-2" />
+  {#if note.images?.some(attachment => isImageAttachment(attachment) && attachment.url)}
+    {#each note.images.filter(attachment => isImageAttachment(attachment) && attachment.url).slice(0, 1) as attachment}
+      <img src={attachment.url} alt={attachment.name} class="w-full max-h-48 object-cover rounded mb-2" />
     {/each}
+  {/if}
+
+  {#if note.images?.some(attachment => !isImageAttachment(attachment))}
+    <div class="grid gap-2 mb-2">
+      {#each note.images.filter(attachment => !isImageAttachment(attachment)) as attachment}
+        <AttachmentChip {attachment} />
+      {/each}
+    </div>
   {/if}
 
   {#if note.checkboxes && note.checkboxes.length > 0}

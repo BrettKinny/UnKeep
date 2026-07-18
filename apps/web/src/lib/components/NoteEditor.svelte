@@ -4,6 +4,8 @@
   import { toastStore } from '$lib/toast.svelte';
   import { encodeNote, getShareUrl } from '$lib/quickSend';
   import { colorMap } from '$lib/colors';
+  import { isImageAttachment } from '$lib/attachments';
+  import AttachmentChip from './AttachmentChip.svelte';
   import ColorPicker from './ColorPicker.svelte';
 
   let { note, onClose }: { note: Note; onClose: () => void } = $props();
@@ -107,12 +109,19 @@
         class="w-full mb-3 bg-transparent text-lg font-semibold text-on-surface outline-none"
         placeholder="Title"
       />
-      {#if note.images?.length}
+      {#if note.images?.some(attachment => isImageAttachment(attachment) && attachment.url)}
         <div class="grid grid-cols-2 gap-2 mb-3">
-          {#each note.images as image}
-            {#if image.url}
-              <img src={image.url} alt={image.name} class="w-full max-h-48 object-cover rounded" />
+          {#each note.images as attachment}
+            {#if isImageAttachment(attachment) && attachment.url}
+              <img src={attachment.url} alt={attachment.name} class="w-full max-h-48 object-cover rounded" />
             {/if}
+          {/each}
+        </div>
+      {/if}
+      {#if note.images?.some(attachment => !isImageAttachment(attachment))}
+        <div class="grid gap-2 mb-3">
+          {#each note.images.filter(attachment => !isImageAttachment(attachment)) as attachment}
+            <AttachmentChip {attachment} />
           {/each}
         </div>
       {/if}
@@ -177,20 +186,19 @@
     <div class="flex items-center gap-1 p-3 border-t border-border/30">
       <label
         class="p-2 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors cursor-pointer"
-        title="Add image"
-        aria-label="Add image"
+        title="Add attachment"
+        aria-label="Add attachment"
       >
         <input
           type="file"
-          accept="image/*"
           class="sr-only"
           onchange={(event) => {
             const file = event.currentTarget.files?.[0];
-            if (file) void noteStore.addImage(note.id, file);
+            if (file) void noteStore.addAttachment(note.id, file);
             event.currentTarget.value = '';
           }}
         />
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 16l4-4a2 2 0 012.828 0L16 17m-2-2l1-1a2 2 0 012.828 0L20 16m-5-7h.01M4 5h16v14H4z"/></svg>
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
       </label>
       <button
         onclick={() => noteStore.toggleChecklist(note.id)}

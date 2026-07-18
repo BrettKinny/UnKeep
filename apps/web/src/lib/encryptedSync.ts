@@ -1,4 +1,4 @@
-import { decryptAttachment, decryptNote, encryptAttachment, encryptNote, type EncryptedEnvelope, type Note, type NoteImage } from '@unkeep/core';
+import { decryptAttachment, decryptNote, encryptAttachment, encryptNote, type EncryptedEnvelope, type Note, type NoteAttachment } from '@unkeep/core';
 import { RelayClient, type RelaySession } from './relayClient.js';
 
 const CURSOR_PREFIX = 'unkeep-sync-cursor:';
@@ -17,21 +17,21 @@ export class EncryptedSync {
     const {revision}=await this.relay.putNote(note.id,{mutationId:crypto.randomUUID(),envelope,deleted:note.deleted??false,deviceId:this.session.deviceId});
     return revision;
   }
-  async uploadImage(noteId:string,image:NoteImage,bytes:Uint8Array<ArrayBuffer>):Promise<void> {
-    const envelope=await encryptAttachment(bytes,this.masterKey,{ownerId:this.session.instanceId,noteId,attachmentId:image.id});
-    await this.relay.putAttachment(image.id,{mutationId:crypto.randomUUID(),noteId,envelope,deleted:false,deviceId:this.session.deviceId});
+  async uploadAttachment(noteId:string,attachment:NoteAttachment,bytes:Uint8Array<ArrayBuffer>):Promise<void> {
+    const envelope=await encryptAttachment(bytes,this.masterKey,{ownerId:this.session.instanceId,noteId,attachmentId:attachment.id});
+    await this.relay.putAttachment(attachment.id,{mutationId:crypto.randomUUID(),noteId,envelope,deleted:false,deviceId:this.session.deviceId});
   }
-  async downloadImage(noteId:string,image:NoteImage):Promise<NoteImage> {
-    const row=await this.relay.getAttachment(image.id);
-    const bytes=await decryptAttachment(row.envelope as EncryptedEnvelope,this.masterKey,{ownerId:this.session.instanceId,noteId,attachmentId:image.id});
-    return {...image,url:URL.createObjectURL(new Blob([bytes],{type:image.mimeType}))};
+  async downloadAttachment(noteId:string,attachment:NoteAttachment):Promise<NoteAttachment> {
+    const row=await this.relay.getAttachment(attachment.id);
+    const bytes=await decryptAttachment(row.envelope as EncryptedEnvelope,this.masterKey,{ownerId:this.session.instanceId,noteId,attachmentId:attachment.id});
+    return {...attachment,url:URL.createObjectURL(new Blob([bytes],{type:attachment.mimeType}))};
   }
   async pull(since:number=this.cursor):Promise<PulledNotes> {
     const {changes,cursor}=await this.relay.changes(since); const notes:Note[]=[]; const deletedIds:string[]=[];
     const latest=new Map(changes.filter(c=>c.kind==='note').map(c=>[c.id,c]));
     for(const row of latest.values()) {
       const note=await decryptNote(row.envelope as EncryptedEnvelope,this.masterKey,{ownerId:this.session.instanceId,noteId:row.id});
-      if(row.deleted||note.deleted) deletedIds.push(row.id); else { if(note.images?.length) note.images=await Promise.all(note.images.map(async image=>{try{return await this.downloadImage(note.id,image)}catch{return image}})); notes.push(note); }
+      if(row.deleted||note.deleted) deletedIds.push(row.id); else { if(note.images?.length) note.images=await Promise.all(note.images.map(async attachment=>{try{return await this.downloadAttachment(note.id,attachment)}catch{return attachment}})); notes.push(note); }
     }
     this.setCursor(cursor); return {notes,deletedIds,cursor};
   }

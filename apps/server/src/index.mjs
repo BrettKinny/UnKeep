@@ -10,6 +10,11 @@ const DATA_DIR = resolve(process.env.UNKEEP_DATA_DIR || './data');
 const WEB_DIR = resolve(process.env.UNKEEP_WEB_DIR || join(dirname(fileURLToPath(import.meta.url)), '../../web/build'));
 const SETUP_TOKEN = process.env.UNKEEP_SETUP_TOKEN || '';
 const MAX_BODY = 35 * 1024 * 1024;
+const DEFAULT_MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024;
+const configuredAttachmentSize = Number(process.env.UNKEEP_MAX_ATTACHMENT_SIZE || DEFAULT_MAX_ATTACHMENT_SIZE);
+const MAX_ATTACHMENT_SIZE = Number.isSafeInteger(configuredAttachmentSize) && configuredAttachmentSize > 0 ? configuredAttachmentSize : DEFAULT_MAX_ATTACHMENT_SIZE;
+const AES_GCM_TAG_SIZE = 16;
+const MAX_ATTACHMENT_BODY = 4 * Math.ceil((MAX_ATTACHMENT_SIZE + AES_GCM_TAG_SIZE) / 3) + 64 * 1024;
 mkdirSync(DATA_DIR, { recursive: true });
 
 const db = new DatabaseSync(join(DATA_DIR, 'unkeep.sqlite'));
@@ -37,10 +42,15 @@ function json(res, status, body) {
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', 'unkeep-protocol-version': '1' });
   res.end(JSON.stringify(body));
 }
-async function body(req) {
+async function body(req, limit = MAX_BODY) {
   const chunks = []; let size = 0;
-  for await (const chunk of req) { size += chunk.length; if (size > MAX_BODY) throw Object.assign(new Error('Request too large'), { status: 413 }); chunks.push(chunk); }
+  for await (const chunk of req) { size += chunk.length; if (size > limit) throw Object.assign(new Error('Request too large'), { status: 413 }); chunks.push(chunk); }
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
+}
+function decodedBase64Size(value) {
+  if (typeof value !== 'string') return 0;
+  const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
+  return Math.floor(value.length * 3 / 4) - padding;
 }
 function bearer(req) { return (req.headers.authorization || '').match(/^Device (.+)$/)?.[1] || ''; }
 function requireDevice(req) {
@@ -99,8 +109,9 @@ async function api(req, res, url) {
   }
   const record = url.pathname.match(/^\/api\/v1\/(notes|attachments)\/([A-Za-z0-9_-]+)$/);
   if (record && req.method === 'PUT') {
-    const kind = record[1] === 'notes' ? 'note' : 'attachment'; const id = record[2]; const value = await body(req);
+    const kind = record[1] === 'notes' ? 'note' : 'attachment'; const id = record[2]; const value = await body(req, kind === 'attachment' ? MAX_ATTACHMENT_BODY : MAX_BODY);
     if (!value.envelope || (kind === 'attachment' && !validId(value.noteId))) return json(res, 400, { error: 'invalid_record' });
+    if (kind === 'attachment' && decodedBase64Size(value.envelope.ciphertext) > MAX_ATTACHMENT_SIZE + AES_GCM_TAG_SIZE) return json(res, 413, { error: 'attachment_too_large' });
     const payloadHash = hash(JSON.stringify(value)); const mutationId = String(value.mutationId || randomUUID());
     const prior = db.prepare('SELECT payload_hash,revision FROM mutations WHERE id=?').get(mutationId);
     if (prior) return prior.payload_hash === payloadHash ? json(res, 200, { revision: prior.revision }) : json(res, 409, { error: 'mutation_conflict' });

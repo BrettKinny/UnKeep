@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Note } from './types.js';
+import type { Note, NoteAttachment } from './types.js';
 import {
   createRecoveryKit,
   decryptAttachment,
@@ -60,10 +60,16 @@ describe('E2EE envelopes', () => {
     expect(restored).toEqual(masterKey);
   });
 
-  it('round trips binary attachments', async () => {
+  it('round trips a non-image attachment envelope', async () => {
     const masterKey = generateMasterKey();
-    const bytes = new Uint8Array([0, 1, 2, 127, 128, 255]);
-    const context = { ownerId: 'owner-1', noteId: 'note-1', attachmentId: 'image-1' };
+    const bytes = new TextEncoder().encode('%PDF-1.7\nprivate document');
+    const attachment = {
+      id: 'document-1',
+      name: 'private.pdf',
+      mimeType: 'application/pdf',
+      size: bytes.byteLength,
+    } satisfies NoteAttachment;
+    const context = { ownerId: 'owner-1', noteId: 'note-1', attachmentId: attachment.id };
     const envelope = await encryptAttachment(bytes, masterKey, context);
 
     await expect(decryptAttachment(envelope, masterKey, context)).resolves.toEqual(bytes);
