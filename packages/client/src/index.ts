@@ -1,6 +1,6 @@
 export type { ClientStorage } from './storage.js';
 export { MemoryClientStorage } from './storage.js';
-export type { RelaySession, RelayStatus, DeviceCredential, ServiceCredential, RelayChange } from './relay.js';
+export type { RelaySession, RelayStatus, DeviceCredential, ServiceCredential, RelayChange, RelayClientOptions } from './relay.js';
 export { RelayClient, cleanRelayEndpoint } from './relay.js';
 export { RelaySessionStore } from './session.js';
 export type { ProvisionedKeys } from './deviceKeys.js';

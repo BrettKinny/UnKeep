@@ -10,17 +10,43 @@ export interface DeviceCredential { id:string; name:string; revokedAt:string|nul
 export interface ServiceCredential { id:string; name:string; createdAt:string; revokedAt:string|null }
 export interface RelayChange { kind:'note'|'attachment'; id:string; noteId?:string; envelope:unknown; deleted:boolean; revision:number }
 
-export function cleanRelayEndpoint(value: string): string {
+export interface RelayClientOptions {
+  allowInsecure?: boolean;
+}
+
+function isSafeHttpHostname(hostname: string): boolean {
+  if (hostname === 'localhost' || hostname === '::1' || hostname === '[::1]') return true;
+
+  const octets = hostname.split('.');
+  if (octets.length === 4 && octets.every(octet => /^\d+$/.test(octet))) {
+    const [first, second] = octets.map(Number);
+    if (first === 127 || first === 10 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168)) return true;
+  }
+
+  return hostname.endsWith('.internal') || (!hostname.includes('.') && !hostname.includes(':'));
+}
+
+export function cleanRelayEndpoint(value: string, options: RelayClientOptions = {}): string {
   const url = new URL(value);
-  if (url.protocol !== 'https:' && url.hostname !== 'localhost' && url.hostname !== '127.0.0.1') {
-    throw new Error('The sync server must use HTTPS');
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error('The sync server endpoint must use HTTP or HTTPS');
+  }
+  if (url.protocol === 'http:' && !options.allowInsecure && !isSafeHttpHostname(url.hostname)) {
+    throw new Error(`Plain HTTP is not allowed for ${url.hostname}. Use HTTPS, or set allowInsecure: true when constructing RelayClient to override this protection.`);
   }
   return url.origin;
 }
 
 export class RelayClient {
   readonly endpoint: string;
-  constructor(endpoint: string, private readonly credential?: string) { this.endpoint = cleanRelayEndpoint(endpoint); }
+  private readonly credential?: string;
+
+  constructor(endpoint: string, options?: RelayClientOptions);
+  constructor(endpoint: string, credential?: string, options?: RelayClientOptions);
+  constructor(endpoint: string, credentialOrOptions?: string | RelayClientOptions, options: RelayClientOptions = {}) {
+    this.credential = typeof credentialOrOptions === 'string' ? credentialOrOptions : undefined;
+    this.endpoint = cleanRelayEndpoint(endpoint, typeof credentialOrOptions === 'object' ? credentialOrOptions : options);
+  }
 
   private async request<T>(path: string, init: RequestInit = {}, authorization?: string): Promise<T> {
     const response = await globalThis.fetch(`${this.endpoint}/api/v1${path}`, {

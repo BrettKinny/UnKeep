@@ -12,9 +12,11 @@ function note(id:string,content:string,images?:NoteAttachment[]):Note {
   return {id,content,images,createdAt:1,updatedAt:1,pinned:false,archived:false};
 }
 
-test('claims setup through the SDK relay client',async()=>{
+test('claims setup through the SDK relay client over policy-approved loopback HTTP',async()=>{
   const relay=await startTestServer();
   try {
+    expect(relay.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:/);
+    expect(new RelayClient(relay.endpoint).endpoint).toBe(new URL(relay.endpoint).origin);
     const session=await claim(relay);
     expect(session.credential).toBeTruthy();
     await expect(new RelayClient(session.endpoint,session.credential).vault()).resolves.toEqual({vaultId:session.instanceId});
