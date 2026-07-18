@@ -1,4 +1,5 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdtemp, readFile, rm, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -12,7 +13,7 @@ import {
   RelayClient,
   type RelaySession,
 } from '@unkeep/client';
-import { runCli, type CliInput, type CliOutput } from './cli.js';
+import { MAX_ATTACHMENT_SIZE, runCli, type CliInput, type CliOutput } from './cli.js';
 import { encodeVaultKey } from './config.js';
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -86,7 +87,7 @@ async function testContext(): Promise<{
 async function invoke(
   arguments_: string[],
   environment: Record<string, string>,
-  options: { stdin?: CliInput; now?: () => number } = {},
+  options: { stdin?: CliInput; now?: () => number; cwd?: string } = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   const stdout = new Capture();
   const stderr = new Capture();
@@ -96,6 +97,7 @@ async function invoke(
     stdout,
     stderr,
     now: options.now,
+    cwd: options.cwd,
   });
   return { code, stdout: stdout.value, stderr: stderr.value };
 }
@@ -197,4 +199,73 @@ test('login refuses to prompt when stdio is not a TTY', async () => {
   expect(result.code).toBe(1);
   expect(result.stdout).toBe('');
   expect(result.stderr).toContain('interactive terminal');
+});
+
+test('clips binary files and pastes the latest or a selected clip on a second client', async () => {
+  const context = await testContext();
+  const destination = await mkdtemp(join(tmpdir(), 'unkeep-cli-paste-'));
+  cleanups.push(() => rm(destination, { recursive: true, force: true }));
+  const secondEnvironment = { ...context.environment, XDG_CONFIG_HOME: destination };
+  const firstBytes = Uint8Array.from([0, 255, 1, 128, 10, 13, 0, 42]);
+  const latestBytes = new TextEncoder().encode('the newest clip\n');
+  const firstPath = join(context.directory, 'payload.bin');
+  const latestPath = join(context.directory, 'latest.txt');
+  await writeFile(firstPath, firstBytes);
+  await writeFile(latestPath, latestBytes);
+
+  let result = await invoke(['clip', firstPath], context.environment, { now: () => 500 });
+  expect(result.code).toBe(0);
+  expect(result.stderr).toBe('');
+  const firstId = result.stdout.trim();
+
+  result = await invoke(['clip', latestPath, '--json'], context.environment, { now: () => 600 });
+  expect(result.code).toBe(0);
+  const latestClip = JSON.parse(result.stdout) as { id: string; name: string; mimeType: string; size: number };
+  expect(latestClip).toMatchObject({ name: 'latest.txt', mimeType: 'text/plain', size: latestBytes.byteLength });
+
+  const reader = new EncryptedSync(context.session, context.masterKey, new MemoryClientStorage());
+  const pulled = await reader.pull();
+  expect(pulled.notes).toHaveLength(1);
+  expect(pulled.notes[0]).toMatchObject({ title: 'Clipboard', labels: ['clipboard'] });
+  expect(pulled.notes[0].images?.map(attachment => attachment.id)).toEqual([firstId, latestClip.id]);
+  expect(pulled.attachments.map(value => createHash('sha256').update(value.bytes).digest('hex'))).toEqual([
+    createHash('sha256').update(firstBytes).digest('hex'),
+    createHash('sha256').update(latestBytes).digest('hex'),
+  ]);
+
+  result = await invoke(['paste', firstId], secondEnvironment, { cwd: destination });
+  expect(result).toEqual({ code: 0, stdout: 'payload.bin\n', stderr: '' });
+  expect(createHash('sha256').update(await readFile(join(destination, 'payload.bin'))).digest('hex'))
+    .toBe(createHash('sha256').update(firstBytes).digest('hex'));
+
+  result = await invoke(['paste'], secondEnvironment, { cwd: destination });
+  expect(result).toEqual({ code: 0, stdout: 'latest.txt\n', stderr: '' });
+  expect(await readFile(join(destination, 'latest.txt'))).toEqual(Buffer.from(latestBytes));
+
+  result = await invoke(['clip', '--list', '--json'], secondEnvironment, { cwd: destination });
+  expect(result.code).toBe(0);
+  expect((JSON.parse(result.stdout) as Array<{ id: string }>).map(clip => clip.id)).toEqual([latestClip.id, firstId]);
+
+  result = await invoke(['paste', firstId], secondEnvironment, { cwd: destination });
+  expect(result.code).toBe(1);
+  expect(result.stderr).toContain('Refusing to overwrite payload.bin');
+  await writeFile(join(destination, 'payload.bin'), 'changed');
+  result = await invoke(['paste', firstId, '--force'], secondEnvironment, { cwd: destination });
+  expect(result.code).toBe(0);
+  expect(await readFile(join(destination, 'payload.bin'))).toEqual(Buffer.from(firstBytes));
+});
+
+test('rejects an oversized clip before reading or uploading it', async () => {
+  const context = await testContext();
+  const oversizedPath = join(context.directory, 'oversized.bin');
+  await writeFile(oversizedPath, '');
+  await truncate(oversizedPath, MAX_ATTACHMENT_SIZE + 1);
+
+  const result = await invoke(['clip', oversizedPath], context.environment);
+  expect(result.code).toBe(1);
+  expect(result.stdout).toBe('');
+  expect(result.stderr).toContain('oversized.bin is too large. Attachments must be 25 MB or smaller.');
+
+  const reader = new EncryptedSync(context.session, context.masterKey, new MemoryClientStorage());
+  await expect(reader.pull()).resolves.toMatchObject({ notes: [], attachments: [] });
 });

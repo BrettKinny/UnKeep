@@ -1,6 +1,6 @@
 import type { ConfigFlags } from './config.js';
 
-export type CommandName = 'login' | 'list' | 'get' | 'put' | 'sync';
+export type CommandName = 'login' | 'list' | 'get' | 'put' | 'sync' | 'clip' | 'paste';
 
 export interface ParsedArguments extends ConfigFlags {
   command?: CommandName;
@@ -16,10 +16,12 @@ export interface ParsedArguments extends ConfigFlags {
   id?: string;
   title?: string;
   content?: string;
+  listClips: boolean;
+  force: boolean;
   positionals: string[];
 }
 
-const commands = new Set<CommandName>(['login', 'list', 'get', 'put', 'sync']);
+const commands = new Set<CommandName>(['login', 'list', 'get', 'put', 'sync', 'clip', 'paste']);
 
 function booleanValue(option: string, value: string | undefined): boolean {
   if (value === undefined || value === '') return true;
@@ -33,6 +35,8 @@ export function parseArguments(arguments_: readonly string[]): ParsedArguments {
     json: false,
     help: false,
     version: false,
+    listClips: false,
+    force: false,
     labels: [],
     positionals: [],
   };
@@ -77,6 +81,8 @@ export function parseArguments(arguments_: readonly string[]): ParsedArguments {
       case '--id': result.id = takeValue(); break;
       case '--title': result.title = takeValue(); break;
       case '--content': result.content = takeValue(); break;
+      case '--list': result.listClips = booleanValue(option, inlineValue); break;
+      case '--force': result.force = booleanValue(option, inlineValue); break;
       case '--archived': result.archived = booleanValue(option, inlineValue); break;
       case '--no-archived': result.archived = false; break;
       case '--pinned': result.pinned = booleanValue(option, inlineValue); break;

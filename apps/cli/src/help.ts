@@ -8,6 +8,8 @@ Commands:
   get <id>              Print a note's content
   put <id> [content]    Create or update a note (reads content from stdin when omitted)
   sync                   Pull remote changes into local CLI state
+  clip <file>            Encrypt and upload a file to the clipboard
+  paste [id]             Download the latest clip (or a specific attachment ID)
 
 Connection options (flags override environment and config file):
   --endpoint <url>       Relay URL (UNKEEP_ENDPOINT)
@@ -32,4 +34,8 @@ Put options:
   --label <label>        Set labels (repeatable; comma-separated values accepted)
   --archived[=true|false]
   --pinned[=true|false]
+
+Clipboard options:
+  clip --list            List clips, newest first
+  paste --force          Replace an existing file with the same name
 `;

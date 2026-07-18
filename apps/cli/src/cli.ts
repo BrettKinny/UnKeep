@@ -1,4 +1,5 @@
-import { join } from 'node:path';
+import { readFile, stat, writeFile } from 'node:fs/promises';
+import { basename, extname, join, resolve } from 'node:path';
 import {
   createPairingRequest,
   DeviceKeyStore,
@@ -9,7 +10,7 @@ import {
   waitForPairing,
   type RelaySession,
 } from '@unkeep/client';
-import { validateNoteId, type Note } from '@unkeep/core';
+import { validateNoteId, type Note, type NoteAttachment } from '@unkeep/core';
 import { parseArguments, type ParsedArguments } from './arguments.js';
 import {
   decodeVaultKey,
@@ -23,6 +24,27 @@ import { JsonFileClientStorage } from './storage.js';
 
 const DEVICE_ID_KEY = 'unkeep-cli-device-id';
 const NOTES_PREFIX = 'unkeep-cli-notes:';
+const CLIPBOARD_NOTE_ID = 'unkeep-clipboard';
+export const MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024;
+
+const MIME_TYPES: Readonly<Record<string, string>> = {
+  '.avif': 'image/avif',
+  '.csv': 'text/csv',
+  '.gif': 'image/gif',
+  '.htm': 'text/html',
+  '.html': 'text/html',
+  '.jpeg': 'image/jpeg',
+  '.jpg': 'image/jpeg',
+  '.json': 'application/json',
+  '.md': 'text/markdown',
+  '.pdf': 'application/pdf',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.txt': 'text/plain',
+  '.webp': 'image/webp',
+  '.xml': 'application/xml',
+  '.zip': 'application/zip',
+};
 
 export interface CliInput extends AsyncIterable<string | Uint8Array> {
   isTTY?: boolean;
@@ -41,6 +63,7 @@ export interface RunCliOptions {
   configDir?: string;
   signal?: AbortSignal;
   now?: () => number;
+  cwd?: string;
   onPairingCode?: (code: string) => void | Promise<void>;
 }
 
@@ -53,6 +76,7 @@ interface CommandContext {
   environment: Record<string, string | undefined>;
   signal?: AbortSignal;
   now: () => number;
+  cwd: string;
   onPairingCode?: (code: string) => void | Promise<void>;
 }
 
@@ -169,6 +193,30 @@ function stableNote(note: Note): Note {
   if (note.images !== undefined) result.images = note.images;
   if (note.deleted !== undefined) result.deleted = note.deleted;
   return result;
+}
+
+function stableAttachment(attachment: NoteAttachment): NoteAttachment {
+  return {
+    id: attachment.id,
+    name: attachment.name,
+    mimeType: attachment.mimeType,
+    size: attachment.size,
+  };
+}
+
+function clipboardAttachments(notes: Record<string, Note>): NoteAttachment[] {
+  return notes[CLIPBOARD_NOTE_ID]?.images ?? [];
+}
+
+function mimeType(fileName: string): string {
+  return MIME_TYPES[extname(fileName).toLocaleLowerCase()] ?? 'application/octet-stream';
+}
+
+function pasteFileName(name: string): string {
+  if (!name || name === '.' || name === '..' || basename(name) !== name || name.includes('\\')) {
+    throw new Error(`Clip has an unsafe filename: ${JSON.stringify(name)}`);
+  }
+  return name;
 }
 
 function writeJson(output: CliOutput, value: unknown): void {
@@ -308,6 +356,103 @@ async function handlePut(context: CommandContext): Promise<void> {
   else context.stdout.write(`${id}\n`);
 }
 
+async function handleClip(context: CommandContext): Promise<void> {
+  if (context.arguments.listClips) {
+    if (context.arguments.positionals.length) throw new Error('clip --list does not accept a file');
+    const vault = await connectedVault(context);
+    await syncNotes(vault, context.storage);
+    const notes = await loadNotes(context.storage, vault.session.instanceId);
+    const clips = [...clipboardAttachments(notes)].reverse().map(stableAttachment);
+    if (context.arguments.json) {
+      writeJson(context.stdout, clips);
+      return;
+    }
+    for (const clip of clips) context.stdout.write(`${clip.id}\t${clip.name}\t${clip.size}\n`);
+    return;
+  }
+
+  if (context.arguments.positionals.length !== 1) throw new Error('clip requires exactly one file');
+  const filePath = resolve(context.cwd, context.arguments.positionals[0]);
+  let file: Awaited<ReturnType<typeof stat>>;
+  try {
+    file = await stat(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error(`File not found: ${filePath}`);
+    throw error;
+  }
+  if (!file.isFile()) throw new Error(`Not a file: ${filePath}`);
+  const name = basename(filePath);
+  if (file.size > MAX_ATTACHMENT_SIZE) {
+    throw new Error(`${name} is too large. Attachments must be 25 MB or smaller.`);
+  }
+
+  const vault = await connectedVault(context);
+  await syncNotes(vault, context.storage);
+  const notes = await loadNotes(context.storage, vault.session.instanceId);
+  const existing = notes[CLIPBOARD_NOTE_ID];
+  const attachment: NoteAttachment = {
+    id: globalThis.crypto.randomUUID(),
+    name,
+    mimeType: mimeType(name),
+    size: file.size,
+  };
+  const timestamp = context.now();
+  const note: Note = {
+    ...existing,
+    id: CLIPBOARD_NOTE_ID,
+    title: existing?.title ?? 'Clipboard',
+    content: existing?.content ?? 'Files clipped with UnKeep.',
+    createdAt: existing?.createdAt ?? timestamp,
+    updatedAt: timestamp,
+    pinned: existing?.pinned ?? false,
+    archived: existing?.archived ?? false,
+    labels: [...new Set([...(existing?.labels ?? []), 'clipboard'])],
+    images: [...(existing?.images ?? []), attachment],
+    deleted: false,
+  };
+  const bytes = Uint8Array.from(await readFile(filePath));
+  await vault.sync.uploadAttachment(note.id, attachment, bytes);
+  await vault.sync.push(note);
+  notes[note.id] = note;
+  await saveNotes(context.storage, vault.session.instanceId, notes);
+
+  if (context.arguments.json) writeJson(context.stdout, stableAttachment(attachment));
+  else context.stdout.write(`${attachment.id}\n`);
+}
+
+async function handlePaste(context: CommandContext): Promise<void> {
+  const id = context.arguments.id ?? context.arguments.positionals[0];
+  if (context.arguments.positionals.length > (context.arguments.id ? 0 : 1)) {
+    throw new Error('paste accepts only one clip ID');
+  }
+  if (id) validateNoteId(id);
+
+  const vault = await connectedVault(context);
+  await syncNotes(vault, context.storage);
+  const notes = await loadNotes(context.storage, vault.session.instanceId);
+  const clips = clipboardAttachments(notes);
+  const attachment = id ? clips.find(clip => clip.id === id) : clips.at(-1);
+  if (!attachment) throw new Error(id ? `Clip not found: ${id}` : 'No clips available');
+
+  const name = pasteFileName(attachment.name);
+  const destination = join(context.cwd, name);
+  const bytes = await vault.sync.downloadAttachment(CLIPBOARD_NOTE_ID, attachment);
+  try {
+    await writeFile(destination, bytes, { flag: context.arguments.force ? 'w' : 'wx' });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new Error(`Refusing to overwrite ${name}; use --force to replace it`);
+    }
+    throw error;
+  }
+
+  if (context.arguments.json) {
+    writeJson(context.stdout, { id: attachment.id, name, path: destination, size: bytes.byteLength });
+  } else {
+    context.stdout.write(`${name}\n`);
+  }
+}
+
 export async function runCli(arguments_: readonly string[], options: RunCliOptions = {}): Promise<number> {
   const stdout = options.stdout ?? process.stdout;
   const stderr = options.stderr ?? process.stderr;
@@ -335,6 +480,7 @@ export async function runCli(arguments_: readonly string[], options: RunCliOptio
       environment,
       signal: options.signal,
       now: options.now ?? Date.now,
+      cwd: options.cwd ?? process.cwd(),
       onPairingCode: options.onPairingCode,
     };
     switch (argumentsParsed.command) {
@@ -343,6 +489,8 @@ export async function runCli(arguments_: readonly string[], options: RunCliOptio
       case 'get': await handleGet(context); break;
       case 'put': await handlePut(context); break;
       case 'sync': await handleSync(context); break;
+      case 'clip': await handleClip(context); break;
+      case 'paste': await handlePaste(context); break;
       default: throw new Error(`Unknown command: ${String(argumentsParsed.command)}`);
     }
     return 0;
