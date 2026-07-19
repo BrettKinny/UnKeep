@@ -120,57 +120,83 @@ export async function parseKeepZip(file: File): Promise<{ notes: Note[]; preview
 }
 
 async function extractZipJsonFiles(buffer: ArrayBuffer): Promise<File[]> {
-  // Simple ZIP parser for JSON files
+  // Parse via the central directory: local file headers cannot be trusted for
+  // sizes — streamed zips (e.g. Google Takeout) write 0 there and put the real
+  // sizes in a trailing data descriptor.
   const view = new DataView(buffer);
   const files: File[] = [];
-  let offset = 0;
 
-  while (offset < buffer.byteLength - 4) {
-    const sig = view.getUint32(offset, true);
-    if (sig !== 0x04034b50) break; // Local file header signature
+  const eocd = findEndOfCentralDirectory(view);
+  if (eocd === -1) return files;
 
-    const compMethod = view.getUint16(offset + 8, true);
-    const compSize = view.getUint32(offset + 18, true);
-    const nameLen = view.getUint16(offset + 26, true);
-    const extraLen = view.getUint16(offset + 28, true);
+  const entryCount = view.getUint16(eocd + 10, true);
+  let offset = view.getUint32(eocd + 16, true);
 
-    const nameBytes = new Uint8Array(buffer, offset + 30, nameLen);
+  for (let i = 0; i < entryCount; i++) {
+    if (offset + 46 > buffer.byteLength) break;
+    if (view.getUint32(offset, true) !== 0x02014b50) break; // Central directory entry signature
+
+    const compMethod = view.getUint16(offset + 10, true);
+    const compSize = view.getUint32(offset + 20, true);
+    const nameLen = view.getUint16(offset + 28, true);
+    const extraLen = view.getUint16(offset + 30, true);
+    const commentLen = view.getUint16(offset + 32, true);
+    const localOffset = view.getUint32(offset + 42, true);
+
+    const nameBytes = new Uint8Array(buffer, offset + 46, nameLen);
     const name = new TextDecoder().decode(nameBytes);
+    offset += 46 + nameLen + extraLen + commentLen;
 
-    const dataStart = offset + 30 + nameLen + extraLen;
+    if (!name.endsWith('.json') || !(name.includes('Keep/') || name.includes('keep/'))) continue;
+
+    // Name/extra lengths in the local header can differ from the central
+    // directory's, so re-read them to locate the data.
+    const lNameLen = view.getUint16(localOffset + 26, true);
+    const lExtraLen = view.getUint16(localOffset + 28, true);
+    const dataStart = localOffset + 30 + lNameLen + lExtraLen;
     const rawData = new Uint8Array(buffer, dataStart, compSize);
 
-    if (name.endsWith('.json') && (name.includes('Keep/') || name.includes('keep/'))) {
-      let data: Uint8Array;
-      if (compMethod === 8) {
-        // Deflate — use DecompressionStream
-        const ds = new DecompressionStream('deflate-raw');
-        const writer = ds.writable.getWriter();
-        writer.write(rawData);
-        writer.close();
-        const reader = ds.readable.getReader();
-        const chunks: Uint8Array[] = [];
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          chunks.push(value);
-        }
-        const totalLen = chunks.reduce((s, c) => s + c.length, 0);
-        data = new Uint8Array(totalLen);
-        let pos = 0;
-        for (const chunk of chunks) {
-          data.set(chunk, pos);
-          pos += chunk.length;
-        }
-      } else {
-        data = rawData;
-      }
-      const filename = name.split('/').pop() || name;
-      files.push(new File([data as BlobPart], filename, { type: 'application/json' }));
+    let data: Uint8Array;
+    if (compMethod === 8) {
+      data = await inflateRaw(rawData);
+    } else {
+      data = rawData;
     }
-
-    offset = dataStart + compSize;
+    const filename = name.split('/').pop() || name;
+    files.push(new File([data as BlobPart], filename, { type: 'application/json' }));
   }
 
   return files;
+}
+
+function findEndOfCentralDirectory(view: DataView): number {
+  // EOCD is at the very end of the file, preceded only by an optional comment
+  // of up to 65535 bytes.
+  const min = Math.max(0, view.byteLength - 22 - 65535);
+  for (let i = view.byteLength - 22; i >= min; i--) {
+    if (view.getUint32(i, true) === 0x06054b50) return i;
+  }
+  return -1;
+}
+
+async function inflateRaw(rawData: Uint8Array<ArrayBuffer>): Promise<Uint8Array> {
+  const ds = new DecompressionStream('deflate-raw');
+  const writer = ds.writable.getWriter();
+  writer.write(rawData);
+  writer.close();
+  const reader = ds.readable.getReader();
+  const chunks: Uint8Array[] = [];
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+  }
+  const totalLen = chunks.reduce((s, c) => s + c.length, 0);
+  const data = new Uint8Array(totalLen);
+  let pos = 0;
+  for (const chunk of chunks) {
+    data.set(chunk, pos);
+    pos += chunk.length;
+  }
+  return data;
 }

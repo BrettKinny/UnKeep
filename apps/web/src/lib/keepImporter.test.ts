@@ -165,3 +165,97 @@ describe('parseKeepFiles', () => {
     expect(preview.samples).toHaveLength(5);
   });
 });
+
+const { parseKeepZip } = await import('./keepImporter.js');
+
+interface ZipEntry {
+  name: string;
+  content: string;
+}
+
+function crc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let i = 0; i < 8; i++) {
+      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+// Builds a stored (uncompressed) zip. With `streamed: true` it mimics Google
+// Takeout: local headers carry flag bit 3 with zero sizes, and the real sizes
+// follow each entry in a data descriptor.
+function buildZip(entries: ZipEntry[], { streamed = false } = {}): File {
+  const encoder = new TextEncoder();
+  const parts: Uint8Array[] = [];
+  const central: Uint8Array[] = [];
+  let offset = 0;
+
+  const u16 = (v: number) => [v & 0xff, (v >> 8) & 0xff];
+  const u32 = (v: number) => [v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff];
+
+  for (const entry of entries) {
+    const nameBytes = encoder.encode(entry.name);
+    const data = encoder.encode(entry.content);
+    const crc = crc32(data);
+    const flags = streamed ? 0x0808 : 0x0800;
+    const localSizes = streamed ? [0, 0, 0] : [crc, data.length, data.length];
+
+    const local = new Uint8Array([
+      ...u32(0x04034b50), ...u16(20), ...u16(flags), ...u16(0), ...u16(0), ...u16(0),
+      ...u32(localSizes[0]), ...u32(localSizes[1]), ...u32(localSizes[2]),
+      ...u16(nameBytes.length), ...u16(0), ...nameBytes,
+    ]);
+    parts.push(local, data);
+    let entryLen = local.length + data.length;
+    if (streamed) {
+      parts.push(new Uint8Array([...u32(0x08074b50), ...u32(crc), ...u32(data.length), ...u32(data.length)]));
+      entryLen += 16;
+    }
+
+    central.push(new Uint8Array([
+      ...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(flags), ...u16(0), ...u16(0), ...u16(0),
+      ...u32(crc), ...u32(data.length), ...u32(data.length),
+      ...u16(nameBytes.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0),
+      ...u32(0), ...u32(offset), ...nameBytes,
+    ]));
+    offset += entryLen;
+  }
+
+  const centralStart = offset;
+  const centralSize = central.reduce((s, c) => s + c.length, 0);
+  const eocd = new Uint8Array([
+    ...u32(0x06054b50), ...u16(0), ...u16(0),
+    ...u16(entries.length), ...u16(entries.length),
+    ...u32(centralSize), ...u32(centralStart), ...u16(0),
+  ]);
+
+  return new File([...parts, ...central, eocd] as BlobPart[], 'takeout.zip', { type: 'application/zip' });
+}
+
+describe('parseKeepZip', () => {
+  const entries: ZipEntry[] = [
+    { name: 'Takeout/Keep/note.json', content: JSON.stringify({ textContent: 'From zip' }) },
+    { name: 'Takeout/Keep/note.html', content: '<html>ignored</html>' },
+    { name: 'Takeout/archive_browser.html', content: '<html>not keep</html>' },
+  ];
+
+  it('parses a conventional zip', async () => {
+    const { notes } = await parseKeepZip(buildZip(entries));
+    expect(notes).toHaveLength(1);
+    expect(notes[0].content).toBe('From zip');
+  });
+
+  it('parses a streamed zip with data descriptors (Google Takeout format)', async () => {
+    const { notes } = await parseKeepZip(buildZip(entries, { streamed: true }));
+    expect(notes).toHaveLength(1);
+    expect(notes[0].content).toBe('From zip');
+  });
+
+  it('returns no notes for a non-zip file', async () => {
+    const { notes } = await parseKeepZip(new File(['not a zip'], 'bogus.zip'));
+    expect(notes).toHaveLength(0);
+  });
+});
