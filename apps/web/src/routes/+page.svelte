@@ -40,10 +40,10 @@
 
 {#if vaultReady}
   <main class="min-h-screen bg-surface">
-    <header class="sticky top-0 z-30 flex min-h-16 items-center gap-1.5 border-b border-border bg-surface/95 px-2 pr-12 pt-[env(safe-area-inset-top)] backdrop-blur-sm sm:gap-3 sm:px-3 sm:pr-14">
+    <header class="sticky top-0 z-30 flex min-h-[calc(4rem+env(safe-area-inset-top))] items-center gap-1.5 border-b border-border bg-surface/95 px-2 pr-14 pt-[env(safe-area-inset-top)] backdrop-blur-sm sm:gap-3 sm:px-3">
       <button
         onclick={() => sidebarOpen = !sidebarOpen}
-        class="shrink-0 rounded-full p-2.5 text-on-surface-muted hover:bg-surface-dim hover:text-on-surface"
+        class="shrink-0 rounded-full p-2 text-on-surface-muted hover:bg-surface-dim hover:text-on-surface"
         aria-label="Toggle navigation"
       >
         <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
