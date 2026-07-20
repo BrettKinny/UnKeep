@@ -20,6 +20,8 @@ alias unkeep="node /path/to/UnKeep/apps/cli/dist/bin.js"
 unkeep --endpoint https://unkeep.example.com login   # approve the code on a paired device
 ```
 
+No checkout handy? The Docker image bundles the CLI, so `docker compose exec -it unkeep unkeep login --endpoint http://127.0.0.1:3000` works too (config written inside the container is lost when it is recreated — fine for minting bundles, wrong for daily use).
+
 Then mint a bundle per agent or environment:
 
 ```sh

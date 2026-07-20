@@ -28,7 +28,7 @@ Open the HTTPS address. On the first device, enter the setup token once — it's
 
 ### Terminal & agent access
 
-After building (`pnpm build`), the `unkeep` CLI (`apps/cli/dist/bin.js`) talks to the same vault:
+After building (`pnpm build`), the `unkeep` CLI (`apps/cli/dist/bin.js`) talks to the same vault — and the Docker image bundles it, so `docker compose exec unkeep unkeep list` works with no checkout at all:
 
 ```bash
 unkeep login                                   # pair this terminal (approve on any device)
