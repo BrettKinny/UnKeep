@@ -168,6 +168,41 @@ test('reads put content from stdin and sends failures only to stderr', async () 
   expect(result.stderr).toContain('Unknown command');
 });
 
+test('creates notes with generated IDs and deletes them with tombstones', async () => {
+  const context = await testContext();
+  let result = await invoke(['put', '--content', 'scratch entry', '--json'], context.environment, { now: () => 400 });
+  expect(result.code).toBe(0);
+  expect(result.stderr).toBe('');
+  const created = JSON.parse(result.stdout) as { id: string; content: string };
+  expect(created.id).toMatch(/^[0-9a-f-]{36}$/);
+  expect(created.content).toBe('scratch entry');
+
+  result = await invoke(['put'], context.environment, { stdin: input('piped scratch\n'), now: () => 401 });
+  expect(result.code).toBe(0);
+  const pipedId = result.stdout.trim();
+  expect(pipedId).toMatch(/^[0-9a-f-]{36}$/);
+
+  result = await invoke(['delete', created.id, '--json'], context.environment, { now: () => 402 });
+  expect(result).toEqual({ code: 0, stdout: `${JSON.stringify({ id: created.id, deleted: true })}\n`, stderr: '' });
+
+  result = await invoke(['get', created.id], context.environment);
+  expect(result.code).toBe(1);
+  expect(result.stderr).toContain(`Note not found: ${created.id}`);
+
+  result = await invoke(['delete', created.id], context.environment);
+  expect(result.code).toBe(1);
+  expect(result.stderr).toContain(`Note not found: ${created.id}`);
+
+  result = await invoke(['list', '--json'], context.environment);
+  expect(JSON.parse(result.stdout).map((note: { id: string }) => note.id)).toEqual([pipedId]);
+
+  // Another device sees the tombstone, not the deleted note.
+  const second = new EncryptedSync(context.session, context.masterKey, new MemoryClientStorage());
+  const pulled = await second.pull();
+  expect(pulled.notes.map(note => note.id)).toEqual([pipedId]);
+  expect(pulled.deletedIds).toContain(created.id);
+});
+
 test('login pairs as a normal device and persists reusable state', async () => {
   const context = await testContext();
   const stdout = new Capture(true);
