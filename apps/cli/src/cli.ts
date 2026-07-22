@@ -408,11 +408,11 @@ async function handleGet(context: CommandContext): Promise<void> {
 }
 
 async function handlePut(context: CommandContext): Promise<void> {
-  const id = context.arguments.id ?? context.arguments.positionals[0];
-  if (!id) throw new Error('put requires a note ID (positional or --id)');
+  const providedId = context.arguments.id ?? context.arguments.positionals[0];
+  const id = providedId ?? globalThis.crypto.randomUUID();
   validateNoteId(id);
   if (id.length > 128) throw new Error('Note ID cannot exceed 128 characters');
-  const contentArguments = context.arguments.id ? context.arguments.positionals : context.arguments.positionals.slice(1);
+  const contentArguments = providedId && !context.arguments.id ? context.arguments.positionals.slice(1) : context.arguments.positionals;
   if (context.arguments.content !== undefined && contentArguments.length) {
     throw new Error('Specify note content with either --content or positional arguments, not both');
   }
@@ -446,6 +446,25 @@ async function handlePut(context: CommandContext): Promise<void> {
   notes[id] = note;
   await saveNotes(context.storage, vault.session.instanceId, notes);
   if (context.arguments.json) writeJson(context.stdout, stableNote(note));
+  else context.stdout.write(`${id}\n`);
+}
+
+async function handleDelete(context: CommandContext): Promise<void> {
+  const id = context.arguments.id ?? context.arguments.positionals[0];
+  if (!id) throw new Error('delete requires a note ID');
+  if (context.arguments.positionals.length > (context.arguments.id ? 0 : 1)) throw new Error('delete accepts only one note ID');
+  validateNoteId(id);
+
+  const vault = await connectedVault(context);
+  await syncNotes(vault, context.storage);
+  const notes = await loadNotes(context.storage, vault.session.instanceId);
+  const existing = notes[id];
+  if (!existing) throw new Error(`Note not found: ${id}`);
+
+  await vault.sync.push({ ...existing, deleted: true, updatedAt: context.now() });
+  delete notes[id];
+  await saveNotes(context.storage, vault.session.instanceId, notes);
+  if (context.arguments.json) writeJson(context.stdout, { id, deleted: true });
   else context.stdout.write(`${id}\n`);
 }
 
@@ -583,6 +602,7 @@ export async function runCli(arguments_: readonly string[], options: RunCliOptio
       case 'list': await handleList(context); break;
       case 'get': await handleGet(context); break;
       case 'put': await handlePut(context); break;
+      case 'delete': await handleDelete(context); break;
       case 'sync': await handleSync(context); break;
       case 'clip': await handleClip(context); break;
       case 'paste': await handlePaste(context); break;

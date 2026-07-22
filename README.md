@@ -2,7 +2,12 @@
 
 *Your notes. Your storage.*
 
-UnKeep is a privacy-first, open-source note-taking PWA with its own small, self-hostable sync server. Notes and images are encrypted in the browser before upload, while every device keeps an IndexedDB working copy for local-first editing.
+UnKeep is a privacy-first, open-source notes vault that serves two purposes at once:
+
+1. **A self-hosted Google Keep replacement** — an installable PWA with pinning, colors, checklists, search, archive, and a Takeout importer, backed by your own tiny sync server.
+2. **A scratchpad for AI agents and scripts** — the same notes, reachable from any terminal through the `unkeep` CLI. Provision an agent with three environment variables and it can read, write, search, and delete notes (and clip files) non-interactively; everything it writes appears as cards in your browser. See the [agent scratchpad guide](docs/agent-scratchpad.md).
+
+Notes and images are encrypted client-side before upload, while every device keeps a local working copy for offline-first editing.
 
 Run it as a single Docker container on your own hardware (Unraid, a VPS, a NUC under the desk). The server stores only ciphertext and per-device credential hashes — it never sees your vault key or plaintext.
 
@@ -21,6 +26,21 @@ Put port 3000 behind an HTTPS reverse proxy, Tailscale Serve, or Cloudflare Tunn
 
 Open the HTTPS address. On the first device, enter the setup token once — it's exchanged for a revocable device credential and cannot be reused. Save the recovery kit when prompted. See the [self-hosting guide](docs/self-hosting.md) for pairing additional devices, backups, and Unraid settings.
 
+### Terminal & agent access
+
+After building (`pnpm build`), the `unkeep` CLI (`apps/cli/dist/bin.js`) talks to the same vault — and the Docker image bundles it, so `docker compose exec unkeep unkeep list` works with no checkout at all:
+
+```bash
+unkeep login                                   # pair this terminal (approve on any device)
+unkeep put --title "Idea" --content "…"        # create a note (prints the generated ID)
+unkeep list -q idea --json                     # sync + search, stable JSON output
+unkeep get <id>                                # print a note's content
+unkeep delete <id>                             # remove it everywhere
+unkeep clip ./file.pdf && unkeep paste         # encrypted cross-machine file clipboard
+```
+
+For headless use — CI jobs, cron scripts, AI coding agents — mint a revocable service credential with `unkeep provision --name <agent>` and export the three environment variables it prints. The [agent scratchpad guide](docs/agent-scratchpad.md) covers provisioning, JSON output, conventions, and a drop-in `CLAUDE.md`/`AGENTS.md` snippet.
+
 ### Develop locally
 
 ```bash
@@ -31,9 +51,9 @@ pnpm dev          # builds core, then starts SvelteKit dev server → http://loc
 Other useful commands:
 
 ```bash
-pnpm build        # build core + web (outputs to apps/web/build/)
+pnpm build        # build core, client, CLI, and web (PWA output in apps/web/build/)
 pnpm start        # run the relay server (apps/server)
-pnpm test         # core + web + server tests
+pnpm test         # all workspace tests (core, client, cli, web, server)
 pnpm check        # svelte-kit sync + svelte-check (type checking)
 pnpm lint         # eslint on the web app
 ```
@@ -53,10 +73,13 @@ pnpm lint         # eslint on the web app
 - **Quick Send** — share a note via URL. The content is compressed and encoded in the URL fragment (`#`), so it never touches a server.
 - **E2E encryption** — versioned AES-256-GCM envelopes for notes and images, using a random master key wrapped per trusted device.
 - **Cross-device sync** — encrypted UnKeep relay with revision cursors, tombstones, pairing, and offline retry.
+- **Terminal CLI** — `unkeep list/get/put/delete/sync` against the same encrypted vault, with `--json` output, stdin piping, and label/search filters.
+- **Agent-friendly** — mint per-agent service credentials (`unkeep provision`) so AI agents and scripts get non-interactive, revocable access via three env vars.
+- **File clipboard** — `unkeep clip <file>` / `unkeep paste` moves encrypted files between machines (and the browser).
 
 ## Architecture
 
-UnKeep is a **pnpm monorepo** with three packages:
+UnKeep is a **pnpm monorepo** with five workspaces:
 
 ```
 UnKeep/
@@ -73,6 +96,12 @@ UnKeep/
 │       ├── markdown.ts      # Note ↔ Markdown conversion
 │       ├── oauth.ts         # PKCE helpers
 │       └── validation.ts    # Input sanitization
+│
+├── packages/client/        ← Headless client SDK (Node + browser)
+│   └── src/                 # RelayClient, EncryptedSync, device keys, pairing
+│
+├── apps/cli/               ← `unkeep` terminal client / agent interface
+│   └── src/                 # login, provision, list/get/put/delete, sync, clip/paste
 │
 ├── apps/web/               ← SvelteKit SPA (adapter-static)
 │   └── src/
@@ -102,13 +131,17 @@ UnKeep/
 
 1. **`@unkeep/core`** defines the data model (`Note` type), the `StorageAdapter` interface, and the crypto envelope layer (`crypto.ts`). It has no framework dependencies — it's just TypeScript compiled with `tsc`. You need to build it before the web app can use it (`pnpm --filter @unkeep/core build`).
 
-2. **`apps/web`** is the SvelteKit frontend. It imports `@unkeep/core` as a workspace dependency and uses it to read/write notes through the active storage path.
+2. **`@unkeep/client`** is the headless client SDK: relay HTTP client, encrypted sync, device key store, and pairing flows. It runs in Node and the browser, and is what makes non-browser clients (the CLI, future bots) first-class citizens of the vault.
 
-3. **`noteStore`** (`apps/web/src/lib/noteStore.svelte.ts`) is the singleton reactive store that owns all note state. It uses Svelte 5 runes (`$state`, `$derived`) for reactivity. When you create, edit, or delete a note, the store debounces the write (500ms) and delegates persistence to IndexedDB, then queues an encrypted sync.
+3. **`apps/cli`** wraps `@unkeep/client` in the `unkeep` binary — the terminal and agent interface. It authenticates from flags, environment variables, or the config file written by `unkeep login`, and emits stable JSON with `--json`.
 
-4. **`EncryptedSync`** (`apps/web/src/lib/encryptedSync.ts`) + **`relayClient`** (`apps/web/src/lib/relayClient.ts`) encrypt records before they leave the browser and speak the versioned UnKeep HTTP sync protocol to the relay.
+4. **`apps/web`** is the SvelteKit frontend. It imports `@unkeep/core` as a workspace dependency and uses it to read/write notes through the active storage path.
 
-5. **`apps/server`** is a zero-dependency Node 22 server backed by SQLite (`/data/unkeep.sqlite`). It serves the built PWA and the sync API from one container. It stores only ciphertext envelopes, device credential hashes, and pairing state — never the vault key.
+5. **`noteStore`** (`apps/web/src/lib/noteStore.svelte.ts`) is the singleton reactive store that owns all note state. It uses Svelte 5 runes (`$state`, `$derived`) for reactivity. When you create, edit, or delete a note, the store debounces the write (500ms) and delegates persistence to IndexedDB, then queues an encrypted sync.
+
+6. **`EncryptedSync`** (`apps/web/src/lib/encryptedSync.ts`) + **`relayClient`** (`apps/web/src/lib/relayClient.ts`) encrypt records before they leave the browser and speak the versioned UnKeep HTTP sync protocol to the relay.
+
+7. **`apps/server`** is a zero-dependency Node 22 server backed by SQLite (`/data/unkeep.sqlite`). It serves the built PWA and the sync API from one container. It stores only ciphertext envelopes, device credential hashes, and pairing state — never the vault key.
 
 ### Data flow
 

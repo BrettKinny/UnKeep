@@ -10,7 +10,10 @@ Commands:
                         Revoke a service credential
   list                  List notes
   get <id>              Print a note's content
-  put <id> [content]    Create or update a note (reads content from stdin when omitted)
+  put [id] [content]    Create or update a note (reads content from stdin when
+                        omitted; omit the ID to create a note with a generated
+                        ID, printed on success)
+  delete <id>           Delete a note
   sync                   Pull remote changes into local CLI state
   clip <file>            Encrypt and upload a file to the clipboard
   paste [id]             Download the latest clip (or a specific attachment ID)

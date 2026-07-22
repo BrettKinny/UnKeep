@@ -20,21 +20,28 @@ This is a single-context repository using a root `CONTEXT.md` and `docs/adr/`. S
 
 ```bash
 pnpm install              # install all dependencies
-pnpm dev                  # build core, then start SvelteKit dev server at :5173
-pnpm build                # production build (core first, then web)
+pnpm dev                  # build core + client, then start SvelteKit dev server at :5173
+pnpm build                # production build (core, client, cli, then web)
+pnpm start                # run the relay server (apps/server) on :3000
 pnpm preview              # preview production build
-pnpm check                # svelte-kit sync + svelte-check (type checking)
+pnpm check                # type checking across core, client, cli, and web
 pnpm lint                 # eslint on the web app
+pnpm test                 # all workspace tests (core, client, cli, web, server)
 ```
 
-Core package only: `pnpm --filter @unkeep/core build` (runs `tsc`). Must be built before the web app can use it.
+Single package: `pnpm --filter @unkeep/core build` (likewise `@unkeep/client`, `@unkeep/cli`). `core` and `client` must be built (in that order) before the web app or CLI can use them.
 
 ## Architecture
 
-**pnpm monorepo** with two workspaces:
+UnKeep is dual-purpose: a self-hosted Keep-style PWA for humans, and a scratchpad AI agents reach from the terminal via the `unkeep` CLI (see `docs/agent-scratchpad.md`). Both speak the same encrypted sync protocol to the same relay.
 
-- `packages/core` — Pure TypeScript library. Defines the `Note` type, `StorageAdapter` interface, and adapter implementations (local/IndexedDB, local-markdown, git, s3). No framework dependencies. Built with `tsc` to `dist/`.
-- `apps/web` — SvelteKit SPA (`adapter-static`, outputs to `apps/web/build/`). Consumes `@unkeep/core` as a workspace dependency.
+**pnpm monorepo** with five workspaces:
+
+- `packages/core` — Pure TypeScript library. Defines the `Note` type, crypto envelopes (AES-256-GCM), validation, markdown conversion, the legacy `StorageAdapter` interface and adapters (local/IndexedDB, local-markdown, git, s3). No framework dependencies. Built with `tsc` to `dist/`.
+- `packages/client` — Headless client SDK: `RelayClient`, `EncryptedSync`, device key store, pairing. Runs in Node and the browser.
+- `apps/cli` — The `unkeep` binary: `login`, `provision` (mints agent env bundles), `credentials`, `list`, `get`, `put`, `delete`, `sync`, `clip`, `paste`. Auth from flags, `UNKEEP_*` env vars, or the config file; `--json` for stable machine output.
+- `apps/web` — SvelteKit SPA (`adapter-static`, outputs to `apps/web/build/`). Consumes `@unkeep/core` and `@unkeep/client` as workspace dependencies.
+- `apps/server` — Zero-dependency Node 22 relay: SQLite-backed sync API + static PWA host, stores only ciphertext.
 
 ### Key patterns
 

@@ -27,6 +27,18 @@ To add another device, open the server URL there, choose **Pair with another dev
 
 The hosted PWA can also connect to this server. Set `UNKEEP_ALLOWED_ORIGIN` to that PWA's origin if you want to restrict browser access; the default `*` is safe for the bearer-token API but less restrictive.
 
+## Terminal access
+
+The image bundles the `unkeep` CLI, so the container doubles as a zero-install terminal client:
+
+```sh
+docker compose exec unkeep unkeep --help
+docker compose exec -it unkeep unkeep login --endpoint http://127.0.0.1:3000
+docker compose exec unkeep unkeep list
+```
+
+Note that `login` stores the vault key in the container filesystem (lost when the container is recreated, and visible to anyone who can exec into it). For durable or agent access, prefer minting a service credential bundle with `unkeep provision` and exporting its `UNKEEP_*` variables wherever the CLI runs — see the [agent scratchpad guide](agent-scratchpad.md).
+
 ## Backups
 
 Back up the whole `/data` volume. It contains ciphertext and device records. Also keep the downloaded recovery kit somewhere separate: a server backup cannot decrypt your notes, and losing every paired device plus the recovery kit is permanent data loss.
