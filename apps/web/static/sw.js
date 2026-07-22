@@ -1,4 +1,4 @@
-const CACHE_NAME = 'unkeep-v5';
+const CACHE_NAME = 'unkeep-v6';
 const PRECACHE_URLS = [
   '/',
   '/manifest.json',

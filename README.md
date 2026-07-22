@@ -71,6 +71,7 @@ pnpm lint         # eslint on the web app
 - **PWA** — installable on iOS, Android, and desktop with full offline support.
 - **Takeout importer** — drag-drop a Google Takeout ZIP to import all your Keep notes, checklists, colors, and timestamps.
 - **Quick Send** — share a note via URL. The content is compressed and encoded in the URL fragment (`#`), so it never touches a server.
+- **Share sheet integration** — share text into UnKeep from other apps: native `share_target` on Android/Chrome, and a [one-action Shortcut on iOS](docs/ios-share-shortcut.md) (content travels in the URL fragment, so it never touches a server).
 - **E2E encryption** — versioned AES-256-GCM envelopes for notes and images, using a random master key wrapped per trusted device.
 - **Cross-device sync** — encrypted UnKeep relay with revision cursors, tombstones, pairing, and offline retry.
 - **Terminal CLI** — `unkeep list/get/put/delete/sync` against the same encrypted vault, with `--json` output, stdin piping, and label/search filters.

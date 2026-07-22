@@ -10,6 +10,8 @@
   import Toast from '$lib/components/Toast.svelte';
   import AuthVaultGate, { type VaultReady } from '$lib/components/AuthVaultGate.svelte';
   import KeepImporter from '$lib/components/KeepImporter.svelte';
+  import { takePendingShares } from '$lib/shareTarget';
+  import { toastStore } from '$lib/toast.svelte';
 
   let editingNote: Note | null = $state(null);
   let showArchive = $state(false);
@@ -25,6 +27,12 @@
     await noteStore.init();
     await noteStore.enableEncryptedSync(vault.session, vault.masterKey);
     vaultReady = true;
+    const shares = takePendingShares();
+    for (const share of shares) {
+      noteStore.createNote(share.text, share.title);
+    }
+    if (shares.length === 1) toastStore.show('Shared note saved');
+    else if (shares.length > 1) toastStore.show(`${shares.length} shared notes saved`);
   }
 
   function handleEditNote(note: Note) {
