@@ -40,13 +40,16 @@ function input(value = '', isTTY = false): CliInput {
 }
 
 async function firstDevice(relay: TestServer): Promise<{ session: RelaySession; masterKey: Uint8Array<ArrayBuffer> }> {
+  const relayClient = new RelayClient(relay.endpoint);
+  const status = await relayClient.status();
   const keys = new DeviceKeyStore(new MemoryClientStorage());
-  const provisioned = await keys.provisionFirstDevice();
-  const claimed = await new RelayClient(relay.endpoint).claimSetup(
+  const provisioned = await keys.provisionFirstDevice(status.instanceId);
+  const claimed = await relayClient.claimSetup(
     relay.setupToken,
     provisioned.deviceId,
     'CLI test owner',
   );
+  expect(claimed.instanceId).toBe(status.instanceId);
   return {
     masterKey: provisioned.masterKey,
     session: {

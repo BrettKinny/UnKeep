@@ -77,7 +77,7 @@ pnpm preview      # preview the static PWA without the relay API
 - **Search** — client-side matching across titles, bodies, checklist items, and labels.
 - **Attachments** — image previews and downloadable general files up to 25 MiB each. Bytes are saved durably in IndexedDB before upload and encrypted separately from note metadata.
 - **Encrypted sync** — AES-256-GCM note and attachment envelopes, revision cursors, tombstones, optimistic revision conflict protection, durable idempotent replay after a lost mutation response, device pairing, device revocation, and restricted service credentials.
-- **Recovery** — a locally generated recovery kit restores the vault key; a separate operator token restores relay authorization after every device is lost.
+- **Recovery** — authenticated recovery-kit v2 binds the vault key to its relay instance; a separate operator token restores relay authorization after every device is lost.
 - **Markdown preview** — a safe rendered subset covering headings, paragraphs, emphasis, strong text, inline and fenced code, ordered and unordered lists, line breaks, and absolute HTTP(S) links.
 - **Google Keep import** — Takeout ZIPs, or selected JSON and media files, import titles, text, checklists, labels, colors, timestamps, pin/archive state, and referenced media. Trashed Keep notes are skipped; note records commit in one local transaction, failed staging rolls back, and a durable journal finalizes or removes an import interrupted by tab termination on the next startup.
 - **Complete vault export and restore** — the web UI downloads one JSON file containing every currently loaded note and the bytes for every attachment. Export refuses corrupt or silently partial attachment data, and the import dialog validates the complete format, preserves collisions as copies, and uses the same transactional restore path.
@@ -215,7 +215,7 @@ The public packages are ESM and require Node.js 20 or newer when used in Node. T
 ## Recovery, backups, and security boundaries
 
 - The relay cannot decrypt vault contents. It stores ciphertext envelopes, credential hashes, record revisions, and temporary pairing state.
-- The recovery kit contains everything needed to recover the vault key. Treat it like a password; downloading a new kit from an authorized device invalidates neither older kits nor existing devices.
+- Recovery-kit v2 contains everything needed to recover the vault key and authenticates the relay instance it belongs to. Treat it like a password; downloading a new kit from an authorized device invalidates neither older kits nor existing devices. Legacy v1 kits require the explicit migration flow.
 - The operator recovery token can mint a replacement device credential but cannot decrypt the vault without a recovery kit. Rotating it does not revoke existing credentials.
 - Revoking a device prevents future relay access. It cannot erase keys or notes already copied to that device.
 - Back up the complete `/data` volume, the recovery kit, and the operator recovery token. Keep the latter two separate. A relay backup alone is ciphertext, and a recovery kit is not a backup of current note data.

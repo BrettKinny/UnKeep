@@ -11,6 +11,21 @@ describe('AuthVaultGate recovery paths', () => {
     expect(source).toContain('abort?.abort()');
   });
 
+  it('binds setup and recovery to the relay status instance before persisting access', () => {
+    expect(source).toContain('relayInstanceId=status.instanceId');
+    expect(source).toContain('provisionFirstDevice(relayInstanceId)');
+    expect(source).toContain('restoreDeviceFromRecovery(await file.text(),relayInstanceId)');
+    expect(source).toContain("if(result.instanceId!==relayInstanceId)throw new Error('Relay instance changed during setup')");
+    expect(source).toContain("if(result.instanceId!==relayInstanceId)throw new Error('Relay instance changed during recovery')");
+  });
+
+  it('does not enter the ready view until local vault initialization succeeds', () => {
+    const initialize = source.indexOf('await onReady(');
+    const transition = source.indexOf("view='ready'", initialize);
+    expect(initialize).toBeGreaterThan(-1);
+    expect(transition).toBeGreaterThan(initialize);
+  });
+
   it('keeps recovery-kit selection keyboard operable', () => {
     expect(source).toMatch(/Restore recovery kit[\s\S]*class="sr-only"/);
   });

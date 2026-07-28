@@ -5,7 +5,7 @@ interface SessionLoader {
 }
 
 interface DeviceKeyUnlocker {
-  unlockDevice(): Promise<Uint8Array<ArrayBuffer> | null>;
+  unlockDevice(instanceId: string): Promise<Uint8Array<ArrayBuffer> | null>;
 }
 
 export interface LocalVault {
@@ -22,9 +22,7 @@ export async function loadLocalVault(
   sessions: SessionLoader,
   keys: DeviceKeyUnlocker,
 ): Promise<LocalVault | null> {
-  const [session, masterKey] = await Promise.all([
-    sessions.load(),
-    keys.unlockDevice(),
-  ]);
+  const session = await sessions.load();
+  const masterKey = session ? await keys.unlockDevice(session.instanceId) : null;
   return session && masterKey ? { session, masterKey } : null;
 }

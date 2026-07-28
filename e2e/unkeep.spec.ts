@@ -30,7 +30,7 @@ test.describe.serial('UnKeep browser vault', () => {
     await context.close();
   });
 
-  async function relayStatus(): Promise<{ initialized: boolean }> {
+  async function relayStatus(): Promise<{ initialized: boolean; instanceId: string }> {
     const response = await page.request.get('/api/v1/status');
     expect(response.ok()).toBe(true);
     return response.json() as Promise<{ initialized: boolean }>;
@@ -57,7 +57,10 @@ test.describe.serial('UnKeep browser vault', () => {
     const downloadPath = await download.path();
     expect(downloadPath).not.toBeNull();
     const kit = JSON.parse(await readFile(downloadPath as string, 'utf8')) as Record<string, unknown>;
-    expect(kit).toMatchObject({ version: 1 });
+    expect(kit).toMatchObject({
+      version: 2,
+      instanceId: (await relayStatus()).instanceId,
+    });
     expect(kit.recoveryKey).toEqual(expect.any(String));
     expect(kit.masterKeyEnvelope).toEqual(expect.any(Object));
 

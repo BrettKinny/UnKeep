@@ -34,7 +34,9 @@ export {
 export type {
   EncryptedEnvelope,
   EncryptedEnvelopeV1,
+  RecoveryKit,
   RecoveryKitV1,
+  RecoveryKitV2,
   NoteEncryptionContext,
   AttachmentEncryptionContext,
 } from './crypto.js';
@@ -46,6 +48,7 @@ export {
   unwrapMasterKeyForDevice,
   createRecoveryKit,
   recoverMasterKey,
+  recoverLegacyMasterKey,
   exportRecoveryKit,
   importRecoveryKit,
   encryptNote,

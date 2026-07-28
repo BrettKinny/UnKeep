@@ -67,7 +67,7 @@ export async function waitForPairing(pairing:PairingSession,{keyStore,sessionSto
       const deviceId=await keyStore.getDeviceId();
       throwIfCancelled(signal);
       const pairedSession={endpoint:pairing.endpoint,instanceId:status.instanceId,deviceId,credential:data.deviceCredential};
-      await keyStore.persistPairedMasterKey(masterKey);
+      await keyStore.persistPairedMasterKey(masterKey, status.instanceId);
       await sessionStore.save(pairedSession);
       await new RelayClient(pairedSession.endpoint,pairedSession.credential).consumePairing(pairing.requestId);
       return {masterKey,session:pairedSession};
