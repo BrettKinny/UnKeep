@@ -26,6 +26,14 @@ describe('AuthVaultGate recovery paths', () => {
     expect(transition).toBeGreaterThan(initialize);
   });
 
+  it('invalidates stale pairing completion on cancel and unmount', () => {
+    expect(source).toContain('pairingOperation+=1');
+    expect(source).toContain('operation===pairingOperation');
+    expect(source).toContain('initialize:async result=>');
+    expect(source).toMatch(/return\(\)=>\{pairingOperation\+=1;abort\?\.abort\(\)\}/);
+    expect(source).toMatch(/function cancelPairing\(\)\{pairingOperation\+=1;abort\?\.abort\(\)/);
+  });
+
   it('requires explicit confirmation before committing a legacy recovery kit', () => {
     const validate = source.indexOf('validateLegacyRecovery(serialized,relayInstanceId)');
     const warning = source.indexOf("view='legacy-recovery-warning'", validate);

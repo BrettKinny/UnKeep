@@ -47,6 +47,37 @@ class DeferredReadStorage extends MemoryClientStorage {
   }
 }
 
+class DeferredWriteStorage extends MemoryClientStorage {
+  private nextWrite: {
+    started: ReturnType<typeof deferred<void>>;
+    release: ReturnType<typeof deferred<void>>;
+  } | null = null;
+
+  deferNextWrite() {
+    this.nextWrite = { started: deferred<void>(), release: deferred<void>() };
+    return this.nextWrite;
+  }
+
+  override async set<T>(key: string, value: T): Promise<void> {
+    const pending = this.nextWrite;
+    if (pending) {
+      this.nextWrite = null;
+      pending.started.resolve(undefined);
+      await pending.release.promise;
+    }
+    await super.set(key, value);
+  }
+}
+
+class CleanupFailStorage extends MemoryClientStorage {
+  failCleanup = false;
+
+  override async delete(key: string): Promise<void> {
+    if (this.failCleanup) throw new Error(`cleanup failed for ${key}`);
+    await super.delete(key);
+  }
+}
+
 async function approvedPairing(keyStore: DeviceKeyStore) {
   const setupFetch = vi.fn()
     .mockResolvedValueOnce(jsonResponse({
@@ -105,6 +136,189 @@ describe('pairing approval review', () => {
 });
 
 describe('pairing cancellation', () => {
+  it('rolls back newly introduced access when cancelled during key persistence', async () => {
+    const storage = new DeferredWriteStorage();
+    const keyStore = new DeviceKeyStore(storage);
+    const sessionStore = new RelaySessionStore(new MemoryClientStorage());
+    const approved = await approvedPairing(keyStore);
+    const keyWrite = storage.deferNextWrite();
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        response: approved.response,
+        deviceCredential: 'new-device-credential',
+        consumed: false,
+      }))
+      .mockResolvedValueOnce(jsonResponse({ protocol: 1, instanceId: 'vault-one', initialized: true }))
+      .mockResolvedValueOnce(jsonResponse({ consumed: true })));
+    const controller = new AbortController();
+
+    const waiting = waitForPairing(approved.pairing, { keyStore, sessionStore, signal: controller.signal });
+    await keyWrite.started.promise;
+    controller.abort();
+    keyWrite.release.resolve(undefined);
+
+    await expect(waiting).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(keyStore.hasDeviceKeys()).resolves.toBe(false);
+    await expect(sessionStore.load()).resolves.toBeNull();
+  });
+
+  it('rolls back newly introduced access when cancelled during session persistence', async () => {
+    const keyStore = new DeviceKeyStore(new MemoryClientStorage());
+    const sessionStorage = new DeferredWriteStorage();
+    const sessionStore = new RelaySessionStore(sessionStorage);
+    const approved = await approvedPairing(keyStore);
+    const sessionWrite = sessionStorage.deferNextWrite();
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        response: approved.response,
+        deviceCredential: 'new-device-credential',
+        consumed: false,
+      }))
+      .mockResolvedValueOnce(jsonResponse({ protocol: 1, instanceId: 'vault-one', initialized: true }))
+      .mockResolvedValueOnce(jsonResponse({ consumed: true })));
+    const controller = new AbortController();
+
+    const waiting = waitForPairing(approved.pairing, { keyStore, sessionStore, signal: controller.signal });
+    await sessionWrite.started.promise;
+    controller.abort();
+    sessionWrite.release.resolve(undefined);
+
+    await expect(waiting).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(keyStore.hasDeviceKeys()).resolves.toBe(false);
+    await expect(sessionStore.load()).resolves.toBeNull();
+  });
+
+  it('passes cancellation to consumption and restores a returning device exactly', async () => {
+    const keyStore = new DeviceKeyStore(new MemoryClientStorage());
+    const sessionStore = new RelaySessionStore(new MemoryClientStorage());
+    const approved = await approvedPairing(keyStore);
+    await keyStore.persistPairedMasterKey(approved.masterKey, session.instanceId);
+    await sessionStore.save(session);
+    const consume = deferred<Response>();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        response: approved.response,
+        deviceCredential: 'new-device-credential',
+        consumed: false,
+      }))
+      .mockResolvedValueOnce(jsonResponse({ protocol: 1, instanceId: 'vault-one', initialized: true }))
+      .mockImplementationOnce(() => consume.promise);
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+
+    const waiting = waitForPairing(approved.pairing, { keyStore, sessionStore, signal: controller.signal });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    const consumeRequest = fetchMock.mock.calls[2]![1] as RequestInit;
+    controller.abort();
+    consume.resolve(jsonResponse({ consumed: true }));
+
+    await expect(waiting).rejects.toMatchObject({ name: 'AbortError' });
+    expect(consumeRequest.signal).toBe(controller.signal);
+    await expect(keyStore.unlockDevice(session.instanceId)).resolves.toEqual(approved.masterKey);
+    await expect(sessionStore.load()).resolves.toEqual(session);
+  });
+
+  it('rolls back access when pairing consumption fails', async () => {
+    const keyStore = new DeviceKeyStore(new MemoryClientStorage());
+    const sessionStore = new RelaySessionStore(new MemoryClientStorage());
+    const approved = await approvedPairing(keyStore);
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        response: approved.response,
+        deviceCredential: 'new-device-credential',
+        consumed: false,
+      }))
+      .mockResolvedValueOnce(jsonResponse({ protocol: 1, instanceId: 'vault-one', initialized: true }))
+      .mockResolvedValueOnce(jsonResponse({ error: 'consume_failed' }, 500)));
+
+    await expect(waitForPairing(approved.pairing, { keyStore, sessionStore }))
+      .rejects.toMatchObject({ code: 'consume_failed' });
+    await expect(keyStore.hasDeviceKeys()).resolves.toBe(false);
+    await expect(sessionStore.load()).resolves.toBeNull();
+  });
+
+  it('rolls back access when cancelled during local vault initialization', async () => {
+    const keyStore = new DeviceKeyStore(new MemoryClientStorage());
+    const sessionStore = new RelaySessionStore(new MemoryClientStorage());
+    const approved = await approvedPairing(keyStore);
+    const initialization = deferred<void>();
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        response: approved.response,
+        deviceCredential: 'new-device-credential',
+        consumed: false,
+      }))
+      .mockResolvedValueOnce(jsonResponse({ protocol: 1, instanceId: 'vault-one', initialized: true }))
+      .mockResolvedValueOnce(jsonResponse({ consumed: true })));
+    const controller = new AbortController();
+
+    const waiting = waitForPairing(approved.pairing, {
+      keyStore,
+      sessionStore,
+      signal: controller.signal,
+      initialize: () => initialization.promise,
+    });
+    await vi.waitFor(() => expect(sessionStore.load()).resolves.toMatchObject({
+      credential: 'new-device-credential',
+    }));
+    controller.abort();
+    initialization.resolve(undefined);
+
+    await expect(waiting).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(keyStore.hasDeviceKeys()).resolves.toBe(false);
+    await expect(sessionStore.load()).resolves.toBeNull();
+  });
+
+  it('rolls back access when local vault initialization fails', async () => {
+    const keyStore = new DeviceKeyStore(new MemoryClientStorage());
+    const sessionStore = new RelaySessionStore(new MemoryClientStorage());
+    const approved = await approvedPairing(keyStore);
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        response: approved.response,
+        deviceCredential: 'new-device-credential',
+        consumed: false,
+      }))
+      .mockResolvedValueOnce(jsonResponse({ protocol: 1, instanceId: 'vault-one', initialized: true }))
+      .mockResolvedValueOnce(jsonResponse({ consumed: true })));
+
+    await expect(waitForPairing(approved.pairing, {
+      keyStore,
+      sessionStore,
+      initialize: () => { throw new Error('local vault failed'); },
+    })).rejects.toThrow('local vault failed');
+    await expect(keyStore.hasDeviceKeys()).resolves.toBe(false);
+    await expect(sessionStore.load()).resolves.toBeNull();
+  });
+
+  it('preserves the original failure and reports every cleanup failure', async () => {
+    const keyStorage = new CleanupFailStorage();
+    const sessionStorage = new CleanupFailStorage();
+    const keyStore = new DeviceKeyStore(keyStorage);
+    const sessionStore = new RelaySessionStore(sessionStorage);
+    const approved = await approvedPairing(keyStore);
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        response: approved.response,
+        deviceCredential: 'new-device-credential',
+        consumed: false,
+      }))
+      .mockResolvedValueOnce(jsonResponse({ protocol: 1, instanceId: 'vault-one', initialized: true }))
+      .mockImplementationOnce(() => {
+        keyStorage.failCleanup = true;
+        sessionStorage.failCleanup = true;
+        return jsonResponse({ error: 'consume_failed' }, 500);
+      }));
+
+    const failure: unknown = await waitForPairing(approved.pairing, { keyStore, sessionStore })
+      .catch(error => error);
+
+    expect(failure).toBeInstanceOf(AggregateError);
+    const aggregate = failure as AggregateError;
+    expect(aggregate.errors[0]).toMatchObject({ code: 'consume_failed' });
+    expect(aggregate.errors).toHaveLength(4);
+  });
+
   it('stops after resolving device identity when cancellation wins that await', async () => {
     const storage = new DeferredReadStorage();
     const keyStore = new DeviceKeyStore(storage);
