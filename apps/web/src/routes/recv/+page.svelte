@@ -4,6 +4,7 @@
   import { noteStore } from '$lib/noteStore.svelte';
   import { toastStore } from '$lib/toast.svelte';
   import Toast from '$lib/components/Toast.svelte';
+  import LinkedText from '$lib/components/LinkedText.svelte';
 
   let content = $state('');
   let error = $state('');
@@ -48,7 +49,7 @@
       </div>
     {:else if content}
       <div class="bg-surface-dim rounded-lg p-4 border border-border">
-        <pre class="whitespace-pre-wrap text-on-surface text-sm font-mono">{content}</pre>
+        <pre class="whitespace-pre-wrap break-words text-on-surface text-sm font-mono"><LinkedText text={content} /></pre>
       </div>
 
       <div class="flex gap-3 mt-4">

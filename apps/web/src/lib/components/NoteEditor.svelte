@@ -7,6 +7,7 @@
   import { isImageAttachment } from '$lib/attachments';
   import AttachmentChip from './AttachmentChip.svelte';
   import ColorPicker from './ColorPicker.svelte';
+  import LinkedText from './LinkedText.svelte';
 
   let { note, onClose }: { note: Note; onClose: () => void } = $props();
 
@@ -162,7 +163,7 @@
         <div class="prose prose-sm max-w-none text-on-surface">
           <!-- Simple markdown rendering - just paragraphs and line breaks for now -->
           {#each content.split('\n\n') as para}
-            <p>{para}</p>
+            <p class="whitespace-pre-wrap"><LinkedText text={para} /></p>
           {/each}
         </div>
       {:else}

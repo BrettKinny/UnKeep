@@ -6,6 +6,7 @@
   import { isImageAttachment } from '$lib/attachments';
   import AttachmentChip from './AttachmentChip.svelte';
   import ColorPicker from './ColorPicker.svelte';
+  import LinkedText from './LinkedText.svelte';
 
   let { note, onEdit }: { note: Note; onEdit: (note: Note) => void } = $props();
 
@@ -77,7 +78,7 @@
     <ul class="space-y-1 text-sm text-on-surface">
       {#each note.checkboxes.slice(0, 8) as item}
         <li class="flex items-center gap-2">
-          <span class={item.checked ? 'line-through text-on-surface-muted' : ''}>{item.checked ? '☑' : '☐'} {item.text}</span>
+          <span class={item.checked ? 'line-through text-on-surface-muted' : ''}>{item.checked ? '☑' : '☐'} <LinkedText text={item.text} /></span>
         </li>
       {/each}
       {#if note.checkboxes.length > 8}
@@ -85,7 +86,7 @@
       {/if}
     </ul>
   {:else}
-    <p class="text-sm text-on-surface whitespace-pre-wrap line-clamp-6">{note.content}</p>
+    <p class="text-sm text-on-surface whitespace-pre-wrap line-clamp-6"><LinkedText text={note.content} /></p>
   {/if}
 
   {#if note.labels?.length}
