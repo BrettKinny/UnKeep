@@ -15,10 +15,12 @@ describe('offline vault boot', () => {
     vi.stubGlobal('fetch', network);
 
     const masterKey = new Uint8Array(32).fill(7);
+    const unlockDevice = vi.fn().mockResolvedValue(masterKey);
     await expect(loadLocalVault(
       { load: vi.fn().mockResolvedValue(session) },
-      { unlockDevice: vi.fn().mockResolvedValue(masterKey) },
+      { unlockDevice },
     )).resolves.toEqual({ session, masterKey });
+    expect(unlockDevice).toHaveBeenCalledWith(session.instanceId);
     expect(network).not.toHaveBeenCalled();
 
     vi.unstubAllGlobals();

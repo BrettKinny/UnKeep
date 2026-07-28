@@ -1,6 +1,7 @@
 import type { Note } from './types.js';
 
 const ENVELOPE_VERSION = 1 as const;
+const RECOVERY_KIT_VERSION = 2 as const;
 const ALGORITHM = 'AES-GCM' as const;
 const KEY_BYTES = 32;
 const IV_BYTES = 12;
@@ -20,6 +21,15 @@ export interface RecoveryKitV1 {
   recoveryKey: string;
   masterKeyEnvelope: EncryptedEnvelopeV1;
 }
+
+export interface RecoveryKitV2 {
+  version: typeof RECOVERY_KIT_VERSION;
+  instanceId: string;
+  recoveryKey: string;
+  masterKeyEnvelope: EncryptedEnvelopeV1;
+}
+
+export type RecoveryKit = RecoveryKitV1 | RecoveryKitV2;
 
 export interface NoteEncryptionContext {
   ownerId: string;
@@ -116,53 +126,90 @@ export function generateDeviceWrappingKey(): Promise<CryptoKey> {
 export async function wrapMasterKeyForDevice(
   masterKey: Uint8Array<ArrayBuffer>,
   deviceKey: CryptoKey,
-  deviceId: string
+  deviceId: string,
+  instanceId?: string,
 ): Promise<EncryptedEnvelopeV1> {
-  return encryptBytes(masterKey, deviceKey, deviceId, 'device-master-key');
+  const purpose = instanceId ? `device-master-key:${instanceId}` : 'device-master-key';
+  return encryptBytes(masterKey, deviceKey, deviceId, purpose);
 }
 
 export async function unwrapMasterKeyForDevice(
   envelope: EncryptedEnvelope,
   deviceKey: CryptoKey,
-  deviceId: string
+  deviceId: string,
+  instanceId?: string,
 ): Promise<Uint8Array<ArrayBuffer>> {
   if (envelope.keyId !== deviceId) throw new Error('Device key envelope does not belong to this device');
-  return await decryptBytes(envelope, deviceKey, 'device-master-key');
+  const purpose = instanceId ? `device-master-key:${instanceId}` : 'device-master-key';
+  return await decryptBytes(envelope, deviceKey, purpose);
 }
 
 /** Creates a self-contained recovery kit. Treat the returned object like a password. */
 export async function createRecoveryKit(
   masterKey: Uint8Array<ArrayBuffer>,
+  instanceId: string,
   keyId: string = crypto.randomUUID()
-): Promise<RecoveryKitV1> {
+): Promise<RecoveryKitV2> {
+  if (!instanceId) throw new Error('Recovery kit requires a relay instance');
   const recoveryKeyBytes = crypto.getRandomValues(new Uint8Array(KEY_BYTES));
   const recoveryKey = await importAesKey(recoveryKeyBytes, ['encrypt']);
   return {
-    version: ENVELOPE_VERSION,
+    version: RECOVERY_KIT_VERSION,
+    instanceId,
     recoveryKey: bytesToBase64(recoveryKeyBytes),
-    masterKeyEnvelope: await encryptBytes(masterKey, recoveryKey, keyId, 'recovery-master-key'),
+    masterKeyEnvelope: await encryptBytes(
+      masterKey,
+      recoveryKey,
+      keyId,
+      `recovery-master-key:${instanceId}`,
+    ),
   };
 }
 
-export async function recoverMasterKey(kit: RecoveryKitV1): Promise<Uint8Array<ArrayBuffer>> {
-  if (kit.version !== ENVELOPE_VERSION) throw new Error('Unsupported recovery kit version');
+export async function recoverMasterKey(
+  kit: RecoveryKit,
+  expectedInstanceId: string,
+): Promise<Uint8Array<ArrayBuffer>> {
+  if (kit.version !== RECOVERY_KIT_VERSION) {
+    throw new Error('Legacy recovery kit requires the explicit migration flow');
+  }
+  if (kit.instanceId !== expectedInstanceId) {
+    throw new Error('Recovery kit belongs to a different relay instance');
+  }
+  const recoveryKey = await importAesKey(base64ToBytes(kit.recoveryKey), ['decrypt']);
+  return decryptBytes(
+    kit.masterKeyEnvelope,
+    recoveryKey,
+    `recovery-master-key:${kit.instanceId}`,
+  );
+}
+
+export async function recoverLegacyMasterKey(
+  kit: RecoveryKitV1,
+): Promise<Uint8Array<ArrayBuffer>> {
+  if (kit.version !== ENVELOPE_VERSION) throw new Error('Expected a legacy recovery kit');
   const recoveryKey = await importAesKey(base64ToBytes(kit.recoveryKey), ['decrypt']);
   return decryptBytes(kit.masterKeyEnvelope, recoveryKey, 'recovery-master-key');
 }
 
-export function exportRecoveryKit(kit: RecoveryKitV1): string {
+export function exportRecoveryKit(kit: RecoveryKit): string {
   return JSON.stringify(kit);
 }
 
-export function importRecoveryKit(serialized: string): RecoveryKitV1 {
+export function importRecoveryKit(serialized: string): RecoveryKit {
   const parsed: unknown = JSON.parse(serialized);
   if (!parsed || typeof parsed !== 'object') throw new Error('Invalid recovery kit');
-  const kit = parsed as Partial<RecoveryKitV1>;
-  if (kit.version !== ENVELOPE_VERSION || typeof kit.recoveryKey !== 'string' || !kit.masterKeyEnvelope) {
+  const kit = parsed as Partial<RecoveryKit>;
+  if (
+    (kit.version !== ENVELOPE_VERSION && kit.version !== RECOVERY_KIT_VERSION)
+    || typeof kit.recoveryKey !== 'string'
+    || !kit.masterKeyEnvelope
+    || (kit.version === RECOVERY_KIT_VERSION && typeof kit.instanceId !== 'string')
+  ) {
     throw new Error('Invalid or unsupported recovery kit');
   }
   assertSupportedEnvelope(kit.masterKeyEnvelope);
-  return kit as RecoveryKitV1;
+  return kit as RecoveryKit;
 }
 
 function notePurpose(context: NoteEncryptionContext): string {

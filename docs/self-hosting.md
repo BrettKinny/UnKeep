@@ -37,6 +37,8 @@ Recovery requires both secrets with different jobs:
 - The recovery kit restores the vault encryption key in the browser.
 - The operator recovery token authorizes the relay to mint a new device credential.
 
+New recovery kits use authenticated format v2 and are bound to the relay instance that created them. Editing the stored instance ID or selecting the kit for a different relay makes decryption fail before local keys, sessions, notes, or sync state are opened. Legacy v1 kits are recognized only for the explicit migration flow; they are not silently treated as bound kits.
+
 Open the server from a replacement device, choose **Restore recovery kit**, select the kit, and enter `UNKEEP_RECOVERY_TOKEN` when prompted. The kit is decrypted locally; neither it nor the vault key is sent to the server. The server receives only the operator token and the replacement device identity.
 
 Protect the operator token like an administrative password. Someone with it can mint relay access and modify or delete ciphertext even without the recovery kit. To rotate it, set a new `UNKEEP_RECOVERY_TOKEN` and recreate the container:

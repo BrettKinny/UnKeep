@@ -13,17 +13,22 @@ function note(id: string, content: string): Note {
 test('prepares recoverable device keys before first-device setup is claimed', async () => {
   const relay = await startTestServer({ setupToken: 'test-setup-token' });
   try {
+    const client = new RelayClient(relay.endpoint);
+    const status = await client.status();
     const keys = new DeviceKeyStore(new MemoryClientStorage());
-    const provisioned = await keys.provisionFirstDevice();
-    await expect(new DeviceKeyStore(new MemoryClientStorage()).restoreDeviceFromRecovery(provisioned.recoveryKit))
+    const provisioned = await keys.provisionFirstDevice(status.instanceId);
+    await expect(new DeviceKeyStore(new MemoryClientStorage()).restoreDeviceFromRecovery(
+      provisioned.recoveryKit,
+      status.instanceId,
+    ))
       .resolves.toEqual(provisioned.masterKey);
 
-    const client = new RelayClient(relay.endpoint);
     await expect(client.claimSetup('wrong-token', provisioned.deviceId, 'First device'))
       .rejects.toThrow('invalid_setup_token');
     await expect(client.status()).resolves.toMatchObject({ initialized: false });
 
     const claimed = await client.claimSetup(relay.setupToken, provisioned.deviceId, 'First device');
+    expect(claimed.instanceId).toBe(status.instanceId);
     await expect(new RelayClient(relay.endpoint, claimed.deviceCredential).vault())
       .resolves.toEqual({ vaultId: claimed.instanceId });
   } finally {
@@ -96,8 +101,9 @@ test('restores an encrypted vault after all device credentials are lost', async 
     env: { UNKEEP_RECOVERY_TOKEN: 'operator-recovery-token' },
   });
   try {
+    const status = await new RelayClient(relay.endpoint).status();
     const originalKeys = new DeviceKeyStore(new MemoryClientStorage());
-    const provisioned = await originalKeys.provisionFirstDevice();
+    const provisioned = await originalKeys.provisionFirstDevice(status.instanceId);
     const claimed = await new RelayClient(relay.endpoint).claimSetup(
       relay.setupToken,
       provisioned.deviceId,
@@ -114,7 +120,10 @@ test('restores an encrypted vault after all device credentials are lost', async 
     await new RelayClient(relay.endpoint, claimed.deviceCredential).revokeDevice(provisioned.deviceId);
 
     const recoveredKeys = new DeviceKeyStore(new MemoryClientStorage());
-    const recoveredMasterKey = await recoveredKeys.restoreDeviceFromRecovery(provisioned.recoveryKit);
+    const recoveredMasterKey = await recoveredKeys.restoreDeviceFromRecovery(
+      provisioned.recoveryKit,
+      status.instanceId,
+    );
     const recoveredDeviceId = await recoveredKeys.getDeviceId();
     const reclaimed = await new RelayClient(relay.endpoint).reclaimSetup(
       'operator-recovery-token',

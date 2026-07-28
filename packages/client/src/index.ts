@@ -4,7 +4,11 @@ export type { RelaySession, RelayStatus, DeviceCredential, ServiceCredential, Re
 export { RelayClient, RelayHttpError, RecordConflictError, cleanRelayEndpoint } from './relay.js';
 export { RelaySessionStore } from './session.js';
 export type { ProvisionedKeys } from './deviceKeys.js';
-export { DeviceKeyStore, VaultKeyMismatchError } from './deviceKeys.js';
+export {
+  DeviceKeyStore,
+  VaultInstanceMismatchError,
+  VaultKeyMismatchError,
+} from './deviceKeys.js';
 export { clearDeviceAccess } from './deviceAccess.js';
 export { encrypt, decrypt, isEncrypted } from './encryption.js';
 export type { PairingSession, WaitForPairingOptions, PendingPairingRequest } from './pairing.js';

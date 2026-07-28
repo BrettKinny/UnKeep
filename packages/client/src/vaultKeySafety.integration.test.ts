@@ -7,7 +7,7 @@ import {
   MemoryClientStorage,
   RelayClient,
   RelaySessionStore,
-  VaultKeyMismatchError,
+  VaultInstanceMismatchError,
   waitForPairing,
   type RelaySession,
 } from './index.js';
@@ -16,7 +16,8 @@ test('rejects pairing a different vault key before replacing the stored session'
   const relay = await startTestServer();
   try {
     const ownerKeys = new DeviceKeyStore(new MemoryClientStorage());
-    const owner = await ownerKeys.provisionFirstDevice();
+    const relayStatus = await new RelayClient(relay.endpoint).status();
+    const owner = await ownerKeys.provisionFirstDevice(relayStatus.instanceId);
     const claimed = await new RelayClient(relay.endpoint).claimSetup(
       relay.setupToken,
       owner.deviceId,
@@ -31,7 +32,7 @@ test('rejects pairing a different vault key before replacing the stored session'
 
     const occupiedStorage = new MemoryClientStorage();
     const occupiedKeys = new DeviceKeyStore(occupiedStorage);
-    const occupied = await occupiedKeys.provisionFirstDevice();
+    const occupied = await occupiedKeys.provisionFirstDevice('old-vault');
     expect(occupied.masterKey).not.toEqual(owner.masterKey);
     const sessions = new RelaySessionStore(occupiedStorage);
     const originalSession: RelaySession = {
@@ -49,8 +50,8 @@ test('rejects pairing a different vault key before replacing the stored session'
       .catch(error => ({ status: 'rejected' as const, error }));
 
     expect(outcome.status).toBe('rejected');
-    if (outcome.status === 'rejected') expect(outcome.error).toBeInstanceOf(VaultKeyMismatchError);
-    expect(await occupiedKeys.unlockDevice()).toEqual(occupied.masterKey);
+    if (outcome.status === 'rejected') expect(outcome.error).toBeInstanceOf(VaultInstanceMismatchError);
+    expect(await occupiedKeys.unlockDevice('old-vault')).toEqual(occupied.masterKey);
     expect(await sessions.load()).toEqual(originalSession);
   } finally {
     await relay.stop();
@@ -61,7 +62,8 @@ test('allows pairing when the device already stores the byte-identical vault key
   const relay = await startTestServer();
   try {
     const ownerKeys = new DeviceKeyStore(new MemoryClientStorage());
-    const owner = await ownerKeys.provisionFirstDevice();
+    const relayStatus = await new RelayClient(relay.endpoint).status();
+    const owner = await ownerKeys.provisionFirstDevice(relayStatus.instanceId);
     const claimed = await new RelayClient(relay.endpoint).claimSetup(
       relay.setupToken,
       owner.deviceId,
@@ -75,7 +77,7 @@ test('allows pairing when the device already stores the byte-identical vault key
     };
     const returningStorage = new MemoryClientStorage();
     const returningKeys = new DeviceKeyStore(returningStorage);
-    await returningKeys.persistPairedMasterKey(owner.masterKey);
+    await returningKeys.persistPairedMasterKey(owner.masterKey, claimed.instanceId);
     const sessions = new RelaySessionStore(returningStorage);
 
     const pairing = await createPairingRequest(relay.endpoint, returningKeys, 'Returning device');
@@ -83,7 +85,7 @@ test('allows pairing when the device already stores the byte-identical vault key
     const result = await waitForPairing(pairing, { keyStore: returningKeys, sessionStore: sessions });
 
     expect(result.masterKey).toEqual(owner.masterKey);
-    expect(await returningKeys.unlockDevice()).toEqual(owner.masterKey);
+    expect(await returningKeys.unlockDevice(claimed.instanceId)).toEqual(owner.masterKey);
     expect(await sessions.load()).toEqual(result.session);
   } finally {
     await relay.stop();

@@ -12,6 +12,8 @@ Only imports from the package root are supported. Those exports are the intended
 
 Writes use optimistic record revisions and durable mutation IDs. If a response is lost after the relay accepts a mutation, the client replays the exact stored ciphertext and mutation ID before sending a newer write for that record.
 
+`DeviceKeyStore` binds new wrapped master keys and recovery kits to the relay `instanceId`. Pass the instance ID reported by relay status into first-device provisioning, pairing persistence, recovery, and unlock; a mismatch is rejected before local access or session state is replaced.
+
 The package is ESM and requires Node.js 20 or newer when used in Node. Browser persistence and cryptography integrations require their corresponding Web APIs.
 
 This repository produces a locally installable package tarball, but it does not automatically publish one to a registry.

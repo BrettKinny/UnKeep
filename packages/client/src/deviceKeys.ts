@@ -19,6 +19,8 @@ interface StoredDeviceKeys {
   deviceId: string;
   wrappingKey: CryptoKey;
   masterKeyEnvelope: EncryptedEnvelope;
+  version?: 2;
+  instanceId?: string;
 }
 
 export interface ProvisionedKeys {
@@ -32,6 +34,14 @@ export class VaultKeyMismatchError extends Error {
 
   constructor() {
     super('This device already stores a key for a different vault. Clear this device before switching vaults.');
+  }
+}
+
+export class VaultInstanceMismatchError extends Error {
+  readonly name = 'VaultInstanceMismatchError';
+
+  constructor() {
+    super('Stored vault access belongs to a different relay instance. Clear this device before switching vaults.');
   }
 }
 
@@ -54,47 +64,93 @@ export class DeviceKeyStore {
     return deviceId;
   }
 
-  private async persistMasterKey(masterKey: Uint8Array<ArrayBuffer>): Promise<string> {
-    const deviceId = await this.getDeviceId();
+  private async persistMasterKey(
+    masterKey: Uint8Array<ArrayBuffer>,
+    instanceId: string,
+    existingDeviceId?: string,
+  ): Promise<string> {
+    const deviceId = existingDeviceId ?? await this.getDeviceId();
     const wrappingKey = await generateDeviceWrappingKey();
-    const masterKeyEnvelope = await wrapMasterKeyForDevice(masterKey, wrappingKey, deviceId);
-    await this.storage.set<StoredDeviceKeys>(DEVICE_KEYS_KEY, { id: 'current', deviceId, wrappingKey, masterKeyEnvelope });
+    const masterKeyEnvelope = await wrapMasterKeyForDevice(masterKey, wrappingKey, deviceId, instanceId);
+    await this.storage.set<StoredDeviceKeys>(DEVICE_KEYS_KEY, {
+      id: 'current',
+      version: 2,
+      instanceId,
+      deviceId,
+      wrappingKey,
+      masterKeyEnvelope,
+    });
     return deviceId;
   }
 
-  private async persistCompatibleMasterKey(masterKey:Uint8Array<ArrayBuffer>):Promise<string> {
+  private async persistCompatibleMasterKey(
+    masterKey: Uint8Array<ArrayBuffer>,
+    instanceId: string,
+  ): Promise<string> {
     const existing = await this.storage.get<StoredDeviceKeys>(DEVICE_KEYS_KEY);
     if (existing) {
-      const storedMasterKey=await unwrapMasterKeyForDevice(existing.masterKeyEnvelope,existing.wrappingKey,existing.deviceId);
+      if (existing.instanceId && existing.instanceId !== instanceId) {
+        throw new VaultInstanceMismatchError();
+      }
+      const storedMasterKey = await unwrapMasterKeyForDevice(
+        existing.masterKeyEnvelope,
+        existing.wrappingKey,
+        existing.deviceId,
+        existing.instanceId,
+      );
       if (!sameKey(storedMasterKey,masterKey)) throw new VaultKeyMismatchError();
+      if (!existing.instanceId) {
+        await this.persistMasterKey(masterKey, instanceId, existing.deviceId);
+      }
       return existing.deviceId;
     }
-    return this.persistMasterKey(masterKey);
+    return this.persistMasterKey(masterKey, instanceId);
   }
 
-  async persistPairedMasterKey(masterKey: Uint8Array<ArrayBuffer>): Promise<string> {
-    return this.persistCompatibleMasterKey(masterKey);
+  async persistPairedMasterKey(
+    masterKey: Uint8Array<ArrayBuffer>,
+    instanceId: string,
+  ): Promise<string> {
+    return this.persistCompatibleMasterKey(masterKey, instanceId);
   }
 
-  async provisionFirstDevice(): Promise<ProvisionedKeys> {
+  async provisionFirstDevice(instanceId: string): Promise<ProvisionedKeys> {
     const existing = await this.storage.get<StoredDeviceKeys>(DEVICE_KEYS_KEY);
     if (existing) throw new Error('This device already has encryption keys');
     const masterKey = generateMasterKey();
-    const deviceId = await this.persistMasterKey(masterKey);
-    const recoveryKit = exportRecoveryKit(await createRecoveryKit(masterKey));
+    const deviceId = await this.persistMasterKey(masterKey, instanceId);
+    const recoveryKit = exportRecoveryKit(await createRecoveryKit(masterKey, instanceId));
     return { deviceId, masterKey, recoveryKit };
   }
 
   async createRecoveryKit(): Promise<string> {
-    const masterKey = await this.unlockDevice();
+    const stored = await this.storage.get<StoredDeviceKeys>(DEVICE_KEYS_KEY);
+    if (!stored?.instanceId) throw new Error('Stored vault key is not bound to a relay instance');
+    const masterKey = await this.unlockDevice(stored.instanceId);
     if (!masterKey) throw new Error('This device has no encryption keys');
-    return exportRecoveryKit(await createRecoveryKit(masterKey));
+    return exportRecoveryKit(await createRecoveryKit(masterKey, stored.instanceId));
   }
 
-  async unlockDevice(): Promise<Uint8Array<ArrayBuffer> | null> {
+  async hasDeviceKeys(): Promise<boolean> {
+    return Boolean(await this.storage.get<StoredDeviceKeys>(DEVICE_KEYS_KEY));
+  }
+
+  async unlockDevice(instanceId: string): Promise<Uint8Array<ArrayBuffer> | null> {
     const stored = await this.storage.get<StoredDeviceKeys>(DEVICE_KEYS_KEY);
     if (!stored) return null;
-    return unwrapMasterKeyForDevice(stored.masterKeyEnvelope, stored.wrappingKey, stored.deviceId);
+    if (stored.instanceId && stored.instanceId !== instanceId) {
+      throw new VaultInstanceMismatchError();
+    }
+    const masterKey = await unwrapMasterKeyForDevice(
+      stored.masterKeyEnvelope,
+      stored.wrappingKey,
+      stored.deviceId,
+      stored.instanceId,
+    );
+    if (!stored.instanceId) {
+      await this.persistMasterKey(masterKey, instanceId, stored.deviceId);
+    }
+    return masterKey;
   }
 
   async clearDevice():Promise<void> {
@@ -102,9 +158,15 @@ export class DeviceKeyStore {
     await this.storage.delete(DEVICE_ID_KEY);
   }
 
-  async restoreDeviceFromRecovery(serializedKit: string): Promise<Uint8Array<ArrayBuffer>> {
-    const masterKey = await recoverMasterKey(importRecoveryKit(serializedKit));
-    await this.persistCompatibleMasterKey(masterKey);
+  async restoreDeviceFromRecovery(
+    serializedKit: string,
+    expectedInstanceId: string,
+  ): Promise<Uint8Array<ArrayBuffer>> {
+    const kit = importRecoveryKit(serializedKit);
+    if (kit.version === 1) throw new Error('Legacy recovery kit requires confirmation');
+    if (kit.instanceId !== expectedInstanceId) throw new VaultInstanceMismatchError();
+    const masterKey = await recoverMasterKey(kit, expectedInstanceId);
+    await this.persistCompatibleMasterKey(masterKey, expectedInstanceId);
     return masterKey;
   }
 }

@@ -23,7 +23,7 @@ describe('recovery kit download', () => {
       revokeObjectURL,
     });
 
-    downloadRecoveryKit('{"version":1}');
+    downloadRecoveryKit('{"version":2,"instanceId":"vault-one"}');
 
     expect(append).toHaveBeenCalledWith(anchor);
     expect(click).toHaveBeenCalledOnce();

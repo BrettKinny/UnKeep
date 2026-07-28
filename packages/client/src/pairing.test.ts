@@ -128,7 +128,7 @@ describe('pairing cancellation', () => {
     deviceIdRead.release.resolve(undefined);
 
     await expect(waiting).rejects.toMatchObject({ name: 'AbortError' });
-    await expect(keyStore.unlockDevice()).resolves.toBeNull();
+    await expect(keyStore.hasDeviceKeys()).resolves.toBe(false);
     await expect(sessionStore.load()).resolves.toBeNull();
   });
 
@@ -164,7 +164,7 @@ describe('pairing cancellation', () => {
 
     await expect(waiting).rejects.toMatchObject({ name: 'AbortError' });
     expect(fetchMock).toHaveBeenCalledOnce();
-    await expect(keyStore.unlockDevice()).resolves.toBeNull();
+    await expect(keyStore.hasDeviceKeys()).resolves.toBe(false);
     await expect(sessionStore.load()).resolves.toBeNull();
   });
 
@@ -200,7 +200,7 @@ describe('pairing cancellation', () => {
     releaseDerive.resolve(undefined);
 
     await expect(waiting).rejects.toMatchObject({ name: 'AbortError' });
-    await expect(keyStore.unlockDevice()).resolves.toBeNull();
+    await expect(keyStore.hasDeviceKeys()).resolves.toBe(false);
     await expect(sessionStore.load()).resolves.toBeNull();
   });
 
@@ -226,7 +226,7 @@ describe('pairing cancellation', () => {
     status.resolve(jsonResponse({ protocol: 1, instanceId: 'vault-one', initialized: true }));
 
     await expect(waiting).rejects.toMatchObject({ name: 'AbortError' });
-    await expect(keyStore.unlockDevice()).resolves.toBeNull();
+    await expect(keyStore.hasDeviceKeys()).resolves.toBe(false);
     await expect(sessionStore.load()).resolves.toBeNull();
   });
 
@@ -350,7 +350,7 @@ describe('pairing cancellation', () => {
     }), { status: 200, headers: { 'content-type': 'application/json' } }));
 
     await expect(waiting).rejects.toMatchObject({ name: 'AbortError' });
-    await expect(keyStore.unlockDevice()).resolves.toBeNull();
+    await expect(keyStore.hasDeviceKeys()).resolves.toBe(false);
     await expect(sessionStore.load()).resolves.toBeNull();
   });
 });

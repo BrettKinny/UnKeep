@@ -26,7 +26,7 @@ test('claims setup through the SDK relay client over policy-approved loopback HT
 test('round-trips an encrypted note through the SDK sync interface',async()=>{
   const relay=await startTestServer();
   try {
-    const session=await claim(relay);const keys=new DeviceKeyStore(new MemoryClientStorage());const {masterKey}=await keys.provisionFirstDevice();
+    const session=await claim(relay);const keys=new DeviceKeyStore(new MemoryClientStorage());const {masterKey}=await keys.provisionFirstDevice(session.instanceId);
     const writer=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const reader=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     await writer.push(note('sdk-note','encrypted hello'));
@@ -39,7 +39,7 @@ test('round-trips an encrypted note through the SDK sync interface',async()=>{
 test('does not advance the durable cursor until the caller acknowledges applied changes',async()=>{
   const relay=await startTestServer();
   try {
-    const session=await claim(relay);const keys=new DeviceKeyStore(new MemoryClientStorage());const {masterKey}=await keys.provisionFirstDevice();
+    const session=await claim(relay);const keys=new DeviceKeyStore(new MemoryClientStorage());const {masterKey}=await keys.provisionFirstDevice(session.instanceId);
     const writer=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const reader=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     await writer.push(note('retryable-note','must survive a failed local apply'));
@@ -61,7 +61,7 @@ test('does not advance the durable cursor until the caller acknowledges applied 
 test('returns note tombstone and attachment revisions with a pull',async()=>{
   const relay=await startTestServer();
   try {
-    const session=await claim(relay);const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice();
+    const session=await claim(relay);const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice(session.instanceId);
     const writer=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const reader=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const attachment:NoteAttachment={id:'revision-attachment',name:'revision.txt',mimeType:'text/plain',size:8};
@@ -81,7 +81,7 @@ test('returns note tombstone and attachment revisions with a pull',async()=>{
 test('uses a pulled record revision only after the caller acknowledges durable application',async()=>{
   const relay=await startTestServer();
   try {
-    const session=await claim(relay);const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice();
+    const session=await claim(relay);const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice(session.instanceId);
     const writer=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const reader=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     await writer.push(note('acknowledged-note','remote version'));
@@ -98,7 +98,7 @@ test('uses a pulled record revision only after the caller acknowledges durable a
 test('rescans and backfills revisions when migrating a legacy nonzero cursor',async()=>{
   const relay=await startTestServer();
   try {
-    const session=await claim(relay);const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice();
+    const session=await claim(relay);const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice(session.instanceId);
     const writer=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     await writer.push(note('legacy-note','remote version'));
     const legacyStorage=new MemoryClientStorage();
@@ -122,7 +122,7 @@ test('scopes known record revisions to the relay instance',async()=>{
   try {
     const firstSession=await claim(firstRelay,'first-instance-device');
     const secondSession=await claim(secondRelay,'second-instance-device');
-    const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice();
+    const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice(firstSession.instanceId);
     const sharedStorage=new MemoryClientStorage();
     const firstWriter=new EncryptedSync(firstSession,masterKey,new MemoryClientStorage());
     const firstReader=new EncryptedSync(firstSession,masterKey,sharedStorage);
@@ -139,7 +139,7 @@ test('scopes known record revisions to the relay instance',async()=>{
 test('converges two SDK instances through the relay',async()=>{
   const relay=await startTestServer();
   try {
-    const session=await claim(relay);const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice();
+    const session=await claim(relay);const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice(session.instanceId);
     const first=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const second=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     await first.push(note('shared-note','first version'));
@@ -156,7 +156,7 @@ test('converges two SDK instances through the relay',async()=>{
 test('rejects one of two offline edits raced from the same acknowledged revision',async()=>{
   const relay=await startTestServer();
   try {
-    const session=await claim(relay);const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice();
+    const session=await claim(relay);const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice(session.instanceId);
     const seed=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const first=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const second=new EncryptedSync(session,masterKey,new MemoryClientStorage());
@@ -186,7 +186,7 @@ test('rejects one of two offline edits raced from the same acknowledged revision
 test('round-trips encrypted attachment bytes through the SDK',async()=>{
   const relay=await startTestServer();
   try {
-    const session=await claim(relay);const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice();
+    const session=await claim(relay);const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice(session.instanceId);
     const writer=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const reader=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const attachment:NoteAttachment={id:'sdk-attachment',name:'hello.txt',mimeType:'text/plain',size:5};
@@ -203,7 +203,7 @@ test('round-trips encrypted attachment bytes through the SDK',async()=>{
 test('retries a pull instead of accepting stale attachment bytes after a download failure',async()=>{
   const relay=await startTestServer();
   try {
-    const session=await claim(relay);const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice();
+    const session=await claim(relay);const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice(session.instanceId);
     const writer=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const reader=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const attachment:NoteAttachment={id:'retry-attachment',name:'retry.txt',mimeType:'text/plain',size:3};
@@ -244,7 +244,7 @@ test('retries a pull instead of accepting stale attachment bytes after a downloa
 test('retries a pull instead of accepting attachment bytes inconsistent with note metadata',async()=>{
   const relay=await startTestServer();
   try {
-    const session=await claim(relay);const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice();
+    const session=await claim(relay);const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice(session.instanceId);
     const writer=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const reader=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const attachment:NoteAttachment={id:'size-mismatch-attachment',name:'mismatch.txt',mimeType:'text/plain',size:4};
@@ -268,7 +268,7 @@ test('retries a pull instead of accepting attachment bytes inconsistent with not
 test('pulls an encrypted attachment tombstone without downloading deleted bytes',async()=>{
   const relay=await startTestServer();
   try {
-    const session=await claim(relay);const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice();
+    const session=await claim(relay);const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice(session.instanceId);
     const writer=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const reader=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const attachment:NoteAttachment={id:'deleted-attachment',name:'gone.txt',mimeType:'text/plain',size:4};
@@ -288,7 +288,7 @@ test('pulls an encrypted attachment tombstone without downloading deleted bytes'
 test('protects attachment updates with their acknowledged record revision',async()=>{
   const relay=await startTestServer();
   try {
-    const session=await claim(relay);const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice();
+    const session=await claim(relay);const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice(session.instanceId);
     const writer=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const stale=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const attachment:NoteAttachment={id:'protected-attachment',name:'protected.txt',mimeType:'text/plain',size:3};
@@ -309,13 +309,13 @@ test('protects attachment updates with their acknowledged record revision',async
 test('pairs a second SDK device and persists its identity and session',async()=>{
   const relay=await startTestServer();
   try {
-    const session=await claim(relay);const firstKeys=new DeviceKeyStore(new MemoryClientStorage());const {masterKey}=await firstKeys.provisionFirstDevice();
+    const session=await claim(relay);const firstKeys=new DeviceKeyStore(new MemoryClientStorage());const {masterKey}=await firstKeys.provisionFirstDevice(session.instanceId);
     const secondStorage=new MemoryClientStorage();const secondKeys=new DeviceKeyStore(secondStorage);const sessions=new RelaySessionStore(secondStorage);
     const pairing=await createPairingRequest(relay.endpoint,secondKeys,'Second SDK device');
     await approvePairingCode(session,pairing.code,masterKey);
     const result=await waitForPairing(pairing,{keyStore:secondKeys,sessionStore:sessions});
     expect(result.masterKey).toEqual(masterKey);
-    expect(await secondKeys.unlockDevice()).toEqual(masterKey);
+    expect(await secondKeys.unlockDevice(result.session.instanceId)).toEqual(masterKey);
     expect(await sessions.load()).toEqual(result.session);
     await expect(new RelayClient(result.session.endpoint,result.session.credential).vault()).resolves.toEqual({vaultId:session.instanceId});
   } finally {await relay.stop()}
