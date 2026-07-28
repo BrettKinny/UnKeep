@@ -7,6 +7,8 @@ const NOTE_TITLE = 'Browser persistence';
 const EDITED_TITLE = 'Browser persistence edited';
 const EDITED_CONTENT = 'This edit must survive a full reload.';
 const IMAGE_NAME = 'playwright-pixel.png';
+const KEEP_IMPORT_TITLE = 'Google Keep image import';
+const KEEP_IMPORT_IMAGE = 'keep-referenced-pixel.png';
 const IMAGE_BYTES = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6qAAAAABJRU5ErkJggg==',
   'base64',
@@ -218,6 +220,46 @@ test.describe.serial('UnKeep browser vault', () => {
     const reloadedImage = page.getByRole('img', { name: IMAGE_NAME });
     await expect(reloadedImage).toBeVisible();
     await expect.poll(() => reloadedImage.evaluate((image: HTMLImageElement) => image.complete && image.naturalWidth > 0)).toBe(true);
+  });
+
+  test('imports a Google Keep note with its referenced image and reloads the decoded bytes', async () => {
+    await page.getByRole('button', { name: 'Import from Keep' }).click();
+    const importer = page.getByRole('dialog', { name: 'Import notes' });
+    await importer.locator('#keep-import-files').setInputFiles([
+      {
+        name: 'keep-image-note.json',
+        mimeType: 'application/json',
+        buffer: Buffer.from(JSON.stringify({
+          title: KEEP_IMPORT_TITLE,
+          textContent: 'Imported with referenced media.',
+          attachments: [{ filePath: KEEP_IMPORT_IMAGE, mimetype: 'image/png' }],
+        })),
+      },
+      {
+        name: KEEP_IMPORT_IMAGE,
+        mimeType: 'image/png',
+        buffer: IMAGE_BYTES,
+      },
+    ]);
+    await expect(importer.getByText('Ready to import from Google Keep.')).toBeVisible();
+    await importer.getByRole('button', { name: 'Import 1 notes' }).click();
+    await expect(importer.getByText('Imported 1 notes!')).toBeVisible();
+    await importer.getByRole('button', { name: 'Done' }).click();
+
+    await expect(page.getByRole('button', { name: `Edit note: ${KEEP_IMPORT_TITLE}` })).toBeVisible();
+    const importedImage = page.getByRole('img', { name: KEEP_IMPORT_IMAGE });
+    await expect(importedImage).toBeVisible();
+    await expect.poll(() => importedImage.evaluate(
+      (image: HTMLImageElement) => image.complete && image.naturalWidth > 0,
+    )).toBe(true);
+
+    await page.reload();
+    await expect(page.getByRole('button', { name: `Edit note: ${KEEP_IMPORT_TITLE}` })).toBeVisible();
+    const reloadedImage = page.getByRole('img', { name: KEEP_IMPORT_IMAGE });
+    await expect(reloadedImage).toBeVisible();
+    await expect.poll(() => reloadedImage.evaluate(
+      (image: HTMLImageElement) => image.complete && image.naturalWidth > 0,
+    )).toBe(true);
   });
 
   test('cold-starts the installed app and local vault while the relay is unavailable', async ({ request, baseURL }) => {
