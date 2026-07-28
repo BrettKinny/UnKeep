@@ -9,6 +9,7 @@
   import { parseMarkdown, type MarkdownInline } from '$lib/markdown';
   import AttachmentChip from './AttachmentChip.svelte';
   import ColorPicker from './ColorPicker.svelte';
+  import LinkedText from './LinkedText.svelte';
 
   let { note, onClose }: { note: Note; onClose: () => void } = $props();
 
@@ -124,15 +125,15 @@
 {#snippet renderInline(content: MarkdownInline[])}
   {#each content as inline}
     {#if inline.type === 'text'}
-      {inline.text}
+      <LinkedText text={inline.text} />
     {:else if inline.type === 'lineBreak'}
       <br />
     {:else if inline.type === 'code'}
       <code class="rounded bg-black/10 px-1 py-0.5 font-mono text-[0.9em]">{inline.text}</code>
     {:else if inline.type === 'emphasis'}
-      <em>{inline.text}</em>
+      <em><LinkedText text={inline.text} /></em>
     {:else if inline.type === 'strong'}
-      <strong>{inline.text}</strong>
+      <strong><LinkedText text={inline.text} /></strong>
     {:else if inline.type === 'link'}
       <!-- The parser only emits absolute http(s) links. -->
       <!-- eslint-disable svelte/no-navigation-without-resolve -->

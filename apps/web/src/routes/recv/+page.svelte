@@ -5,6 +5,7 @@
   import { toastStore } from '$lib/toast.svelte';
   import AuthVaultGate, { type VaultReady } from '$lib/components/AuthVaultGate.svelte';
   import Toast from '$lib/components/Toast.svelte';
+  import LinkedText from '$lib/components/LinkedText.svelte';
 
   let received = $state<QuickSendNote | null>(null);
   let error = $state('');
@@ -88,17 +89,17 @@
       </div>
     {:else if received}
       <div class="bg-surface-dim rounded-lg p-4 border border-border">
-        {#if received.title}<h2 class="mb-3 text-lg font-semibold text-on-surface">{received.title}</h2>{/if}
+        {#if received.title}<h2 class="mb-3 text-lg font-semibold text-on-surface"><LinkedText text={received.title} /></h2>{/if}
         {#if received.checkboxes?.length}
           <ul class="grid gap-2 text-sm text-on-surface">
             {#each received.checkboxes as item}
               <li class:line-through={item.checked} class:text-on-surface-muted={item.checked}>
-                <span aria-hidden="true">{item.checked ? '☑' : '☐'}</span> {item.text}
+                <span aria-hidden="true">{item.checked ? '☑' : '☐'}</span> <LinkedText text={item.text} />
               </li>
             {/each}
           </ul>
         {:else if received.content}
-          <pre class="whitespace-pre-wrap text-on-surface text-sm font-mono">{received.content}</pre>
+          <pre class="whitespace-pre-wrap text-on-surface text-sm font-mono"><LinkedText text={received.content} /></pre>
         {/if}
         {#if received.labels?.length}
           <div class="mt-3 flex flex-wrap gap-1">
