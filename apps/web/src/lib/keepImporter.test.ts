@@ -1,4 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
+import { deflateRawSync } from 'node:zlib';
+import { MAX_ATTACHMENT_SIZE } from './attachments';
 
 // Mock nanoid before importing the module
 vi.mock('nanoid', () => {
@@ -30,14 +32,15 @@ describe('parseKeepFiles', () => {
     expect(notes[0].createdAt).toBe(1699000000000);
   });
 
-  it('combines title and content', async () => {
+  it('preserves a Keep title separately from the note body', async () => {
     const files = [makeFile('note.json', {
       title: 'My Title',
       textContent: 'Body text',
     })];
 
     const { notes } = await parseKeepFiles(files);
-    expect(notes[0].content).toBe('My Title\n\nBody text');
+    expect(notes[0].title).toBe('My Title');
+    expect(notes[0].content).toBe('Body text');
   });
 
   it('handles title-only note', async () => {
@@ -46,7 +49,8 @@ describe('parseKeepFiles', () => {
     })];
 
     const { notes } = await parseKeepFiles(files);
-    expect(notes[0].content).toBe('Just a title');
+    expect(notes[0].title).toBe('Just a title');
+    expect(notes[0].content).toBe('');
   });
 
   it('handles content-only note', async () => {
@@ -56,6 +60,16 @@ describe('parseKeepFiles', () => {
 
     const { notes } = await parseKeepFiles(files);
     expect(notes[0].content).toBe('Just content');
+  });
+
+  it('preserves Keep labels without duplicates or blank names', async () => {
+    const files = [makeFile('note.json', {
+      textContent: 'Labelled',
+      labels: [{ name: 'work' }, { name: 'work' }, { name: ' ' }, { name: 'ideas' }],
+    })];
+
+    const { notes } = await parseKeepFiles(files);
+    expect(notes[0].labels).toEqual(['work', 'ideas']);
   });
 
   it('converts checklist notes', async () => {
@@ -68,7 +82,8 @@ describe('parseKeepFiles', () => {
     })];
 
     const { notes } = await parseKeepFiles(files);
-    expect(notes[0].content).toBe('Shopping');
+    expect(notes[0].title).toBe('Shopping');
+    expect(notes[0].content).toBe('');
     expect(notes[0].checkboxes).toHaveLength(2);
     expect(notes[0].checkboxes![0].text).toBe('Milk');
     expect(notes[0].checkboxes![0].checked).toBe(false);
@@ -138,6 +153,32 @@ describe('parseKeepFiles', () => {
     expect(notes).toHaveLength(1);
   });
 
+  it('rejects an incomplete import when a Keep note references missing media', async () => {
+    const files = [makeFile('Photo note.json', {
+      title: 'Photo note',
+      attachments: [{ filePath: 'Photo note.png', mimetype: 'image/png' }],
+    })];
+
+    await expect(parseKeepFiles(files)).rejects.toThrow(
+      'Incomplete Google Keep import: Photo note.json references missing media "Photo note.png"',
+    );
+  });
+
+  it('rejects referenced media over the web client attachment limit before reading its bytes', async () => {
+    const noteFile = makeFile('Video note.json', {
+      attachments: [{ filePath: 'large.mov', mimetype: 'video/quicktime' }],
+    });
+    const media = new File([], 'large.mov', { type: 'video/quicktime' });
+    Object.defineProperty(media, 'size', { value: MAX_ATTACHMENT_SIZE + 1 });
+    Object.defineProperty(media, 'arrayBuffer', {
+      value: vi.fn(async () => { throw new Error('oversized bytes must not be read'); }),
+    });
+
+    await expect(parseKeepFiles([noteFile, media])).rejects.toThrow(
+      'large.mov is too large. Attachments must be 25 MB or smaller.',
+    );
+  });
+
   it('generates correct preview', async () => {
     const files = [
       makeFile('a.json', { textContent: 'normal' }),
@@ -170,7 +211,9 @@ const { parseKeepZip } = await import('./keepImporter.js');
 
 interface ZipEntry {
   name: string;
-  content: string;
+  content: string | Uint8Array;
+  compressed?: boolean;
+  declaredUncompressedSize?: number;
 }
 
 function crc32(bytes: Uint8Array): number {
@@ -198,26 +241,34 @@ function buildZip(entries: ZipEntry[], { streamed = false } = {}): File {
 
   for (const entry of entries) {
     const nameBytes = encoder.encode(entry.name);
-    const data = encoder.encode(entry.content);
+    const data = typeof entry.content === 'string' ? encoder.encode(entry.content) : entry.content;
+    const storedData = entry.compressed ? new Uint8Array(deflateRawSync(data)) : data;
+    const compressionMethod = entry.compressed ? 8 : 0;
+    const declaredUncompressedSize = entry.declaredUncompressedSize ?? data.length;
     const crc = crc32(data);
     const flags = streamed ? 0x0808 : 0x0800;
-    const localSizes = streamed ? [0, 0, 0] : [crc, data.length, data.length];
+    const localSizes = streamed ? [0, 0, 0] : [crc, storedData.length, declaredUncompressedSize];
 
     const local = new Uint8Array([
-      ...u32(0x04034b50), ...u16(20), ...u16(flags), ...u16(0), ...u16(0), ...u16(0),
+      ...u32(0x04034b50), ...u16(20), ...u16(flags), ...u16(compressionMethod), ...u16(0), ...u16(0),
       ...u32(localSizes[0]), ...u32(localSizes[1]), ...u32(localSizes[2]),
       ...u16(nameBytes.length), ...u16(0), ...nameBytes,
     ]);
-    parts.push(local, data);
-    let entryLen = local.length + data.length;
+    parts.push(local, storedData);
+    let entryLen = local.length + storedData.length;
     if (streamed) {
-      parts.push(new Uint8Array([...u32(0x08074b50), ...u32(crc), ...u32(data.length), ...u32(data.length)]));
+      parts.push(new Uint8Array([
+        ...u32(0x08074b50),
+        ...u32(crc),
+        ...u32(storedData.length),
+        ...u32(declaredUncompressedSize),
+      ]));
       entryLen += 16;
     }
 
     central.push(new Uint8Array([
-      ...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(flags), ...u16(0), ...u16(0), ...u16(0),
-      ...u32(crc), ...u32(data.length), ...u32(data.length),
+      ...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(flags), ...u16(compressionMethod), ...u16(0), ...u16(0),
+      ...u32(crc), ...u32(storedData.length), ...u32(declaredUncompressedSize),
       ...u16(nameBytes.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0),
       ...u32(0), ...u32(offset), ...nameBytes,
     ]));
@@ -252,6 +303,80 @@ describe('parseKeepZip', () => {
     const { notes } = await parseKeepZip(buildZip(entries, { streamed: true }));
     expect(notes).toHaveLength(1);
     expect(notes[0].content).toBe('From zip');
+  });
+
+  it('associates referenced Takeout images with their note and preserves the bytes', async () => {
+    const imageBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    const { notes, attachments } = await parseKeepZip(buildZip([
+      {
+        name: 'Takeout/Keep/Photo note.json',
+        content: JSON.stringify({
+          title: 'Photo note',
+          attachments: [{ filePath: 'Photo note.png', mimetype: 'image/png' }],
+        }),
+      },
+      { name: 'Takeout/Keep/Photo note.png', content: imageBytes },
+    ], { streamed: true }));
+
+    expect(notes[0].images).toEqual([
+      expect.objectContaining({ name: 'Photo note.png', mimeType: 'image/png', size: imageBytes.length }),
+    ]);
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0]).toMatchObject({ noteId: notes[0].id, attachment: notes[0].images![0] });
+    expect(attachments[0].bytes).toEqual(imageBytes);
+  });
+
+  it('rejects an oversized compressed media entry from its ZIP declaration before inflating it', async () => {
+    const archive = buildZip([
+      {
+        name: 'Takeout/Keep/Video note.json',
+        content: JSON.stringify({ attachments: [{ filePath: 'large.mov', mimetype: 'video/quicktime' }] }),
+      },
+      {
+        name: 'Takeout/Keep/large.mov',
+        content: new Uint8Array([1, 2, 3]),
+        compressed: true,
+        declaredUncompressedSize: MAX_ATTACHMENT_SIZE + 1,
+      },
+    ], { streamed: true });
+
+    await expect(parseKeepZip(archive)).rejects.toThrow(
+      'large.mov is too large. Attachments must be 25 MB or smaller.',
+    );
+  });
+
+  it('rejects a ZIP entry whose extracted bytes disagree with its declared size', async () => {
+    const archive = buildZip([
+      {
+        name: 'Takeout/Keep/Photo note.json',
+        content: JSON.stringify({ attachments: [{ filePath: 'photo.png', mimetype: 'image/png' }] }),
+      },
+      {
+        name: 'Takeout/Keep/photo.png',
+        content: new Uint8Array([1, 2, 3]),
+        compressed: true,
+        declaredUncompressedSize: 4,
+      },
+    ]);
+
+    await expect(parseKeepZip(archive)).rejects.toThrow(
+      'Invalid Google Takeout ZIP entry Takeout/Keep/photo.png: declared 4 bytes but extracted 3',
+    );
+  });
+
+  it('infers an image MIME type from Takeout filenames when metadata omits it', async () => {
+    const { notes } = await parseKeepZip(buildZip([
+      {
+        name: 'Takeout/Keep/Photo.json',
+        content: JSON.stringify({ attachments: [{ filePath: 'Photo.JPG' }] }),
+      },
+      { name: 'Takeout/Keep/Photo.JPG', content: new Uint8Array([0xff, 0xd8, 0xff]) },
+    ]));
+
+    expect(notes[0].images?.[0]).toMatchObject({
+      name: 'Photo.JPG',
+      mimeType: 'image/jpeg',
+    });
   });
 
   it('returns no notes for a non-zip file', async () => {

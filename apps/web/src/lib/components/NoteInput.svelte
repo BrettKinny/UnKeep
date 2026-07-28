@@ -29,14 +29,19 @@
     class:shadow-md={expanded}
   >
     {#if expanded}
+      <label for="new-note-title" class="sr-only">Note title</label>
       <input
+        id="new-note-title"
+        type="text"
         data-keep-focus="true"
         bind:value={title}
         placeholder="Title"
         onkeydown={handleKeydown}
         class="w-full px-4 pt-3 bg-transparent text-on-surface font-medium placeholder:text-on-surface-muted outline-none rounded-t-lg"
       />
+      <label for="new-note-content" class="sr-only">Note content</label>
       <textarea
+        id="new-note-content"
         bind:this={inputEl}
         bind:value={content}
         onfocusout={(e) => {
@@ -50,6 +55,7 @@
       ></textarea>
       <div class="flex justify-end px-2 pb-2">
         <button
+          type="button"
           data-keep-focus="true"
           onmousedown={(e) => e.preventDefault()}
           onclick={() => { handleClose(); inputEl?.blur(); }}
@@ -57,16 +63,14 @@
         >Close</button>
       </div>
     {:else}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div
+      <button
+        type="button"
+        aria-label="Create a new note"
         onclick={() => { expanded = true; setTimeout(() => inputEl?.focus(), 0); }}
-        onkeydown={(e) => { if (e.key === 'Enter') { expanded = true; setTimeout(() => inputEl?.focus(), 0); }}}
-        class="p-4 text-on-surface-muted cursor-text rounded-lg"
-        role="button"
-        tabindex="0"
+        class="w-full cursor-text rounded-lg p-4 text-left text-on-surface-muted"
       >
         Take a note...
-      </div>
+      </button>
     {/if}
   </div>
 </div>

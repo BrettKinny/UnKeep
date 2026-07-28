@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { cleanRelayEndpoint, RelayClient } from './relay.js';
+import { describe, expect, it, vi } from 'vitest';
+import { cleanRelayEndpoint, RecordConflictError, RelayClient } from './relay.js';
 
 describe('cleanRelayEndpoint', () => {
   it.each([
@@ -42,5 +42,71 @@ describe('cleanRelayEndpoint', () => {
 
   it('rejects unsupported protocols even with the insecure override', () => {
     expect(() => cleanRelayEndpoint('ftp://unkeep', { allowInsecure: true })).toThrow(/HTTP or HTTPS/);
+  });
+});
+
+describe('RelayClient errors', () => {
+  it('exposes typed record-conflict metadata returned by the relay', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      error: 'record_conflict',
+      currentRevision: 42,
+    }), {
+      status: 409,
+      headers: { 'content-type': 'application/json' },
+    }));
+    try {
+      const error = await new RelayClient('http://localhost:3000', 'credential')
+        .putNote('conflicted-note', { baseRevision: 1 })
+        .catch(value => value);
+
+      expect(error).toBeInstanceOf(RecordConflictError);
+      expect(error).toMatchObject({
+        name: 'RecordConflictError',
+        status: 409,
+        code: 'record_conflict',
+        currentRevision: 42,
+      });
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
+  it('forwards an abort signal to a pairing poll request', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      response: null,
+      deviceCredential: null,
+      consumed: false,
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    const controller = new AbortController();
+    try {
+      await new RelayClient('http://localhost:3000')
+        .pollPairing('pairing-one', 'poll-secret', controller.signal);
+
+      expect(fetch.mock.calls[0]![1]).toMatchObject({ signal: controller.signal });
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
+  it('forwards an abort signal to relay status', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      protocol: 1,
+      instanceId: 'vault-one',
+      initialized: true,
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    const controller = new AbortController();
+    try {
+      await new RelayClient('http://localhost:3000').status(controller.signal);
+
+      expect(fetch.mock.calls[0]![1]).toMatchObject({ signal: controller.signal });
+    } finally {
+      fetch.mockRestore();
+    }
   });
 });

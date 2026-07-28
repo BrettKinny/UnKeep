@@ -1,5 +1,13 @@
 <script lang="ts">
-  import { parseKeepFiles, parseKeepZip, type ImportPreview } from '$lib/keepImporter';
+  import { onMount } from 'svelte';
+  import {
+    parseKeepFiles,
+    parseKeepZip,
+    summarizeImport,
+    type ImportedAttachment,
+    type ImportPreview,
+  } from '$lib/keepImporter';
+  import { parseVaultExport } from '$lib/vaultExport';
   import { noteStore } from '$lib/noteStore.svelte';
   import { toastStore } from '$lib/toast.svelte';
   import type { Note } from '@unkeep/core';
@@ -9,19 +17,80 @@
   let step = $state<'upload' | 'preview' | 'importing' | 'done'>('upload');
   let preview = $state<ImportPreview | null>(null);
   let importNotes = $state<Note[]>([]);
+  let importAttachments = $state<ImportedAttachment[]>([]);
   let importedCount = $state(0);
   let dragOver = $state(false);
+  let dialogEl: HTMLDivElement | undefined = $state();
+  let importSource = $state<'Google Keep' | 'UnKeep backup'>('Google Keep');
+
+  onMount(() => {
+    const previouslyFocused = document.activeElement;
+    dialogEl?.focus();
+
+    return () => {
+      if (previouslyFocused instanceof HTMLElement && document.contains(previouslyFocused)) {
+        previouslyFocused.focus();
+      }
+    };
+  });
+
+  function handleDialogKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      onClose();
+      return;
+    }
+    if (event.key !== 'Tab' || !dialogEl) return;
+
+    const focusable = [...dialogEl.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+    )].filter(element => !element.hasAttribute('hidden') && element.getAttribute('aria-hidden') !== 'true');
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (!first || !last) {
+      event.preventDefault();
+      dialogEl.focus();
+      return;
+    }
+
+    const active = document.activeElement;
+    const focusStartsAtDialog = active === dialogEl || !dialogEl.contains(active);
+    if (event.shiftKey && (active === first || focusStartsAtDialog)) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (active === last || focusStartsAtDialog)) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
 
   async function handleFiles(files: FileList | File[]) {
     const fileArray = Array.from(files);
     try {
+      if (fileArray.length === 1 && fileArray[0].name.toLowerCase().endsWith('.json')) {
+        const serialized = await fileArray[0].text();
+        let candidate: unknown;
+        try { candidate = JSON.parse(serialized); } catch { candidate = null; }
+        if (candidate && typeof candidate === 'object' && 'format' in candidate && candidate.format === 'unkeep-vault') {
+          const restored = parseVaultExport(serialized);
+          importNotes = restored.notes;
+          importAttachments = restored.attachments;
+          preview = summarizeImport(restored.notes);
+          importSource = 'UnKeep backup';
+          step = 'preview';
+          return;
+        }
+      }
+      importSource = 'Google Keep';
       if (fileArray.length === 1 && fileArray[0].name.endsWith('.zip')) {
         const result = await parseKeepZip(fileArray[0]);
         importNotes = result.notes;
+        importAttachments = result.attachments;
         preview = result.preview;
       } else {
         const result = await parseKeepFiles(fileArray);
         importNotes = result.notes;
+        importAttachments = result.attachments;
         preview = result.preview;
       }
       step = 'preview';
@@ -33,10 +102,18 @@
   async function handleImport() {
     step = 'importing';
     const nonTrashed = importNotes.filter(n => !n.deleted);
-    await noteStore.importNotes(nonTrashed);
-    importedCount = nonTrashed.length;
-    step = 'done';
-    toastStore.show(`Imported ${importedCount} notes!`);
+    const importedIds = new Set(nonTrashed.map(note => note.id));
+    try {
+      importedCount = await noteStore.importNotes(
+        nonTrashed,
+        importAttachments.filter(attachment => importedIds.has(attachment.noteId)),
+      );
+      step = 'done';
+      toastStore.show(`Imported ${importedCount} notes!`);
+    } catch (error) {
+      step = 'preview';
+      toastStore.show(`Import failed; no notes were restored: ${error}`);
+    }
   }
 
   function handleDrop(e: DragEvent) {
@@ -53,28 +130,29 @@
   }
 </script>
 
-<div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+<div class="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/50 p-4">
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
-    class="w-full max-w-lg bg-surface rounded-lg shadow-xl"
+    bind:this={dialogEl}
+    class="flex max-h-[calc(100dvh-2rem)] w-full max-w-lg flex-col overflow-hidden rounded-lg bg-surface shadow-xl"
     role="dialog"
     aria-modal="true"
     aria-label="Import notes"
     tabindex="-1"
     onclick={(e) => e.stopPropagation()}
-    onkeydown={() => {}}
+    onkeydown={handleDialogKeydown}
   >
-    <div class="flex items-center justify-between p-4 border-b border-border">
+    <div class="flex shrink-0 items-center justify-between border-b border-border p-4">
       <h2 class="text-lg font-semibold text-on-surface">Import Notes</h2>
-      <button onclick={onClose} class="p-1 hover:bg-surface-dim rounded-full text-on-surface-muted" aria-label="Close">
+      <button type="button" onclick={onClose} class="p-1 hover:bg-surface-dim rounded-full text-on-surface-muted" aria-label="Close import dialog">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12"/></svg>
       </button>
     </div>
 
-    <div class="p-4">
+    <div class="min-h-0 overflow-y-auto p-4">
       {#if step === 'upload'}
         <p class="text-sm text-on-surface-muted mb-4">
-          Upload a Takeout ZIP file containing your exported notes to import them here.
+          Upload a Google Takeout ZIP, its extracted Keep files, or a complete UnKeep vault export.
         </p>
 
         <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -88,22 +166,27 @@
           ondragleave={() => dragOver = false}
         >
           <svg class="w-12 h-12 mx-auto mb-3 text-on-surface-muted" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/></svg>
-          <p class="text-on-surface font-medium">Drop your Takeout ZIP here</p>
-          <p class="text-sm text-on-surface-muted mt-1">or drop individual JSON files from the Keep folder</p>
-          <label class="inline-block mt-4 px-4 py-2 bg-primary text-on-primary rounded-lg cursor-pointer hover:bg-primary-dim transition-colors">
+          <p class="text-on-surface font-medium">Drop a Takeout ZIP or UnKeep export here</p>
+          <p class="text-sm text-on-surface-muted mt-1">You can also drop the JSON and media files from a Keep folder</p>
+          <input
+            id="keep-import-files"
+            type="file"
+            accept=".zip,.json,image/*,audio/*"
+            multiple
+            class="peer sr-only"
+            onchange={(e) => { if (e.currentTarget.files) handleFiles(e.currentTarget.files); }}
+          />
+          <label
+            for="keep-import-files"
+            class="mt-4 inline-block cursor-pointer rounded-lg bg-primary px-4 py-2 text-on-primary transition-colors hover:bg-primary-dim peer-focus-visible:ring-2 peer-focus-visible:ring-primary peer-focus-visible:ring-offset-2"
+          >
             Browse files
-            <input
-              type="file"
-              accept=".zip,.json"
-              multiple
-              class="hidden"
-              onchange={(e) => { if (e.currentTarget.files) handleFiles(e.currentTarget.files); }}
-            />
           </label>
         </div>
 
       {:else if step === 'preview'}
         <div class="space-y-4">
+          <p class="text-sm text-on-surface-muted">Ready to import from {importSource}.</p>
           <div class="grid grid-cols-2 gap-3">
             <div class="bg-surface-dim rounded-lg p-3 text-center">
               <div class="text-2xl font-bold text-on-surface">{preview?.total}</div>

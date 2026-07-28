@@ -8,10 +8,28 @@ export interface RelaySession {
 export interface RelayStatus { protocol: number; instanceId: string; initialized: boolean }
 export interface DeviceCredential { id:string; name:string; revokedAt:string|null }
 export interface ServiceCredential { id:string; name:string; createdAt:string; revokedAt:string|null }
-export interface RelayChange { kind:'note'|'attachment'; id:string; noteId?:string; envelope:unknown; deleted:boolean; revision:number }
+export type RelayChange =
+  | { kind:'note'; id:string; noteId?:string; envelope:unknown; deleted:boolean; revision:number }
+  | { kind:'attachment'; id:string; noteId?:string; deleted:boolean; revision:number };
 
 export interface RelayClientOptions {
   allowInsecure?: boolean;
+}
+
+export class RelayHttpError extends Error {
+  readonly name:string = 'RelayHttpError';
+
+  constructor(readonly status:number, readonly code:string) {
+    super(code);
+  }
+}
+
+export class RecordConflictError extends RelayHttpError {
+  override readonly name:string = 'RecordConflictError';
+
+  constructor(readonly currentRevision:number) {
+    super(409, 'record_conflict');
+  }
 }
 
 function isSafeHttpHostname(hostname: string): boolean {
@@ -53,17 +71,27 @@ export class RelayClient {
       ...init,
       headers: { 'content-type': 'application/json', ...(this.credential ? { authorization: `Device ${this.credential}` } : {}), ...(authorization ? { authorization } : {}), ...init.headers }
     });
-    const value = response.status === 204 ? {} : await response.json() as { error?: string };
-    if (!response.ok) throw new Error(value.error || `Sync server returned ${response.status}`);
+    const value = response.status === 204 ? {} : await response.json() as { error?: string; currentRevision?: number };
+    if (!response.ok) {
+      const code = value.error || `Sync server returned ${response.status}`;
+      if (response.status === 409 && code === 'record_conflict' && Number.isSafeInteger(value.currentRevision) && value.currentRevision! >= 0) {
+        throw new RecordConflictError(value.currentRevision!);
+      }
+      throw new RelayHttpError(response.status, code);
+    }
     return value as T;
   }
 
-  status() { return this.request<RelayStatus>('/status'); }
+  status(signal?:AbortSignal) { return this.request<RelayStatus>('/status',{signal}); }
   claimSetup(setupToken: string, deviceId: string, name: string) {
     return this.request<{instanceId:string;deviceCredential:string}>('/setup/claim', { method:'POST', body:JSON.stringify({deviceId,name}) }, `Setup ${setupToken}`);
   }
+  reclaimSetup(recoveryToken: string, deviceId: string, name: string) {
+    return this.request<{instanceId:string;deviceCredential:string}>('/setup/reclaim', { method:'POST', body:JSON.stringify({deviceId,name}) }, `Recovery ${recoveryToken}`);
+  }
   vault() { return this.request<{vaultId:string}>('/vault'); }
   devices() { return this.request<{devices:DeviceCredential[]}>('/devices'); }
+  revokeDevice(id:string) { return this.request(`/devices/${encodeURIComponent(id)}`,{method:'DELETE'}); }
   serviceCredentials() { return this.request<{serviceCredentials:ServiceCredential[]}>('/service-credentials'); }
   mintServiceCredential(name:string) { return this.request<{id:string;name:string;createdAt:string;serviceCredential:string}>('/service-credentials',{method:'POST',body:JSON.stringify({name})}); }
   revokeServiceCredential(id:string) { return this.request(`/service-credentials/${encodeURIComponent(id)}`,{method:'DELETE'}); }
@@ -72,7 +100,7 @@ export class RelayClient {
   putAttachment(id:string, value:unknown) { return this.request<{revision:number}>(`/attachments/${encodeURIComponent(id)}`, {method:'PUT',body:JSON.stringify(value)}); }
   getAttachment(id:string) { return this.request<{noteId:string;envelope:unknown;deleted:boolean;revision:number}>(`/attachments/${encodeURIComponent(id)}`); }
   createPairing(value:unknown) { return this.request<{requestId:string;code:string;pollSecret:string;expiresAt:string}>('/pairings',{method:'POST',body:JSON.stringify(value)}); }
-  pollPairing(id:string, secret:string) { return this.request<{response:unknown;deviceCredential:string|null;consumed:boolean}>(`/pairings/${id}?secret=${encodeURIComponent(secret)}`); }
+  pollPairing(id:string, secret:string, signal?:AbortSignal) { return this.request<{response:unknown;deviceCredential:string|null;consumed:boolean}>(`/pairings/${id}?secret=${encodeURIComponent(secret)}`, { signal }); }
   pairingByCode(code:string) { return this.request<{id:string;deviceId:string;deviceName:string;publicKey:JsonWebKey;expiresAt:string}>(`/pairings/code/${encodeURIComponent(code)}`); }
   approvePairing(id:string,response:unknown) { return this.request(`/pairings/${id}/approve`,{method:'POST',body:JSON.stringify({response})}); }
   consumePairing(id:string) { return this.request(`/pairings/${id}/consume`,{method:'POST',body:'{}'}); }
