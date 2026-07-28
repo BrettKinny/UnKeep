@@ -1,11 +1,71 @@
 import { expect, test } from 'vitest';
+import { generateMasterKey, importRecoveryKit } from '@unkeep/core';
 import { clearDeviceAccess } from './index.js';
 import {
   DeviceKeyStore,
   VaultInstanceMismatchError,
+  VaultKeyMismatchError,
 } from './deviceKeys.js';
 import { MemoryClientStorage } from './storage.js';
+import type { ClientStorage } from './storage.js';
 import { RelaySessionStore } from './session.js';
+
+function encodeBase64(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes));
+}
+
+async function legacyRecoveryKit(masterKey: Uint8Array<ArrayBuffer>): Promise<string> {
+  const recoveryKeyBytes = crypto.getRandomValues(new Uint8Array(32));
+  const recoveryKey = await crypto.subtle.importKey(
+    'raw',
+    recoveryKeyBytes,
+    { name: 'AES-GCM' },
+    false,
+    ['encrypt'],
+  );
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const keyId = 'legacy-recovery';
+  const ciphertext = await crypto.subtle.encrypt(
+    {
+      name: 'AES-GCM',
+      iv,
+      additionalData: new TextEncoder().encode(`unkeep:1:recovery-master-key:${keyId}`),
+      tagLength: 128,
+    },
+    recoveryKey,
+    masterKey,
+  );
+  return JSON.stringify({
+    version: 1,
+    recoveryKey: encodeBase64(recoveryKeyBytes),
+    masterKeyEnvelope: {
+      version: 1,
+      algorithm: 'AES-GCM',
+      keyId,
+      iv: encodeBase64(iv),
+      ciphertext: encodeBase64(new Uint8Array(ciphertext)),
+    },
+  });
+}
+
+class RecordingStorage implements ClientStorage {
+  readonly values = new Map<string, unknown>();
+  writes = 0;
+
+  async get<T>(key: string): Promise<T | null> {
+    return (this.values.get(key) as T | undefined) ?? null;
+  }
+
+  async set<T>(key: string, value: T): Promise<void> {
+    this.writes += 1;
+    this.values.set(key, value);
+  }
+
+  async delete(key: string): Promise<void> {
+    this.writes += 1;
+    this.values.delete(key);
+  }
+}
 
 test('exports a fresh recovery kit for already-persisted device keys', async () => {
   const keys = new DeviceKeyStore(new MemoryClientStorage());
@@ -49,6 +109,38 @@ test('rejects the same master key for a different relay instance', async () => {
   await expect(keys.unlockDevice('vault-two'))
     .rejects.toBeInstanceOf(VaultInstanceMismatchError);
   await expect(keys.unlockDevice('vault-one')).resolves.toEqual(existing.masterKey);
+});
+
+test('validates a legacy kit without persistence and upgrades it only after confirmation', async () => {
+  const storage = new RecordingStorage();
+  const keys = new DeviceKeyStore(storage);
+  const masterKey = generateMasterKey();
+  const legacyKit = await legacyRecoveryKit(masterKey);
+
+  await expect(keys.validateLegacyRecovery(legacyKit, 'vault-one')).resolves.toBeUndefined();
+  expect(storage.writes).toBe(0);
+
+  await expect(keys.restoreLegacyDeviceFromRecovery(legacyKit, 'vault-one'))
+    .resolves.toEqual(masterKey);
+  await expect(keys.unlockDevice('vault-one')).resolves.toEqual(masterKey);
+  expect(importRecoveryKit(await keys.createRecoveryKit())).toMatchObject({
+    version: 2,
+    instanceId: 'vault-one',
+  });
+});
+
+test('preserves a relay-scoped fingerprint when access is cleared and rejects a different legacy key', async () => {
+  const keys = new DeviceKeyStore(new MemoryClientStorage());
+  const existing = await keys.provisionFirstDevice('vault-one');
+  const matchingLegacyKit = await legacyRecoveryKit(existing.masterKey);
+  const foreignLegacyKit = await legacyRecoveryKit(generateMasterKey());
+
+  await keys.clearDevice();
+
+  await expect(keys.validateLegacyRecovery(foreignLegacyKit, 'vault-one'))
+    .rejects.toBeInstanceOf(VaultKeyMismatchError);
+  await expect(keys.restoreLegacyDeviceFromRecovery(matchingLegacyKit, 'vault-one'))
+    .resolves.toEqual(existing.masterKey);
 });
 
 test('explicitly clears the device identity, stored vault key, and relay session', async () => {

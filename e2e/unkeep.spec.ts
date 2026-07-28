@@ -12,9 +12,77 @@ const IMAGE_BYTES = Buffer.from(
   'base64',
 );
 
+interface RecoveryKitV2Fixture {
+  version: 2;
+  instanceId: string;
+  recoveryKey: string;
+  masterKeyEnvelope: {
+    version: 1;
+    algorithm: 'AES-GCM';
+    keyId: string;
+    iv: string;
+    ciphertext: string;
+  };
+}
+
+async function createLegacyRecoveryKit(kit: RecoveryKitV2Fixture): Promise<string> {
+  const recoveryKeyBytes = Buffer.from(kit.recoveryKey, 'base64');
+  const recoveryKey = await crypto.subtle.importKey(
+    'raw',
+    recoveryKeyBytes,
+    { name: 'AES-GCM' },
+    false,
+    ['decrypt'],
+  );
+  const masterKey = await crypto.subtle.decrypt(
+    {
+      name: 'AES-GCM',
+      iv: Buffer.from(kit.masterKeyEnvelope.iv, 'base64'),
+      additionalData: new TextEncoder().encode(
+        `unkeep:1:recovery-master-key:${kit.instanceId}:${kit.masterKeyEnvelope.keyId}`,
+      ),
+      tagLength: 128,
+    },
+    recoveryKey,
+    Buffer.from(kit.masterKeyEnvelope.ciphertext, 'base64'),
+  );
+  const legacyRecoveryKeyBytes = crypto.getRandomValues(new Uint8Array(32));
+  const legacyRecoveryKey = await crypto.subtle.importKey(
+    'raw',
+    legacyRecoveryKeyBytes,
+    { name: 'AES-GCM' },
+    false,
+    ['encrypt'],
+  );
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const keyId = 'legacy-e2e-recovery';
+  const ciphertext = await crypto.subtle.encrypt(
+    {
+      name: 'AES-GCM',
+      iv,
+      additionalData: new TextEncoder().encode(`unkeep:1:recovery-master-key:${keyId}`),
+      tagLength: 128,
+    },
+    legacyRecoveryKey,
+    masterKey,
+  );
+  return JSON.stringify({
+    version: 1,
+    recoveryKey: Buffer.from(legacyRecoveryKeyBytes).toString('base64'),
+    masterKeyEnvelope: {
+      version: 1,
+      algorithm: 'AES-GCM',
+      keyId,
+      iv: Buffer.from(iv).toString('base64'),
+      ciphertext: Buffer.from(ciphertext).toString('base64'),
+    },
+  });
+}
+
 test.describe.serial('UnKeep browser vault', () => {
   let context: BrowserContext;
   let page: Page;
+  let recoveryKit: RecoveryKitV2Fixture;
 
   test.beforeAll(async ({ browser, baseURL }) => {
     context = await browser.newContext({
@@ -56,13 +124,15 @@ test.describe.serial('UnKeep browser vault', () => {
     expect(download.suggestedFilename()).toBe('unkeep-recovery-kit.json');
     const downloadPath = await download.path();
     expect(downloadPath).not.toBeNull();
-    const kit = JSON.parse(await readFile(downloadPath as string, 'utf8')) as Record<string, unknown>;
-    expect(kit).toMatchObject({
+    recoveryKit = JSON.parse(
+      await readFile(downloadPath as string, 'utf8'),
+    ) as RecoveryKitV2Fixture;
+    expect(recoveryKit).toMatchObject({
       version: 2,
       instanceId: (await relayStatus()).instanceId,
     });
-    expect(kit.recoveryKey).toEqual(expect.any(String));
-    expect(kit.masterKeyEnvelope).toEqual(expect.any(Object));
+    expect(recoveryKit.recoveryKey).toEqual(expect.any(String));
+    expect(recoveryKit.masterKeyEnvelope).toEqual(expect.any(Object));
 
     await expect(page.getByRole('checkbox', { name: 'I saved it somewhere safe' })).toBeChecked();
     await expect(initialize).toBeEnabled();
@@ -71,6 +141,38 @@ test.describe.serial('UnKeep browser vault', () => {
     await initialize.click();
     await expect(page.getByRole('button', { name: 'Create a new note' })).toBeVisible();
     await expect.poll(async () => (await relayStatus()).initialized).toBe(true);
+  });
+
+  test('warns before associating a legacy kit and cancellation persists no access', async ({ browser }) => {
+    const legacyKit = await createLegacyRecoveryKit(recoveryKit);
+    const recoveryContext = await browser.newContext({ baseURL: page.url() });
+    const recoveryPage = await recoveryContext.newPage();
+    try {
+      await recoveryPage.goto('/');
+      await recoveryPage.getByRole('button', { name: 'Connect' }).click();
+      await recoveryPage.locator('input[type="file"]').setInputFiles({
+        name: 'legacy-recovery-kit.json',
+        mimeType: 'application/json',
+        buffer: Buffer.from(legacyKit),
+      });
+      await expect(recoveryPage.getByRole('heading', { name: 'Legacy recovery kit' })).toBeVisible();
+      await recoveryPage.getByRole('button', { name: 'Cancel' }).click();
+      await recoveryPage.reload();
+      await expect(recoveryPage.getByRole('button', { name: 'Connect' })).toBeVisible();
+
+      await recoveryPage.getByRole('button', { name: 'Connect' }).click();
+      await recoveryPage.locator('input[type="file"]').setInputFiles({
+        name: 'legacy-recovery-kit.json',
+        mimeType: 'application/json',
+        buffer: Buffer.from(legacyKit),
+      });
+      await recoveryPage.getByRole('button', { name: 'Associate kit with this relay' }).click();
+      await recoveryPage.getByLabel('Operator recovery token').fill('playwright-recovery-token');
+      await recoveryPage.getByRole('button', { name: 'Recover access' }).click();
+      await expect(recoveryPage.getByRole('button', { name: 'Create a new note' })).toBeVisible();
+    } finally {
+      await recoveryContext.close();
+    }
   });
 
   test('persists a created and edited note across a full reload', async () => {

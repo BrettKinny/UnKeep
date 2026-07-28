@@ -215,7 +215,7 @@ The public packages are ESM and require Node.js 20 or newer when used in Node. T
 ## Recovery, backups, and security boundaries
 
 - The relay cannot decrypt vault contents. It stores ciphertext envelopes, credential hashes, record revisions, and temporary pairing state.
-- Recovery-kit v2 contains everything needed to recover the vault key and authenticates the relay instance it belongs to. Treat it like a password; downloading a new kit from an authorized device invalidates neither older kits nor existing devices. Legacy v1 kits require the explicit migration flow.
+- Recovery-kit v2 contains everything needed to recover the vault key and authenticates the relay instance it belongs to. Treat it like a password; downloading a new kit from an authorized device invalidates neither older kits nor existing devices. Legacy v1 kits require an explicit association warning; retained local vault data rejects a different key using a relay-scoped non-secret fingerprint.
 - The operator recovery token can mint a replacement device credential but cannot decrypt the vault without a recovery kit. Rotating it does not revoke existing credentials.
 - Revoking a device prevents future relay access. It cannot erase keys or notes already copied to that device.
 - Back up the complete `/data` volume, the recovery kit, and the operator recovery token. Keep the latter two separate. A relay backup alone is ciphertext, and a recovery kit is not a backup of current note data.

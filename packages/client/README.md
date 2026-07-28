@@ -14,6 +14,8 @@ Writes use optimistic record revisions and durable mutation IDs. If a response i
 
 `DeviceKeyStore` binds new wrapped master keys and recovery kits to the relay `instanceId`. Pass the instance ID reported by relay status into first-device provisioning, pairing persistence, recovery, and unlock; a mismatch is rejected before local access or session state is replaced.
 
+Legacy v1 recovery is a two-step API: `validateLegacyRecovery` decrypts and checks retained relay-scoped key fingerprints without writing, while `restoreLegacyDeviceFromRecovery` commits the user-confirmed association and upgrades local storage so the next exported kit is v2. Clearing device access deliberately preserves the non-secret fingerprint while local vault data remains.
+
 The package is ESM and requires Node.js 20 or newer when used in Node. Browser persistence and cryptography integrations require their corresponding Web APIs.
 
 This repository produces a locally installable package tarball, but it does not automatically publish one to a registry.
