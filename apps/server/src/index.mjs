@@ -4,34 +4,37 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { migrateDatabase } from './migrations.mjs';
 
 const PORT = Number(process.env.PORT || 3000);
 const DATA_DIR = resolve(process.env.UNKEEP_DATA_DIR || './data');
 const WEB_DIR = resolve(process.env.UNKEEP_WEB_DIR || join(dirname(fileURLToPath(import.meta.url)), '../../web/build'));
 const SETUP_TOKEN = process.env.UNKEEP_SETUP_TOKEN || '';
+const RECOVERY_TOKEN = process.env.UNKEEP_RECOVERY_TOKEN || SETUP_TOKEN;
 const MAX_BODY = 35 * 1024 * 1024;
 const DEFAULT_MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024;
+const DEFAULT_PAIRING_TTL_MS = 10 * 60_000;
 const configuredAttachmentSize = Number(process.env.UNKEEP_MAX_ATTACHMENT_SIZE || DEFAULT_MAX_ATTACHMENT_SIZE);
 const MAX_ATTACHMENT_SIZE = Number.isSafeInteger(configuredAttachmentSize) && configuredAttachmentSize > 0 ? configuredAttachmentSize : DEFAULT_MAX_ATTACHMENT_SIZE;
+const configuredPairingTtl = Number(process.env.UNKEEP_PAIRING_TTL_MS || DEFAULT_PAIRING_TTL_MS);
+const PAIRING_TTL_MS = Number.isSafeInteger(configuredPairingTtl) && configuredPairingTtl > 0 ? configuredPairingTtl : DEFAULT_PAIRING_TTL_MS;
 const AES_GCM_TAG_SIZE = 16;
 const MAX_ATTACHMENT_BODY = 4 * Math.ceil((MAX_ATTACHMENT_SIZE + AES_GCM_TAG_SIZE) / 3) + 64 * 1024;
 mkdirSync(DATA_DIR, { recursive: true });
 
 const db = new DatabaseSync(join(DATA_DIR, 'unkeep.sqlite'));
-db.exec(`
-  PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
-  CREATE TABLE IF NOT EXISTS instance (id TEXT PRIMARY KEY, initialized INTEGER NOT NULL DEFAULT 0);
-  CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, revoked_at TEXT);
-  CREATE TABLE IF NOT EXISTS service_credentials (id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT (datetime('now')), revoked_at TEXT);
-  CREATE TABLE IF NOT EXISTS records (kind TEXT NOT NULL, id TEXT NOT NULL, note_id TEXT, envelope TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL, PRIMARY KEY(kind,id));
-  CREATE TABLE IF NOT EXISTS mutations (id TEXT PRIMARY KEY, payload_hash TEXT NOT NULL, revision INTEGER NOT NULL);
-  CREATE TABLE IF NOT EXISTS pairing_requests (id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, device_id TEXT NOT NULL, device_name TEXT NOT NULL, public_key TEXT NOT NULL, poll_hash TEXT NOT NULL, response TEXT, device_token TEXT, expires_at INTEGER NOT NULL, consumed_at INTEGER);
-`);
+db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
+migrateDatabase(db);
 let instance = db.prepare('SELECT * FROM instance LIMIT 1').get();
 if (!instance) {
   db.prepare('INSERT INTO instance (id, initialized) VALUES (?,0)').run(randomUUID());
   instance = db.prepare('SELECT * FROM instance LIMIT 1').get();
 }
+const deleteStalePairings = db.prepare('DELETE FROM pairing_requests WHERE expires_at<=? OR consumed_at IS NOT NULL');
+function cleanupPairings() { deleteStalePairings.run(Date.now()); }
+cleanupPairings();
+const pairingCleanupTimer = setInterval(cleanupPairings, Math.min(60_000, PAIRING_TTL_MS));
+pairingCleanupTimer.unref();
 
 function hash(value) { return createHash('sha256').update(value).digest('hex'); }
 function token() { return randomBytes(32).toString('base64url'); }
@@ -66,6 +69,7 @@ function nextRevision() { return Number(db.prepare('SELECT COALESCE(MAX(revision
 function validId(value) { return typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value); }
 
 async function api(req, res, url) {
+  cleanupPairings();
   if (req.method === 'GET' && url.pathname === '/api/v1/status') return json(res, 200, { protocol: 1, instanceId: instance.id, initialized: Boolean(instance.initialized) });
   if (req.method === 'POST' && url.pathname === '/api/v1/setup/claim') {
     if (instance.initialized) return json(res, 409, { error: 'already_initialized' });
@@ -81,11 +85,28 @@ async function api(req, res, url) {
     } catch (error) { db.exec('ROLLBACK'); throw error; }
     return json(res, 201, { instanceId: instance.id, deviceCredential: credential });
   }
+  if (req.method === 'POST' && url.pathname === '/api/v1/setup/reclaim') {
+    if (!instance.initialized) return json(res, 409, { error: 'not_initialized' });
+    const supplied = (req.headers.authorization || '').match(/^Recovery (.+)$/)?.[1] || '';
+    if (!RECOVERY_TOKEN || !equalSecret(supplied, RECOVERY_TOKEN)) return json(res, 401, { error: 'invalid_recovery_token' });
+    const value = await body(req); if (!validId(value.deviceId)) return json(res, 400, { error: 'invalid_device' });
+    const credential = token();
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      if (!db.prepare('SELECT initialized FROM instance').get().initialized) throw Object.assign(new Error('not initialized'), { status: 409 });
+      db.prepare(`
+        INSERT INTO devices(id,name,token_hash,revoked_at) VALUES (?,?,?,NULL)
+        ON CONFLICT(id) DO UPDATE SET name=excluded.name,token_hash=excluded.token_hash,revoked_at=NULL
+      `).run(value.deviceId, String(value.name || 'Recovered device').slice(0,100), hash(credential));
+      db.exec('COMMIT');
+    } catch (error) { db.exec('ROLLBACK'); throw error; }
+    return json(res, 201, { instanceId: instance.id, deviceCredential: credential });
+  }
   if (req.method === 'POST' && url.pathname === '/api/v1/pairings') {
     const value = await body(req); if (!validId(value.deviceId) || !value.publicKey) return json(res, 400, { error: 'invalid_pairing' });
     const id = randomUUID(); const pollSecret = token(); const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     let code; do { code = Array.from(randomBytes(8), b => alphabet[b % alphabet.length]).join(''); } while (db.prepare('SELECT 1 FROM pairing_requests WHERE code=?').get(code));
-    const expiresAt = Date.now() + 10 * 60_000;
+    const expiresAt = Date.now() + PAIRING_TTL_MS;
     db.prepare('INSERT INTO pairing_requests(id,code,device_id,device_name,public_key,poll_hash,expires_at) VALUES(?,?,?,?,?,?,?)').run(id, code, value.deviceId, String(value.name || 'New device').slice(0,100), JSON.stringify(value.publicKey), hash(pollSecret), expiresAt);
     return json(res, 201, { requestId: id, code, pollSecret, expiresAt: new Date(expiresAt).toISOString() });
   }
@@ -96,8 +117,6 @@ async function api(req, res, url) {
     if (row.expires_at <= Date.now()) return json(res, 410, { error: 'pairing_expired' });
     return json(res, 200, { response: row.response ? JSON.parse(row.response) : null, deviceCredential: row.device_token, consumed: Boolean(row.consumed_at) });
   }
-  if (pairMatch && req.method === 'POST' && url.pathname.endsWith('/consume')) { /* matched below by explicit regex */ }
-
   const credential = requireCredential(req);
   if (!credential) return json(res, 401, { error: (req.headers.authorization || '').startsWith('Service ') ? 'invalid_service_credential' : 'invalid_device_credential' });
   if (req.method === 'GET' && url.pathname === '/api/v1/vault') return json(res, 200, { vaultId: instance.id });
@@ -129,7 +148,16 @@ async function api(req, res, url) {
   if (revoke && req.method === 'DELETE') { db.prepare("UPDATE devices SET revoked_at=datetime('now') WHERE id=?").run(revoke[1]); return json(res, 204, {}); }
   if (req.method === 'GET' && url.pathname === '/api/v1/changes') {
     const since = Math.max(0, Number(url.searchParams.get('since') || 0));
-    const rows = db.prepare('SELECT kind,id,note_id AS noteId,envelope,deleted,revision FROM records WHERE revision>? ORDER BY revision LIMIT 1000').all(since).map(r => ({ ...r, envelope: JSON.parse(r.envelope), deleted: Boolean(r.deleted) }));
+    const rows = db.prepare(`
+      SELECT kind,id,note_id AS noteId,
+        CASE WHEN kind='note' THEN envelope END AS envelope,
+        deleted,revision
+      FROM records WHERE revision>? ORDER BY revision LIMIT 1000
+    `).all(since).map(({ envelope, ...row }) => ({
+      ...row,
+      ...(row.kind === 'note' ? { envelope: JSON.parse(envelope) } : {}),
+      deleted: Boolean(row.deleted),
+    }));
     const cursor = rows.reduce((n, r) => Math.max(n, Number(r.revision)), since);
     return json(res, 200, { changes: rows, cursor });
   }
@@ -138,12 +166,28 @@ async function api(req, res, url) {
     const kind = record[1] === 'notes' ? 'note' : 'attachment'; const id = record[2]; const value = await body(req, kind === 'attachment' ? MAX_ATTACHMENT_BODY : MAX_BODY);
     if (!value.envelope || (kind === 'attachment' && !validId(value.noteId))) return json(res, 400, { error: 'invalid_record' });
     if (kind === 'attachment' && decodedBase64Size(value.envelope.ciphertext) > MAX_ATTACHMENT_SIZE + AES_GCM_TAG_SIZE) return json(res, 413, { error: 'attachment_too_large' });
-    const payloadHash = hash(JSON.stringify(value)); const mutationId = String(value.mutationId || randomUUID());
-    const prior = db.prepare('SELECT payload_hash,revision FROM mutations WHERE id=?').get(mutationId);
-    if (prior) return prior.payload_hash === payloadHash ? json(res, 200, { revision: prior.revision }) : json(res, 409, { error: 'mutation_conflict' });
-    db.exec('BEGIN IMMEDIATE'); let revision;
-    try { revision = nextRevision(); db.prepare('INSERT INTO records(kind,id,note_id,envelope,deleted,revision) VALUES(?,?,?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET note_id=excluded.note_id,envelope=excluded.envelope,deleted=excluded.deleted,revision=excluded.revision').run(kind,id,value.noteId || null,JSON.stringify(value.envelope),value.deleted ? 1 : 0,revision); db.prepare('INSERT INTO mutations(id,payload_hash,revision) VALUES(?,?,?)').run(mutationId,payloadHash,revision); db.exec('COMMIT'); }
-    catch (error) { db.exec('ROLLBACK'); throw error; }
+    if (value.baseRevision !== undefined && (!Number.isSafeInteger(value.baseRevision) || value.baseRevision < 0)) return json(res, 400, { error: 'invalid_base_revision' });
+    const payloadHash = hash(JSON.stringify(value)); const mutationId = String(value.mutationId || randomUUID()); let revision;
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const prior = db.prepare('SELECT payload_hash,revision FROM mutations WHERE id=?').get(mutationId);
+      if (prior) {
+        db.exec(prior.payload_hash === payloadHash ? 'COMMIT' : 'ROLLBACK');
+        return prior.payload_hash === payloadHash ? json(res, 200, { revision: prior.revision }) : json(res, 409, { error: 'mutation_conflict' });
+      }
+      const currentRevision = Number(db.prepare('SELECT revision FROM records WHERE kind=? AND id=?').get(kind,id)?.revision ?? 0);
+      // Released protocol-v1 clients did not send baseRevision and retain their
+      // original last-write-wins behavior. Its presence explicitly opts newer
+      // clients into optimistic concurrency, including revision-zero creates.
+      if (value.baseRevision !== undefined && value.baseRevision !== currentRevision) {
+        db.exec('ROLLBACK');
+        return json(res, 409, { error: 'record_conflict', currentRevision });
+      }
+      revision = nextRevision();
+      db.prepare('INSERT INTO records(kind,id,note_id,envelope,deleted,revision) VALUES(?,?,?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET note_id=excluded.note_id,envelope=excluded.envelope,deleted=excluded.deleted,revision=excluded.revision').run(kind,id,value.noteId || null,JSON.stringify(value.envelope),value.deleted ? 1 : 0,revision);
+      db.prepare('INSERT INTO mutations(id,payload_hash,revision) VALUES(?,?,?)').run(mutationId,payloadHash,revision);
+      db.exec('COMMIT');
+    } catch (error) { db.exec('ROLLBACK'); throw error; }
     return json(res, 200, { revision });
   }
   if (record && req.method === 'GET' && record[1] === 'attachments') {
@@ -167,7 +211,13 @@ async function api(req, res, url) {
     return json(res, 200, { approved: true });
   }
   const consume = url.pathname.match(/^\/api\/v1\/pairings\/([0-9a-f-]+)\/consume$/);
-  if (consume && req.method === 'POST') { db.prepare('UPDATE pairing_requests SET consumed_at=? WHERE id=?').run(Date.now(),consume[1]); return json(res, 200, { consumed: true }); }
+  if (consume && req.method === 'POST') {
+    const pairing = db.prepare('SELECT device_id FROM pairing_requests WHERE id=?').get(consume[1]);
+    if (!pairing) return json(res, 404, { error: 'pairing_not_found' });
+    if (credential.id !== pairing.device_id) return json(res, 403, { error: 'pairing_device_required' });
+    db.prepare('DELETE FROM pairing_requests WHERE id=?').run(consume[1]);
+    return json(res, 200, { consumed: true });
+  }
   return json(res, 404, { error: 'not_found' });
 }
 

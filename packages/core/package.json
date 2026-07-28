@@ -1,8 +1,30 @@
 {
   "name": "@unkeep/core",
   "version": "0.1.0",
-  "private": true,
+  "description": "UnKeep domain types, validation, migrations, and client-side cryptography",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BrettKinny/UnKeep.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/BrettKinny/UnKeep#readme",
+  "bugs": {
+    "url": "https://github.com/BrettKinny/UnKeep/issues"
+  },
+  "keywords": [
+    "notes",
+    "end-to-end-encryption",
+    "unkeep"
+  ],
   "type": "module",
+  "files": [
+    "README.md",
+    "LICENSE",
+    "dist",
+    "!dist/**/*.test.*",
+    "!dist/**/*.integration.test.*"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -13,10 +35,18 @@
     }
   },
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch",
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc --noEmit",
+    "dev": "tsc -p tsconfig.build.json --watch",
+    "prepack": "pnpm build",
     "test": "vitest run",
     "test:watch": "vitest"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "devDependencies": {
     "typescript": "^5.7.0"

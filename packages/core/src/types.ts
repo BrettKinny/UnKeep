@@ -1,4 +1,6 @@
 export interface Note {
+  /** Added at persistence boundaries. Missing means the legacy unversioned schema. */
+  schemaVersion?: number;
   id: string;
   title?: string;
   content: string;

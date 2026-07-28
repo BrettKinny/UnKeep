@@ -203,6 +203,29 @@ test('creates notes with generated IDs and deletes them with tombstones', async 
   expect(pulled.deletedIds).toContain(created.id);
 });
 
+test('persists pulled record revisions across invocations before editing a remote note', async () => {
+  const context = await testContext();
+  const remote = new EncryptedSync(context.session, context.masterKey, new MemoryClientStorage());
+  await remote.push({
+    id: 'remote-edit',
+    content: 'created remotely',
+    createdAt: 1,
+    updatedAt: 1,
+    pinned: false,
+    archived: false,
+  });
+
+  let result = await invoke(['sync', '--json'], context.environment);
+  expect(result.code).toBe(0);
+  result = await invoke(['put', 'remote-edit', '--content', 'edited by a later CLI process'], context.environment, {
+    now: () => 2,
+  });
+  expect(result).toEqual({ code: 0, stdout: 'remote-edit\n', stderr: '' });
+
+  const current = await new EncryptedSync(context.session, context.masterKey, new MemoryClientStorage()).pull();
+  expect(current.notes[0].content).toBe('edited by a later CLI process');
+});
+
 test('login pairs as a normal device and persists reusable state', async () => {
   const context = await testContext();
   const stdout = new Capture(true);

@@ -5,6 +5,7 @@ services:
       - "3000:3000"
     environment:
       UNKEEP_SETUP_TOKEN: ${UNKEEP_SETUP_TOKEN:?set a long random setup token}
+      UNKEEP_RECOVERY_TOKEN: ${UNKEEP_RECOVERY_TOKEN:-}
     volumes:
       - ./data:/data
     restart: unless-stopped

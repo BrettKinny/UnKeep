@@ -194,7 +194,7 @@ async function syncNotes(vault: ConnectedVault, storage: JsonFileClientStorage):
   // The relay pages changes at 1,000 rows. Pull until a request no longer advances the cursor.
   for (let page = 0; page < 100; page += 1) {
     const previousCursor = cursor;
-    const result = await vault.sync.pull();
+    const result = await vault.sync.pull(cursor);
     cursor = result.cursor;
     for (const note of result.notes) notes[note.id] = note;
     for (const id of result.deletedIds) delete notes[id];
@@ -203,6 +203,9 @@ async function syncNotes(vault: ConnectedVault, storage: JsonFileClientStorage):
     if (result.notes.length || result.deletedIds.length) {
       await saveNotes(storage, vault.session.instanceId, notes);
     }
+    // A pull is deliberately non-committing. Advance only after the local
+    // note snapshot above is durable so a failed write can retry this page.
+    await vault.sync.acknowledge(result.cursor,result.revisions);
     if (cursor === previousCursor) return { cursor, pulled, deleted };
   }
   throw new Error('Sync did not converge after 100 pages');

@@ -2,6 +2,17 @@
   "name": "@unkeep/server",
   "version": "0.1.0",
   "private": true,
+  "description": "Private UnKeep ciphertext relay and static PWA host",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BrettKinny/UnKeep.git",
+    "directory": "apps/server"
+  },
+  "homepage": "https://github.com/BrettKinny/UnKeep#readme",
+  "bugs": {
+    "url": "https://github.com/BrettKinny/UnKeep/issues"
+  },
   "type": "module",
   "exports": {
     "./test": {
@@ -13,5 +24,7 @@
     "start": "node src/index.mjs",
     "test": "node --test test/*.test.mjs"
   },
-  "engines": { "node": ">=22" }
+  "engines": {
+    "node": ">=22"
+  }
 }
