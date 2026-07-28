@@ -5,7 +5,8 @@ import type { RelaySessionStore } from './session.js';
 
 const POLL_INTERVAL_MS=1500;
 export interface PairingSession { requestId:string;code:string;pollSecret:string;expiresAt:string;privateKey:CryptoKey;endpoint:string }
-export interface WaitForPairingOptions { keyStore:DeviceKeyStore; sessionStore:RelaySessionStore; signal?:AbortSignal }
+export interface PairingResult { masterKey:Uint8Array<ArrayBuffer>;session:RelaySession }
+export interface WaitForPairingOptions { keyStore:DeviceKeyStore; sessionStore:RelaySessionStore; signal?:AbortSignal; initialize?:(result:PairingResult)=>void|Promise<void> }
 export interface PendingPairingRequest { id:string;deviceId:string;deviceName:string;publicKey:JsonWebKey;expiresAt:string;endpoint:string }
 interface PairingResponse { version:1;responderPublicKey:JsonWebKey;iv:string;ciphertext:string }
 const aad=(id:string)=>new TextEncoder().encode(`unkeep:pairing:v1:${id}`);
@@ -50,7 +51,7 @@ export async function approvePairingRequest(session:RelaySession,request:Pending
 export async function approvePairingCode(session:RelaySession,code:string,masterKey:Uint8Array<ArrayBuffer>):Promise<void>{
   await approvePairingRequest(session,await inspectPairingCode(session,code),masterKey);
 }
-export async function waitForPairing(pairing:PairingSession,{keyStore,sessionStore,signal}:WaitForPairingOptions):Promise<{masterKey:Uint8Array<ArrayBuffer>;session:RelaySession}>{
+export async function waitForPairing(pairing:PairingSession,{keyStore,sessionStore,signal,initialize}:WaitForPairingOptions):Promise<PairingResult>{
   while(Date.now()<new Date(pairing.expiresAt).getTime()){
     throwIfCancelled(signal);
     const relay=new RelayClient(pairing.endpoint);const data=await relay.pollPairing(pairing.requestId,pairing.pollSecret,signal);
@@ -67,10 +68,33 @@ export async function waitForPairing(pairing:PairingSession,{keyStore,sessionSto
       const deviceId=await keyStore.getDeviceId();
       throwIfCancelled(signal);
       const pairedSession={endpoint:pairing.endpoint,instanceId:status.instanceId,deviceId,credential:data.deviceCredential};
-      await keyStore.persistPairedMasterKey(masterKey, status.instanceId);
-      await sessionStore.save(pairedSession);
-      await new RelayClient(pairedSession.endpoint,pairedSession.credential).consumePairing(pairing.requestId);
-      return {masterKey,session:pairedSession};
+      const [keySnapshot,previousSession]=await Promise.all([
+        keyStore.snapshotPairingAccess(status.instanceId),
+        sessionStore.load(),
+      ]);
+      throwIfCancelled(signal);
+      try {
+        await keyStore.persistPairedMasterKey(masterKey, status.instanceId);
+        throwIfCancelled(signal);
+        await sessionStore.save(pairedSession);
+        throwIfCancelled(signal);
+        await new RelayClient(pairedSession.endpoint,pairedSession.credential).consumePairing(pairing.requestId,signal);
+        throwIfCancelled(signal);
+        const result={masterKey,session:pairedSession};
+        await initialize?.(result);
+        throwIfCancelled(signal);
+        return result;
+      } catch (error) {
+        const cleanup=await Promise.allSettled([
+          keyStore.restorePairingAccess(keySnapshot,status.instanceId),
+          previousSession ? sessionStore.save(previousSession) : sessionStore.clear(),
+        ]);
+        const failures=cleanup
+          .filter((outcome):outcome is PromiseRejectedResult=>outcome.status==='rejected')
+          .flatMap(outcome=>outcome.reason instanceof AggregateError ? outcome.reason.errors : [outcome.reason]);
+        if(failures.length)throw new AggregateError([error,...failures],'Pairing failed and prior access could not be fully restored',{cause:error});
+        throw error;
+      }
     }
     await waitForNextPoll(signal);
   }throw new Error('Pairing request expired');

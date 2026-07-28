@@ -103,5 +103,5 @@ export class RelayClient {
   pollPairing(id:string, secret:string, signal?:AbortSignal) { return this.request<{response:unknown;deviceCredential:string|null;consumed:boolean}>(`/pairings/${id}?secret=${encodeURIComponent(secret)}`, { signal }); }
   pairingByCode(code:string) { return this.request<{id:string;deviceId:string;deviceName:string;publicKey:JsonWebKey;expiresAt:string}>(`/pairings/code/${encodeURIComponent(code)}`); }
   approvePairing(id:string,response:unknown) { return this.request(`/pairings/${id}/approve`,{method:'POST',body:JSON.stringify({response})}); }
-  consumePairing(id:string) { return this.request(`/pairings/${id}/consume`,{method:'POST',body:'{}'}); }
+  consumePairing(id:string,signal?:AbortSignal) { return this.request(`/pairings/${id}/consume`,{method:'POST',body:'{}',signal}); }
 }

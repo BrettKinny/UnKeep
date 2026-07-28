@@ -25,6 +25,11 @@ interface StoredDeviceKeys {
   instanceId?: string;
 }
 
+export interface PairingKeySnapshot {
+  readonly storedKeys: StoredDeviceKeys | null;
+  readonly fingerprint: string | null;
+}
+
 export interface ProvisionedKeys {
   deviceId: string;
   masterKey: Uint8Array<ArrayBuffer>;
@@ -126,6 +131,28 @@ export class DeviceKeyStore {
     instanceId: string,
   ): Promise<string> {
     return this.persistCompatibleMasterKey(masterKey, instanceId);
+  }
+
+  async snapshotPairingAccess(instanceId: string): Promise<PairingKeySnapshot> {
+    return {
+      storedKeys: await this.storage.get<StoredDeviceKeys>(DEVICE_KEYS_KEY),
+      fingerprint: await this.storage.get<string>(fingerprintKey(instanceId)),
+    };
+  }
+
+  async restorePairingAccess(snapshot: PairingKeySnapshot, instanceId: string): Promise<void> {
+    const outcomes = await Promise.allSettled([
+      snapshot.storedKeys
+        ? this.storage.set(DEVICE_KEYS_KEY, snapshot.storedKeys)
+        : this.storage.delete(DEVICE_KEYS_KEY),
+      snapshot.fingerprint
+        ? this.storage.set(fingerprintKey(instanceId), snapshot.fingerprint)
+        : this.storage.delete(fingerprintKey(instanceId)),
+    ]);
+    const failures = outcomes
+      .filter((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected')
+      .map(outcome => outcome.reason);
+    if (failures.length) throw new AggregateError(failures, 'Failed to restore prior device key state');
   }
 
   async provisionFirstDevice(instanceId: string): Promise<ProvisionedKeys> {
