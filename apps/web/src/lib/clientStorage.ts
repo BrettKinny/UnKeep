@@ -57,6 +57,34 @@ export class IndexedDbClientStorage implements ClientStorage {
     });
     db.close();localStorage.removeItem(key);
   }
+
+  async update<T>(key:string,change:(value:T|null)=>T|null):Promise<void> {
+    const db=await openDb();
+    try {
+      await new Promise<void>((resolve,reject)=>{
+        const transaction=db.transaction(STATE_STORE,'readwrite');
+        const store=transaction.objectStore(STATE_STORE);
+        const request=store.get(key);
+        let updaterError:unknown;
+        request.onsuccess=()=>{
+          try {
+            const current=(request.result as StateRecord|undefined)?.value as T|undefined;
+            const next=change(current??null);
+            if(next===null)store.delete(key);else store.put({key,value:next} satisfies StateRecord);
+          } catch(error) {
+            updaterError=error;
+            try { transaction.abort(); } catch { reject(error); }
+          }
+        };
+        request.onerror=()=>reject(request.error);
+        transaction.oncomplete=()=>resolve();
+        transaction.onerror=()=>reject(updaterError??transaction.error);
+        transaction.onabort=()=>reject(updaterError??transaction.error??new Error('IndexedDB update aborted'));
+      });
+    } finally {
+      db.close();
+    }
+  }
 }
 
 export const clientStorage=new IndexedDbClientStorage();

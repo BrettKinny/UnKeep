@@ -1,8 +1,30 @@
 {
   "name": "@unkeep/cli",
   "version": "0.1.0",
-  "private": true,
+  "description": "Command-line client for encrypted UnKeep notes and automation workflows",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BrettKinny/UnKeep.git",
+    "directory": "apps/cli"
+  },
+  "homepage": "https://github.com/BrettKinny/UnKeep#readme",
+  "bugs": {
+    "url": "https://github.com/BrettKinny/UnKeep/issues"
+  },
+  "keywords": [
+    "notes",
+    "cli",
+    "unkeep"
+  ],
   "type": "module",
+  "files": [
+    "README.md",
+    "LICENSE",
+    "dist",
+    "!dist/**/*.test.*",
+    "!dist/**/*.integration.test.*"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -16,17 +38,21 @@
     "unkeep": "./dist/bin.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
+    "prepack": "pnpm build",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "engines": {
     "node": ">=20"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
-    "@unkeep/client": "workspace:*",
-    "@unkeep/core": "workspace:*"
+    "@unkeep/client": "workspace:^",
+    "@unkeep/core": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "^26.0.0",

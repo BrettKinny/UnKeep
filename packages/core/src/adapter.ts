@@ -51,6 +51,8 @@ export interface StorageAdapter {
   listNotes(): Promise<NoteMetadata[]>;
   getNote(id: string): Promise<Note>;
   saveNote(note: Note): Promise<void>;
+  /** Persist an import batch in one storage transaction, or reject without writing any note. */
+  saveNotesAtomically?(notes: Note[]): Promise<void>;
   deleteNote(id: string): Promise<void>;
   sync(): Promise<SyncResult>;
   getAllNotes?(): Promise<Note[]>;
