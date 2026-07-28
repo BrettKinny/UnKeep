@@ -37,7 +37,11 @@ Recovery requires both secrets with different jobs:
 - The recovery kit restores the vault encryption key in the browser.
 - The operator recovery token authorizes the relay to mint a new device credential.
 
-New recovery kits use authenticated format v2 and are bound to the relay instance that created them. Editing the stored instance ID or selecting the kit for a different relay makes decryption fail before local keys, sessions, notes, or sync state are opened. Legacy v1 kits are recognized only for the explicit migration flow; they are not silently treated as bound kits.
+New recovery kits use authenticated format v2 and are bound to the relay instance that created them. Editing the stored instance ID or selecting the kit for a different relay makes decryption fail before local keys, sessions, notes, or sync state are opened.
+
+Legacy v1 kits do not contain a relay identity. On a fresh browser, UnKeep shows a dedicated warning and requires confirmation before associating one with the selected relay. A browser that retains local data for that relay also retains a non-secret vault-key fingerprint when access is cleared; a legacy kit with a different key is rejected before vault initialization or network writes. After a successful legacy recovery, download a new recovery kit so future recovery uses authenticated v2.
+
+The operator token proves permission to mint relay access. It does **not** prove that an unbound v1 kit contains the correct encryption key, which is why fresh-browser legacy association requires an explicit trust decision.
 
 Open the server from a replacement device, choose **Restore recovery kit**, select the kit, and enter `UNKEEP_RECOVERY_TOKEN` when prompted. The kit is decrypted locally; neither it nor the vault key is sent to the server. The server receives only the operator token and the replacement device identity.
 

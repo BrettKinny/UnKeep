@@ -4,6 +4,7 @@ import {
   generateDeviceWrappingKey,
   generateMasterKey,
   importRecoveryKit,
+  recoverLegacyMasterKey,
   recoverMasterKey,
   unwrapMasterKeyForDevice,
   wrapMasterKeyForDevice,
@@ -13,6 +14,7 @@ import type { ClientStorage } from './storage.js';
 
 const DEVICE_KEYS_KEY = 'unkeep-device-keys';
 const DEVICE_ID_KEY = 'unkeep-device-id';
+const VAULT_KEY_FINGERPRINT_PREFIX = 'unkeep-vault-key-fingerprint:';
 
 interface StoredDeviceKeys {
   id: 'current';
@@ -52,6 +54,15 @@ function sameKey(left:Uint8Array<ArrayBuffer>,right:Uint8Array<ArrayBuffer>):boo
   return difference===0;
 }
 
+async function masterKeyFingerprint(masterKey: Uint8Array<ArrayBuffer>): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', masterKey));
+  return Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function fingerprintKey(instanceId: string): string {
+  return `${VAULT_KEY_FINGERPRINT_PREFIX}${encodeURIComponent(instanceId)}`;
+}
+
 export class DeviceKeyStore {
   constructor(private readonly storage: ClientStorage) {}
 
@@ -72,6 +83,7 @@ export class DeviceKeyStore {
     const deviceId = existingDeviceId ?? await this.getDeviceId();
     const wrappingKey = await generateDeviceWrappingKey();
     const masterKeyEnvelope = await wrapMasterKeyForDevice(masterKey, wrappingKey, deviceId, instanceId);
+    await this.storage.set(fingerprintKey(instanceId), await masterKeyFingerprint(masterKey));
     await this.storage.set<StoredDeviceKeys>(DEVICE_KEYS_KEY, {
       id: 'current',
       version: 2,
@@ -101,6 +113,8 @@ export class DeviceKeyStore {
       if (!sameKey(storedMasterKey,masterKey)) throw new VaultKeyMismatchError();
       if (!existing.instanceId) {
         await this.persistMasterKey(masterKey, instanceId, existing.deviceId);
+      } else {
+        await this.storage.set(fingerprintKey(instanceId), await masterKeyFingerprint(masterKey));
       }
       return existing.deviceId;
     }
@@ -166,6 +180,43 @@ export class DeviceKeyStore {
     if (kit.version === 1) throw new Error('Legacy recovery kit requires confirmation');
     if (kit.instanceId !== expectedInstanceId) throw new VaultInstanceMismatchError();
     const masterKey = await recoverMasterKey(kit, expectedInstanceId);
+    await this.persistCompatibleMasterKey(masterKey, expectedInstanceId);
+    return masterKey;
+  }
+
+  async validateLegacyRecovery(
+    serializedKit: string,
+    expectedInstanceId: string,
+  ): Promise<void> {
+    const kit = importRecoveryKit(serializedKit);
+    if (kit.version !== 1) throw new Error('Expected a legacy v1 recovery kit');
+    const masterKey = await recoverLegacyMasterKey(kit);
+    const fingerprint = await masterKeyFingerprint(masterKey);
+    const retained = await this.storage.get<string>(fingerprintKey(expectedInstanceId));
+    if (retained && retained !== fingerprint) throw new VaultKeyMismatchError();
+
+    const existing = await this.storage.get<StoredDeviceKeys>(DEVICE_KEYS_KEY);
+    if (!existing) return;
+    if (existing.instanceId && existing.instanceId !== expectedInstanceId) {
+      throw new VaultInstanceMismatchError();
+    }
+    const storedMasterKey = await unwrapMasterKeyForDevice(
+      existing.masterKeyEnvelope,
+      existing.wrappingKey,
+      existing.deviceId,
+      existing.instanceId,
+    );
+    if (!sameKey(storedMasterKey, masterKey)) throw new VaultKeyMismatchError();
+  }
+
+  async restoreLegacyDeviceFromRecovery(
+    serializedKit: string,
+    expectedInstanceId: string,
+  ): Promise<Uint8Array<ArrayBuffer>> {
+    await this.validateLegacyRecovery(serializedKit, expectedInstanceId);
+    const kit = importRecoveryKit(serializedKit);
+    if (kit.version !== 1) throw new Error('Expected a legacy v1 recovery kit');
+    const masterKey = await recoverLegacyMasterKey(kit);
     await this.persistCompatibleMasterKey(masterKey, expectedInstanceId);
     return masterKey;
   }

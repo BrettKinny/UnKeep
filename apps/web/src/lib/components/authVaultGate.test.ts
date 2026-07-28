@@ -14,7 +14,7 @@ describe('AuthVaultGate recovery paths', () => {
   it('binds setup and recovery to the relay status instance before persisting access', () => {
     expect(source).toContain('relayInstanceId=status.instanceId');
     expect(source).toContain('provisionFirstDevice(relayInstanceId)');
-    expect(source).toContain('restoreDeviceFromRecovery(await file.text(),relayInstanceId)');
+    expect(source).toContain('restoreDeviceFromRecovery(serialized,relayInstanceId)');
     expect(source).toContain("if(result.instanceId!==relayInstanceId)throw new Error('Relay instance changed during setup')");
     expect(source).toContain("if(result.instanceId!==relayInstanceId)throw new Error('Relay instance changed during recovery')");
   });
@@ -24,6 +24,17 @@ describe('AuthVaultGate recovery paths', () => {
     const transition = source.indexOf("view='ready'", initialize);
     expect(initialize).toBeGreaterThan(-1);
     expect(transition).toBeGreaterThan(initialize);
+  });
+
+  it('requires explicit confirmation before committing a legacy recovery kit', () => {
+    const validate = source.indexOf('validateLegacyRecovery(serialized,relayInstanceId)');
+    const warning = source.indexOf("view='legacy-recovery-warning'", validate);
+    const commit = source.indexOf('restoreLegacyDeviceFromRecovery(', warning);
+    expect(validate).toBeGreaterThan(-1);
+    expect(warning).toBeGreaterThan(validate);
+    expect(commit).toBeGreaterThan(warning);
+    expect(source).toContain("function cancelLegacyRecovery(){pendingLegacyRecoveryKit='';error=null;view='choose'}");
+    expect(source).toContain('The operator token proves permission to access the relay; it cannot prove that this legacy encryption key is correct.');
   });
 
   it('keeps recovery-kit selection keyboard operable', () => {
