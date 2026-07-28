@@ -29,6 +29,8 @@ let NoteStore: new (readVaultResources?: () => TestVaultResources) => {
   }): Promise<Note>;
   addAttachment(noteId: string, file: File): Promise<void>;
   removeAttachment(noteId: string, attachmentId: string): Promise<void>;
+  deleteNote(noteId: string): Promise<unknown | null>;
+  undoDelete(token: unknown): Promise<void>;
 };
 
 const localValues = new Map<string, string>();
@@ -77,6 +79,7 @@ class TestAdapter implements StorageAdapter {
   readonly description = 'Test adapter';
   readonly configSchema: ConfigField[] = [];
   private readonly values = new Map<string, Note>();
+  failNextSave = false;
 
   constructor(notes: readonly Note[] = [], private readonly initialize?: () => Promise<void>) {
     for (const note of notes) this.values.set(note.id, cloneNote(note));
@@ -93,7 +96,13 @@ class TestAdapter implements StorageAdapter {
     return cloneNote(note);
   }
   async getAllNotes(): Promise<Note[]> { return [...this.values.values()].map(cloneNote); }
-  async saveNote(note: Note): Promise<void> { this.values.set(note.id, cloneNote(note)); }
+  async saveNote(note: Note): Promise<void> {
+    if (this.failNextSave) {
+      this.failNextSave = false;
+      throw new Error('note persistence failed');
+    }
+    this.values.set(note.id, cloneNote(note));
+  }
   async deleteNote(id: string): Promise<void> {
     const note = await this.getNote(id);
     await this.saveNote({ ...note, deleted: true });
@@ -393,5 +402,173 @@ describe('NoteStore vault lifecycle', () => {
     await expect(newAttachments.pendingUploads()).resolves.toEqual([]);
     expect(store.notes).toEqual([expect.objectContaining({ content: 'new vault', images: [expect.objectContaining(attachment)] })]);
     expect(localValues.get(newResources.pendingKey)).toBeUndefined();
+  });
+
+  it('finishes a deferred delete in its origin vault without mutating the same position in a new vault', async () => {
+    const backing = new MemoryClientStorage();
+    const readStarted = deferred<void>();
+    const releaseRead = deferred<void>();
+    let blockReads = false;
+    const delayedStorage: ClientStorage = {
+      get: async <T>(key: string) => {
+        if (blockReads && key.startsWith('unkeep-attachment:old:')) {
+          blockReads = false;
+          readStarted.resolve();
+          await releaseRead.promise;
+        }
+        return backing.get<T>(key);
+      },
+      set: <T>(key: string, value: T) => backing.set(key, value),
+      delete: (key: string) => backing.delete(key),
+      update: <T>(key: string, change: (value: T | null) => T | null) => backing.update(key, change),
+    };
+    const oldAttachments = new AttachmentStore(delayedStorage, 'old');
+    const oldResources = resources('old', oldAttachments);
+    const newResources = resources('new');
+    let activeResources = oldResources;
+    const attachment = { id: 'old-image', name: 'old.png', mimeType: 'image/png', size: 3 };
+    const oldNote = { ...note('old-note', 'old vault'), images: [attachment] };
+    const newNote = note('new-note', 'new vault');
+    const oldAdapter = new TestAdapter([oldNote]);
+    const newAdapter = new TestAdapter([newNote]);
+    await oldAttachments.save(oldNote.id, attachment, new Uint8Array([1, 2, 3]));
+    const store = new NoteStore(() => activeResources);
+    await store.initWithAdapter(oldAdapter, {});
+    blockReads = true;
+
+    const deleting = store.deleteNote(oldNote.id);
+    await readStarted.promise;
+    activeResources = newResources;
+    await store.initWithAdapter(newAdapter, {});
+    releaseRead.resolve();
+    await deleting;
+
+    await expect(oldAdapter.getNote(oldNote.id)).resolves.toMatchObject({ deleted: true });
+    const persistedNew = await newAdapter.getNote(newNote.id);
+    expect(persistedNew).toMatchObject({ content: 'new vault' });
+    expect(persistedNew).not.toHaveProperty('deleted');
+    expect(store.notes).toEqual([expect.objectContaining({ id: newNote.id, content: 'new vault' })]);
+    await expect(oldAttachments.pendingDeletes()).resolves.toEqual([
+      { noteId: oldNote.id, attachment, retainBytes: true },
+    ]);
+    expect(localValues.get(newResources.pendingKey)).toBeUndefined();
+  });
+
+  it('finishes a deferred Undo durably in its origin vault without inserting into the new vault', async () => {
+    const backing = new MemoryClientStorage();
+    const readStarted = deferred<void>();
+    const releaseRead = deferred<void>();
+    let blockedKey = '';
+    let blockRead = false;
+    const delayedStorage: ClientStorage = {
+      get: async <T>(key: string) => {
+        if (blockRead && key === blockedKey) {
+          blockRead = false;
+          readStarted.resolve();
+          await releaseRead.promise;
+        }
+        return backing.get<T>(key);
+      },
+      set: <T>(key: string, value: T) => backing.set(key, value),
+      delete: (key: string) => backing.delete(key),
+      update: <T>(key: string, change: (value: T | null) => T | null) => backing.update(key, change),
+    };
+    const oldAttachments = new AttachmentStore(delayedStorage, 'old');
+    const oldResources = resources('old', oldAttachments);
+    const newResources = resources('new');
+    let activeResources = oldResources;
+    const attachment = { id: 'old-image', name: 'old.png', mimeType: 'image/png', size: 3 };
+    const oldNote = { ...note('old-note', 'old vault'), images: [attachment] };
+    const newNote = note('new-note', 'new vault');
+    const oldAdapter = new TestAdapter([oldNote]);
+    const newAdapter = new TestAdapter([newNote]);
+    const oldBytes = new Uint8Array([1, 2, 3]);
+    await oldAttachments.save(oldNote.id, attachment, oldBytes);
+    const store = new NoteStore(() => activeResources);
+    await store.initWithAdapter(oldAdapter, {});
+    const token = await store.deleteNote(oldNote.id);
+    expect(token).not.toBeNull();
+    expect(token).not.toHaveProperty('id');
+    blockedKey = oldAttachments.storageKey(oldNote.id, attachment.id);
+    blockRead = true;
+
+    const undoing = store.undoDelete(token!);
+    await readStarted.promise;
+    activeResources = newResources;
+    await store.initWithAdapter(newAdapter, {});
+    releaseRead.resolve();
+    await undoing;
+
+    await expect(oldAdapter.getNote(oldNote.id)).resolves.toMatchObject({
+      content: 'old vault',
+      deleted: false,
+      images: [attachment],
+    });
+    await expect(oldAttachments.get(oldNote.id, attachment.id))
+      .resolves.toEqual({ attachment, bytes: oldBytes });
+    await expect(newAdapter.getNote(newNote.id)).resolves.toMatchObject({ content: 'new vault' });
+    expect(store.notes).toEqual([expect.objectContaining({ id: newNote.id, content: 'new vault' })]);
+    expect(localValues.get(newResources.pendingKey)).toBeUndefined();
+  });
+
+  it('treats an expired Undo invoked after a vault switch as a no-op', async () => {
+    vi.useFakeTimers();
+    try {
+      const oldResources = resources('old');
+      const newResources = resources('new');
+      let activeResources = oldResources;
+      const oldNote = note('old-note', 'old vault');
+      const newNote = note('new-note', 'new vault');
+      const oldAdapter = new TestAdapter([oldNote]);
+      const newAdapter = new TestAdapter([newNote]);
+      const store = new NoteStore(() => activeResources);
+      await store.initWithAdapter(oldAdapter, {});
+      const token = await store.deleteNote(oldNote.id);
+      expect(token).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(3_001);
+      activeResources = newResources;
+      await store.initWithAdapter(newAdapter, {});
+
+      await store.undoDelete(token!);
+
+      await expect(oldAdapter.getNote(oldNote.id)).resolves.toMatchObject({ deleted: true });
+      await expect(newAdapter.getNote(newNote.id)).resolves.toMatchObject({ content: 'new vault' });
+      expect(store.notes).toEqual([expect.objectContaining({ id: newNote.id })]);
+      expect(localValues.get(newResources.pendingKey)).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rolls a failed Undo persistence back to a durable deletion', async () => {
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'old');
+    const oldResources = resources('old', attachments);
+    const attachment = { id: 'old-image', name: 'old.png', mimeType: 'image/png', size: 3 };
+    const oldNote = { ...note('old-note', 'old vault'), images: [attachment] };
+    const adapter = new TestAdapter([oldNote]);
+    const bytes = new Uint8Array([1, 2, 3]);
+    await attachments.save(oldNote.id, attachment, bytes);
+    const store = new NoteStore(() => oldResources);
+    await store.initWithAdapter(adapter, {});
+    const token = await store.deleteNote(oldNote.id);
+    expect(token).not.toBeNull();
+    adapter.failNextSave = true;
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    try {
+      await store.undoDelete(token!);
+      await store.undoDelete(token!);
+    } finally {
+      logged.mockRestore();
+    }
+
+    await expect(adapter.getNote(oldNote.id)).resolves.toMatchObject({ deleted: true });
+    await expect(attachments.get(oldNote.id, attachment.id))
+      .resolves.toEqual({ attachment, bytes });
+    await expect(attachments.pendingDeletes()).resolves.toEqual([
+      { noteId: oldNote.id, attachment, retainBytes: true },
+    ]);
+    await expect(attachments.pendingUploads()).resolves.toEqual([]);
+    expect(store.notes).toEqual([]);
   });
 });

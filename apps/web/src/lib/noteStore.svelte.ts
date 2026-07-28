@@ -27,11 +27,10 @@ let pendingSyncKey = PENDING_SYNC_KEY;
 let importJournalKey = 'unkeep-pending-import';
 let attachmentStore = new AttachmentStore(clientStorage);
 let attachmentUrls = new AttachmentUrlCache(attachmentStore);
-const pendingDeleteUndos = new WeakMap<Note, {
-  store: AttachmentStore;
-  attachmentIds: string[];
-  timer: ReturnType<typeof setTimeout>;
-}>();
+const DELETE_UNDO_TOKEN = Symbol('delete-undo-token');
+export interface DeleteUndoToken {
+  readonly [DELETE_UNDO_TOKEN]: true;
+}
 
 function pendingIds(key = pendingSyncKey): Set<string> {
   try { return new Set(JSON.parse(localStorage.getItem(key) ?? '[]') as string[]); }
@@ -81,6 +80,17 @@ interface VaultMutationTarget {
   urls: AttachmentUrlCache;
   pendingKey: string;
 }
+
+interface PendingDeleteUndo {
+  note: Note;
+  target: VaultMutationTarget;
+  attachmentIds: string[];
+  expiresAt: number;
+  state: 'active' | 'consuming' | 'consumed' | 'expired';
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
+const pendingDeleteUndos = new WeakMap<DeleteUndoToken, PendingDeleteUndo>();
 
 export class NoteStore {
   notes = $state<Note[]>([]);
@@ -517,97 +527,121 @@ export class NoteStore {
     }
   }
 
-  async deleteNote(id: string): Promise<Note | null> {
-    const idx = this.notes.findIndex(n => n.id === id);
-    if (idx === -1) return null;
-    const note = { ...this.notes[idx] };
-    const deletionStore = attachmentStore;
-    const attachments = this.portableNote(this.notes[idx]).images ?? [];
-    const previousUpdatedAt = this.notes[idx].updatedAt;
+  async deleteNote(id: string): Promise<DeleteUndoToken | null> {
+    const target = this.captureMutationTarget();
+    const activeNote = this.notes.find(note => note.id === id);
+    if (!activeNote || !target.adapter) return null;
+    const note = this.portableNote(activeNote);
+    const attachments = note.images ?? [];
     saveQueue.cancel(id);
     const queuedAttachments: NoteAttachment[] = [];
     try {
       for (const attachment of attachments) {
         queuedAttachments.push(attachment);
-        await deletionStore.queueDelete(id, attachment, { retainBytes: true });
+        await target.attachments.queueDelete(id, attachment, { retainBytes: true });
       }
     } catch (error) {
       console.error('Failed to queue note attachments for deletion:', error);
       for (const attachment of queuedAttachments) {
-        await deletionStore.cancelDelete(id, attachment.id);
-        const stored = await deletionStore.get(id, attachment.id);
-        if (stored) await deletionStore.save(id, stored.attachment, stored.bytes, { pendingUpload: true });
+        await target.attachments.cancelDelete(id, attachment.id);
+        const stored = await target.attachments.get(id, attachment.id);
+        if (stored) await target.attachments.save(id, stored.attachment, stored.bytes, { pendingUpload: true });
       }
-      toastStore.show('Failed to delete note');
+      if (target.context.isCurrent()) toastStore.show('Failed to delete note');
       return null;
     }
-    // Soft delete
-    this.notes[idx].deleted = true;
-    this.notes[idx].updatedAt = Date.now();
-    if (this.adapter) {
-      try {
-        await this.adapter.deleteNote(id);
-      } catch (e) {
-        console.error('Failed to delete note:', e);
-        // Revert the soft delete
-        this.notes[idx].deleted = false;
-        this.notes[idx].updatedAt = previousUpdatedAt;
-        for (const attachment of queuedAttachments) {
-          await deletionStore.cancelDelete(id, attachment.id);
-          const stored = await deletionStore.get(id, attachment.id);
-          if (stored) await deletionStore.save(id, stored.attachment, stored.bytes, { pendingUpload: true });
-        }
-        toastStore.show('Failed to delete note');
-        return null;
+    try {
+      await target.adapter.deleteNote(id);
+    } catch (error) {
+      console.error('Failed to delete note:', error);
+      for (const attachment of queuedAttachments) {
+        await target.attachments.cancelDelete(id, attachment.id);
+        const stored = await target.attachments.get(id, attachment.id);
+        if (stored) await target.attachments.save(id, stored.attachment, stored.bytes, { pendingUpload: true });
       }
-      if (this.encryptedSync) {
-        try {
-          const tombstone = await this.adapter.getNote(id);
-          const deletions = await deletionStore.flushDeletes(
-            (noteId, attachment) => this.encryptedSync!.deleteAttachment(noteId, attachment),
-            id,
-          );
-          if (deletions.failed.length) throw new Error('Attachment deletion failed');
-          await this.encryptedSync.push(tombstone);
-          markPending(id, false);
-        } catch {
-          // The local tombstone and attachment deletion intents are durable;
-          // performSync will retry them in the same order when connectivity returns.
-          markPending(id, true);
-          this.syncStatus = 'offline';
-        }
+      if (target.context.isCurrent()) toastStore.show('Failed to delete note');
+      return null;
+    }
+    if (target.sync) {
+      markPending(id, true, target.pendingKey);
+      try {
+        const tombstone = await target.adapter.getNote(id);
+        const deletions = await target.attachments.flushDeletes(
+          (noteId, attachment) => target.sync!.deleteAttachment(noteId, attachment),
+          id,
+        );
+        if (deletions.failed.length) throw new Error('Attachment deletion failed');
+        await target.sync.push(tombstone);
+        markPending(id, false, target.pendingKey);
+      } catch {
+        // The local tombstone and attachment deletion intents are durable;
+        // performSync will retry them in the same order when connectivity returns.
+        markPending(id, true, target.pendingKey);
+        if (target.context.isCurrent()) this.syncStatus = 'offline';
       }
     }
-    // Remove from visible array
-    this.notes = this.notes.filter(n => n.id !== id || !n.deleted);
+    if (target.context.isCurrent()) this.notes = this.notes.filter(current => current.id !== id);
     const attachmentIds = attachments.map(attachment => attachment.id);
-    const timer = setTimeout(() => {
-      void deletionStore.purgeRetained(id, attachmentIds)
+    const token = Object.freeze({ [DELETE_UNDO_TOKEN]: true }) as DeleteUndoToken;
+    const pending: PendingDeleteUndo = {
+      note,
+      target,
+      attachmentIds,
+      expiresAt: Date.now() + DELETE_UNDO_MS,
+      state: 'active',
+      timer: null,
+    };
+    pending.timer = setTimeout(() => {
+      if (pending.state !== 'active') return;
+      pending.state = 'expired';
+      void target.attachments.purgeRetained(id, attachmentIds)
         .catch(error => console.warn('Failed to purge expired Undo attachments:', error))
-        .finally(() => pendingDeleteUndos.delete(note));
+        .finally(() => { pending.timer = null; });
     }, DELETE_UNDO_MS);
-    pendingDeleteUndos.set(note, { store: deletionStore, attachmentIds, timer });
-    return note; // Return for undo
+    pendingDeleteUndos.set(token, pending);
+    return token;
   }
 
-  async undoDelete(note: Note) {
-    const pendingUndo = pendingDeleteUndos.get(note);
-    if (pendingUndo) {
-      clearTimeout(pendingUndo.timer);
-      pendingDeleteUndos.delete(note);
-      if (pendingUndo.store !== attachmentStore) {
-        await pendingUndo.store.purgeRetained(note.id, pendingUndo.attachmentIds);
-        toastStore.show('Undo is no longer available after switching vaults');
+  async undoDelete(token: DeleteUndoToken): Promise<void> {
+    const pending = pendingDeleteUndos.get(token);
+    if (!pending || pending.state !== 'active') return;
+    if (Date.now() >= pending.expiresAt || !pending.target.context.isCurrent()) return;
+    pending.state = 'consuming';
+    if (pending.timer) {
+      clearTimeout(pending.timer);
+      pending.timer = null;
+    }
+    const { note, target } = pending;
+    const restored = this.portableNote({ ...note, deleted: false, updatedAt: Date.now() });
+    try {
+      const restoredAttachments = await target.attachments.restoreForUndo(restored.id, restored.images ?? []);
+      restored.images = restoredAttachments.length ? restoredAttachments : undefined;
+      if (!await this.persistNote(restored, {}, target)) throw new Error('Failed to persist restored note');
+    } catch (error) {
+      const rollback = await Promise.allSettled([
+        target.adapter?.deleteNote(restored.id) ?? Promise.resolve(),
+        ...((note.images ?? []).map(attachment =>
+          target.attachments.queueDelete(note.id, attachment, { retainBytes: true })
+        )),
+      ]);
+      pending.state = 'consumed';
+      console.error('Failed to undo note deletion:', error, rollback);
+      if (target.context.isCurrent()) toastStore.show('Failed to restore note');
+      return;
+    }
+    pending.state = 'consumed';
+    if (!target.context.isCurrent()) return;
+    try {
+      const hydrated = await target.urls.hydrate(restored);
+      if (!target.context.isCurrent()) {
+        for (const attachment of hydrated.images ?? []) target.urls.release(restored.id, attachment.id);
         return;
       }
+      this.notes = [...this.notes.filter(current => current.id !== restored.id), hydrated];
+    } catch (error) {
+      console.error('Failed to show restored note:', error);
+      if (target.context.isCurrent()) toastStore.show('Note restored; reload to show it');
     }
-    const undoStore = pendingUndo?.store ?? attachmentStore;
-    const restored = this.portableNote({ ...note, deleted: false, updatedAt: Date.now() });
-    const restoredAttachments = await undoStore.restoreForUndo(restored.id, restored.images ?? []);
-    restored.images = restoredAttachments.length ? restoredAttachments : undefined;
-    const hydrated = await attachmentUrls.hydrate(restored);
-    this.notes.push(hydrated);
-    await this.persistNote(hydrated);
   }
 
   togglePin(id: string) {
