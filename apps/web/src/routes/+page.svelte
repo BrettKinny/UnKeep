@@ -104,14 +104,6 @@
 
       <div class="flex shrink-0 items-center gap-0.5 sm:gap-1">
         <SyncStatus />
-        <button
-          onclick={() => showImporter = true}
-          class="hidden rounded-full p-2 text-on-surface-muted hover:bg-surface-dim hover:text-on-surface sm:block"
-          title="Import notes"
-          aria-label="Import notes"
-        >
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
-        </button>
       </div>
     </header>
 

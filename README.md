@@ -72,7 +72,7 @@ pnpm preview      # preview the static PWA without the relay API
 
 ## Implemented product
 
-- **Notes and checklists** — titles, bodies, checklist conversion and editing, labels, pinning, archiving, 11 colors, and a masonry card grid.
+- **Notes and checklists** — titles, bodies, checklist conversion and editing, labels, pinning, archiving, 11 colors, a masonry card grid, and safe clickable HTTP(S), `www.`, and email links in rendered note text.
 - **Local-first editing** — note writes go to IndexedDB first, with a 500 ms editor debounce and queued retries when the relay is unavailable.
 - **Search** — client-side matching across titles, bodies, checklist items, and labels.
 - **Attachments** — image previews and downloadable general files up to 25 MiB each. Bytes are saved durably in IndexedDB before upload and encrypted separately from note metadata.
