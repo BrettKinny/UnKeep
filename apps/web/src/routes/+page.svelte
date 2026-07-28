@@ -18,13 +18,27 @@
   let showImporter = $state(false);
   let sidebarOpen = $state(false);
   let vaultReady = $state(false);
+  let exporting = $state(false);
+  let desktopMedia: MediaQueryList | null = null;
 
   onMount(() => {
-    sidebarOpen = window.matchMedia('(min-width: 768px)').matches;
+    const media = window.matchMedia('(min-width: 768px)');
+    desktopMedia = media;
+    const syncSidebarToViewport = () => {
+      if (media.matches) sidebarOpen = true;
+      if (!media.matches) sidebarOpen = false;
+    };
+    syncSidebarToViewport();
+    media.addEventListener('change', syncSidebarToViewport);
+    return () => media.removeEventListener('change', syncSidebarToViewport);
   });
 
+  function closeSidebarOnMobile() {
+    if (!desktopMedia?.matches) sidebarOpen = false;
+  }
+
   async function handleVaultReady(vault: VaultReady) {
-    await noteStore.init();
+    await noteStore.init(vault.ownerId, vault.migrateLegacy);
     await noteStore.enableEncryptedSync(vault.session, vault.masterKey);
     vaultReady = true;
     const shares = takePendingShares();
@@ -42,9 +56,30 @@
   function handleCloseEditor() {
     editingNote = null;
   }
+
+  async function handleExport() {
+    if (exporting) return;
+    exporting = true;
+    try {
+      const serialized = await noteStore.exportVault();
+      const url = URL.createObjectURL(new Blob([serialized], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `unkeep-vault-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      toastStore.show('Complete vault export downloaded');
+    } catch (error) {
+      toastStore.show(error instanceof Error ? error.message : 'Vault export failed');
+    } finally {
+      exporting = false;
+    }
+  }
 </script>
 
-<AuthVaultGate onReady={handleVaultReady} onSignedOut={() => { noteStore.disableEncryptedSync(); vaultReady = false; }} />
+<AuthVaultGate onReady={handleVaultReady} onSignedOut={async () => { await noteStore.disableEncryptedSync(); vaultReady = false; }} />
 
 {#if vaultReady}
   <main class="min-h-screen bg-surface">
@@ -59,6 +94,7 @@
       <button
         onclick={() => { showArchive = false; }}
         class="flex shrink-0 items-center gap-2 text-xl font-semibold text-on-surface"
+        aria-label="Show notes"
       >
         <img src="/icon.svg" alt="" class="h-8 w-8 sm:h-9 sm:w-9" />
         <span class="hidden md:inline">UnKeep</span>
@@ -89,24 +125,32 @@
       <nav class="space-y-1 pr-3">
         <button
           class="flex w-full items-center gap-5 rounded-r-full px-6 py-3 text-sm font-medium {!showArchive ? 'bg-primary/15 text-primary' : ''}"
-          onclick={() => { showArchive = false; sidebarOpen = false; }}
+          onclick={() => { showArchive = false; closeSidebarOnMobile(); }}
         >
           <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 18h6M10 22h4M8 14a7 7 0 118 0c-1 1-2 2-2 4h-4c0-2-1-3-2-4z"/></svg>
           Notes
         </button>
         <button
           class="flex w-full items-center gap-5 rounded-r-full px-6 py-3 text-sm font-medium {showArchive ? 'bg-primary/15 text-primary' : ''}"
-          onclick={() => { showArchive = true; sidebarOpen = false; }}
+          onclick={() => { showArchive = true; closeSidebarOnMobile(); }}
         >
           <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/></svg>
           Archive
         </button>
         <button
           class="flex w-full items-center gap-5 rounded-r-full px-6 py-3 text-sm font-medium hover:bg-surface-dim"
-          onclick={() => { showImporter = true; sidebarOpen = false; }}
+          onclick={() => { showImporter = true; closeSidebarOnMobile(); }}
         >
           <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
           Import from Keep
+        </button>
+        <button
+          class="flex w-full items-center gap-5 rounded-r-full px-6 py-3 text-sm font-medium hover:bg-surface-dim disabled:opacity-50"
+          onclick={() => void handleExport()}
+          disabled={exporting}
+        >
+          <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 3v12m0 0l4-4m-4 4l-4-4M5 17v2a2 2 0 002 2h10a2 2 0 002-2v-2"/></svg>
+          {exporting ? 'Preparing export…' : 'Export vault'}
         </button>
       </nav>
       <p class="absolute bottom-4 left-6 text-xs text-on-surface-muted">End-to-end encrypted</p>

@@ -1,10 +1,12 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import type { Note } from '@unkeep/core';
   import { noteStore } from '$lib/noteStore.svelte';
   import { toastStore } from '$lib/toast.svelte';
-  import { encodeNote, getShareUrl } from '$lib/quickSend';
+  import { encodeQuickSendNote, getShareUrl } from '$lib/quickSend';
   import { colorMap } from '$lib/colors';
   import { isImageAttachment } from '$lib/attachments';
+  import { parseMarkdown, type MarkdownInline } from '$lib/markdown';
   import AttachmentChip from './AttachmentChip.svelte';
   import ColorPicker from './ColorPicker.svelte';
   import LinkedText from './LinkedText.svelte';
@@ -30,6 +32,18 @@
   });
   let showColorPicker = $state(false);
   let showMarkdown = $state(false);
+  let markdownBlocks = $derived(parseMarkdown(content));
+  let dialogEl: HTMLDivElement | undefined = $state();
+
+  onMount(() => {
+    const previouslyFocused = document.activeElement;
+    dialogEl?.querySelector<HTMLInputElement>('#edit-note-title')?.focus();
+    return () => {
+      if (previouslyFocused instanceof HTMLElement && document.contains(previouslyFocused)) {
+        previouslyFocused.focus();
+      }
+    };
+  });
 
   function bgColor() {
     return colorMap[note.color ?? 'default'] ?? colorMap['default'];
@@ -64,8 +78,31 @@
     noteStore.removeChecklistItem(note.id, itemId);
   }
 
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape') onClose();
+  function handleDialogKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      onClose();
+      return;
+    }
+    if (event.key === 'Tab' && dialogEl) {
+      const focusable = [...dialogEl.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+      )].filter(element => !element.hasAttribute('hidden'));
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (!first || !last) return;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+  }
+
+  function handleBackdropClick(event: MouseEvent) {
+    if (event.target === event.currentTarget) onClose();
   }
 
   function handleCheckboxKeydown(e: KeyboardEvent, index: number) {
@@ -85,26 +122,53 @@
   }
 </script>
 
+{#snippet renderInline(content: MarkdownInline[])}
+  {#each content as inline}
+    {#if inline.type === 'text'}
+      <LinkedText text={inline.text} />
+    {:else if inline.type === 'lineBreak'}
+      <br />
+    {:else if inline.type === 'code'}
+      <code class="rounded bg-black/10 px-1 py-0.5 font-mono text-[0.9em]">{inline.text}</code>
+    {:else if inline.type === 'emphasis'}
+      <em><LinkedText text={inline.text} /></em>
+    {:else if inline.type === 'strong'}
+      <strong><LinkedText text={inline.text} /></strong>
+    {:else if inline.type === 'link'}
+      <!-- The parser only emits absolute http(s) links. -->
+      <!-- eslint-disable svelte/no-navigation-without-resolve -->
+      <a
+        href={inline.href}
+        target="_blank"
+        rel="noopener noreferrer"
+        class="text-primary underline underline-offset-2 hover:no-underline"
+      >{inline.text}</a>
+      <!-- eslint-enable svelte/no-navigation-without-resolve -->
+    {/if}
+  {/each}
+{/snippet}
+
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
-  onclick={onClose}
-  onkeydown={handleKeydown}
+  onclick={handleBackdropClick}
+  onkeydown={handleDialogKeydown}
 >
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
+    bind:this={dialogEl}
     class="w-full max-w-lg rounded-lg shadow-xl max-h-[85dvh] flex flex-col"
     style="background-color: {bgColor()}"
     role="dialog"
     aria-modal="true"
     aria-label="Edit note"
     tabindex="-1"
-    onclick={(e) => e.stopPropagation()}
-    onkeydown={() => {}}
   >
     <!-- Content -->
     <div class="flex-1 overflow-y-auto p-4">
+      <label for="edit-note-title" class="sr-only">Note title</label>
       <input
+        id="edit-note-title"
         bind:value={title}
         oninput={handleTitleChange}
         class="w-full mb-3 bg-transparent text-lg font-semibold text-on-surface outline-none"
@@ -114,7 +178,18 @@
         <div class="grid grid-cols-2 gap-2 mb-3">
           {#each note.images as attachment}
             {#if isImageAttachment(attachment) && attachment.url}
-              <img src={attachment.url} alt={attachment.name} class="w-full max-h-48 object-cover rounded" />
+              <figure class="group/attachment relative overflow-hidden rounded">
+                <img src={attachment.url} alt={attachment.name} class="w-full max-h-48 object-cover" />
+                <button
+                  type="button"
+                  class="absolute right-2 top-2 grid h-8 w-8 place-items-center rounded-full bg-black/65 text-white opacity-80 hover:opacity-100 focus:opacity-100"
+                  aria-label={`Remove ${attachment.name}`}
+                  title={`Remove ${attachment.name}`}
+                  onclick={() => void noteStore.removeAttachment(note.id, attachment.id)}
+                >
+                  <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+              </figure>
             {/if}
           {/each}
         </div>
@@ -122,7 +197,10 @@
       {#if note.images?.some(attachment => !isImageAttachment(attachment))}
         <div class="grid gap-2 mb-3">
           {#each note.images.filter(attachment => !isImageAttachment(attachment)) as attachment}
-            <AttachmentChip {attachment} />
+            <AttachmentChip
+              {attachment}
+              onRemove={() => void noteStore.removeAttachment(note.id, attachment.id)}
+            />
           {/each}
         </div>
       {/if}
@@ -132,12 +210,14 @@
             <li class="group flex items-center gap-2">
               <input
                 type="checkbox"
+                aria-label={`Mark ${item.text || 'checklist item'} ${item.checked ? 'incomplete' : 'complete'}`}
                 checked={item.checked}
                 onchange={() => handleCheckboxToggle(item.id, !item.checked)}
                 class="w-4 h-4 rounded"
               />
               <input
                 type="text"
+                aria-label="Checklist item"
                 value={item.text}
                 oninput={(e) => handleCheckboxText(item.id, e.currentTarget.value)}
                 onkeydown={(e) => handleCheckboxKeydown(e, i)}
@@ -146,7 +226,7 @@
               />
               <button
                 onclick={() => handleRemoveCheckboxItem(item.id)}
-                class="p-1 text-on-surface-muted hover:text-danger opacity-0 group-hover:opacity-100 transition-opacity"
+                class="p-1 text-on-surface-muted hover:text-danger opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100 transition-opacity"
                 aria-label="Remove item"
               >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12"/></svg>
@@ -160,22 +240,55 @@
           </li>
         </ul>
       {:else if showMarkdown}
-        <div class="prose prose-sm max-w-none text-on-surface">
-          <!-- Simple markdown rendering - just paragraphs and line breaks for now -->
-          {#each content.split('\n\n') as para}
-            <p class="whitespace-pre-wrap"><LinkedText text={para} /></p>
+        <div class="min-h-[200px] text-on-surface">
+          {#each markdownBlocks as block}
+            {#if block.type === 'heading'}
+              <svelte:element
+                this={`h${block.level}`}
+                class="mb-2 mt-4 font-semibold leading-tight first:mt-0"
+                class:text-2xl={block.level === 1}
+                class:text-xl={block.level === 2}
+                class:text-lg={block.level >= 3}
+              >{@render renderInline(block.content)}</svelte:element>
+            {:else if block.type === 'paragraph'}
+              <p class="my-2 leading-relaxed first:mt-0">{@render renderInline(block.content)}</p>
+            {:else if block.type === 'list' && block.ordered}
+              <ol start={block.start} class="my-2 list-decimal space-y-1 pl-6">
+                {#each block.items as item}
+                  <li>{@render renderInline(item)}</li>
+                {/each}
+              </ol>
+            {:else if block.type === 'list'}
+              <ul class="my-2 list-disc space-y-1 pl-6">
+                {#each block.items as item}
+                  <li>{@render renderInline(item)}</li>
+                {/each}
+              </ul>
+            {:else if block.type === 'codeBlock'}
+              <div class="my-3 overflow-hidden rounded-lg border border-border/60 bg-black/10">
+                {#if block.language}
+                  <div class="border-b border-border/50 px-3 py-1 font-mono text-xs text-on-surface-muted">
+                    {block.language}
+                  </div>
+                {/if}
+                <pre class="overflow-x-auto p-3 text-sm"><code>{block.text}</code></pre>
+              </div>
+            {/if}
           {/each}
         </div>
       {:else}
+        <label for="edit-note-content" class="sr-only">Note content</label>
         <textarea
+          id="edit-note-content"
           bind:value={content}
           oninput={handleContentChange}
-          onkeydown={handleKeydown}
           class="w-full min-h-[200px] bg-transparent text-on-surface resize-none outline-none"
           placeholder="Note content..."
         ></textarea>
       {/if}
+      <label for="edit-note-labels" class="sr-only">Labels, separated by commas</label>
       <input
+        id="edit-note-labels"
         bind:value={labelsText}
         onchange={handleLabelsChange}
         class="w-full mt-4 bg-transparent text-base sm:text-sm text-on-surface-muted outline-none"
@@ -248,13 +361,14 @@
       </button>
       <button
         onclick={async () => {
-          const text = note.checkboxes
-            ? note.checkboxes.map(c => `${c.checked ? '☑' : '☐'} ${c.text}`).join('\n')
-            : note.content;
-          const encoded = await encodeNote(text);
-          const url = getShareUrl(encoded);
-          await navigator.clipboard.writeText(url);
-          toastStore.show('Share link copied to clipboard');
+          try {
+            const encoded = await encodeQuickSendNote(await noteStore.prepareQuickSend(note));
+            const url = getShareUrl(encoded);
+            await navigator.clipboard.writeText(url);
+            toastStore.show('Share link copied to clipboard');
+          } catch (error) {
+            toastStore.show(error instanceof Error ? error.message : 'Could not create share link');
+          }
         }}
         class="p-2 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors"
         title="Quick Send — copy share link"

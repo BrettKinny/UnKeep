@@ -47,17 +47,46 @@ describe('E2EE envelopes', () => {
     const deviceKey = await generateDeviceWrappingKey();
     expect(deviceKey.extractable).toBe(false);
 
-    const envelope = await wrapMasterKeyForDevice(masterKey, deviceKey, 'device-1');
-    await expect(unwrapMasterKeyForDevice(envelope, deviceKey, 'device-1')).resolves.toEqual(masterKey);
-    await expect(unwrapMasterKeyForDevice(envelope, deviceKey, 'device-2')).rejects.toThrow();
+    const envelope = await wrapMasterKeyForDevice(masterKey, deviceKey, 'device-1', 'vault-1');
+    await expect(unwrapMasterKeyForDevice(envelope, deviceKey, 'device-1', 'vault-1')).resolves.toEqual(masterKey);
+    await expect(unwrapMasterKeyForDevice(envelope, deviceKey, 'device-2', 'vault-1')).rejects.toThrow();
+    await expect(unwrapMasterKeyForDevice(envelope, deviceKey, 'device-1', 'vault-2')).rejects.toThrow();
   });
 
   it('exports and imports a recovery kit that restores the master key', async () => {
     const masterKey = generateMasterKey();
-    const serialized = exportRecoveryKit(await createRecoveryKit(masterKey, 'recovery-1'));
-    const restored = await recoverMasterKey(importRecoveryKit(serialized));
+    const serialized = exportRecoveryKit(await createRecoveryKit(masterKey, 'vault-1', 'recovery-1'));
+    const restored = await recoverMasterKey(importRecoveryKit(serialized), 'vault-1');
 
     expect(restored).toEqual(masterKey);
+  });
+
+  it('authenticates the relay instance in a v2 recovery kit', async () => {
+    const masterKey = generateMasterKey();
+    const kit = await createRecoveryKit(masterKey, 'vault-1', 'recovery-1');
+
+    expect(kit).toMatchObject({ version: 2, instanceId: 'vault-1' });
+    await expect(recoverMasterKey(kit, 'vault-1')).resolves.toEqual(masterKey);
+    await expect(recoverMasterKey({ ...kit, instanceId: 'vault-2' }, 'vault-2')).rejects.toThrow();
+    await expect(recoverMasterKey(kit, 'vault-2')).rejects.toThrow('different relay');
+  });
+
+  it('parses v1 recovery kits only as an explicit legacy format', async () => {
+    const legacy = importRecoveryKit(JSON.stringify({
+      version: 1,
+      recoveryKey: 'legacy-key',
+      masterKeyEnvelope: {
+        version: 1,
+        algorithm: 'AES-GCM',
+        keyId: 'legacy-recovery',
+        iv: 'legacy-iv',
+        ciphertext: 'legacy-ciphertext',
+      },
+    }));
+
+    expect(legacy.version).toBe(1);
+    await expect(recoverMasterKey(legacy, 'vault-1'))
+      .rejects.toThrow('explicit migration flow');
   });
 
   it('round trips a non-image attachment envelope', async () => {

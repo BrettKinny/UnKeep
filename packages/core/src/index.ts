@@ -25,10 +25,18 @@ export {
 
 export { validateNoteId, isValidNoteId } from './validation.js';
 
+export {
+  CURRENT_NOTE_SCHEMA_VERSION,
+  normalizeNoteRecord,
+  UnsupportedNoteSchemaVersionError,
+} from './noteMigrations.js';
+
 export type {
   EncryptedEnvelope,
   EncryptedEnvelopeV1,
+  RecoveryKit,
   RecoveryKitV1,
+  RecoveryKitV2,
   NoteEncryptionContext,
   AttachmentEncryptionContext,
 } from './crypto.js';
@@ -40,6 +48,7 @@ export {
   unwrapMasterKeyForDevice,
   createRecoveryKit,
   recoverMasterKey,
+  recoverLegacyMasterKey,
   exportRecoveryKit,
   importRecoveryKit,
   encryptNote,
@@ -50,7 +59,13 @@ export {
 
 export { noteToMarkdown, markdownToNote } from './markdown.js';
 
-export { LocalOnlyAdapter } from './adapters/local.js';
+export {
+  LEGACY_LOCAL_DATABASE_NAME,
+  LOCAL_DATABASE_VERSION,
+  LocalOnlyAdapter,
+  localDatabaseName,
+  validateVaultNamespace,
+} from './adapters/local.js';
 export { LocalMarkdownAdapter } from './adapters/local-markdown.js';
 export { GitAdapter } from './adapters/git.js';
 export { S3Adapter } from './adapters/s3.js';

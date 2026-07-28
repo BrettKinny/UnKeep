@@ -2,6 +2,12 @@
 node_modules
 **/node_modules
 **/build
+**/dist
+**/.svelte-kit
 .env*
 .vercel
 data
+e2e
+playwright-report
+test-results
+*.tgz
