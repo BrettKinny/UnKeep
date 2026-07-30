@@ -5,10 +5,16 @@ build/
 .env
 .env.*
 !.env.example
+/apps/web/.env.example
 *.local
 .DS_Store
 .vercel
-.env*
 playwright-report/
 test-results/
 *.tgz
+unkeep-recovery-kit*.json
+unkeep-vault-*.json
+/data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

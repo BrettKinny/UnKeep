@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { NoteAttachment } from '@unkeep/core';
-  import { formatAttachmentSize } from '$lib/attachments';
+  import { formatAttachmentSize, hasLocalAttachmentUrl } from '$lib/attachments';
 
   let {
     attachment,
@@ -12,8 +12,8 @@
 </script>
 
 <div class="flex min-w-0 items-stretch rounded-lg border border-border/60 bg-black/5 text-sm">
-  {#if attachment.url}
-    <!-- A decrypted blob/data URL is not an application route. -->
+  {#if hasLocalAttachmentUrl(attachment)}
+    <!-- A locally minted blob URL is not an application route. -->
     <!-- eslint-disable svelte/no-navigation-without-resolve -->
     <a
       href={attachment.url}

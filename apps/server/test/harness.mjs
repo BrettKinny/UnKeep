@@ -28,10 +28,21 @@ function waitForReady(child,logs) {
   });
 }
 
-export async function startTestServer({setupToken=randomBytes(24).toString('base64url'),env={}}={}) {
+export async function startTestServer({
+  setupToken=randomBytes(24).toString('base64url'),
+  env={},
+  preserveDataDir=false,
+}={}) {
   const dataDir=await mkdtemp(join(tmpdir(),'unkeep-test-'));let output='';
   const child=spawn(process.execPath,[childScript],{
-    env:{...process.env,NODE_ENV:'test',UNKEEP_DATA_DIR:dataDir,UNKEEP_SETUP_TOKEN:setupToken,...env},
+    env:{
+      ...process.env,
+      NODE_ENV:'test',
+      UNKEEP_DATA_DIR:dataDir,
+      UNKEEP_SETUP_TOKEN:setupToken,
+      UNKEEP_RECOVERY_TOKEN:'test-distinct-recovery-token-00000001',
+      ...env,
+    },
     stdio:['ignore','pipe','pipe','ipc'],
   });
   child.stdout.on('data',chunk=>output+=chunk);child.stderr.on('data',chunk=>output+=chunk);
@@ -49,9 +60,21 @@ export async function startTestServer({setupToken=randomBytes(24).toString('base
           if(child.connected)child.send({type:'stop'});else child.kill();
           if(!await exited){child.kill('SIGKILL');await waitForExit(child,1000)}
         }
-      } finally { await rm(dataDir,{recursive:true,force:true}); }
+      } finally {
+        if(!preserveDataDir)await rm(dataDir,{recursive:true,force:true});
+      }
     })();
     return stopPromise;
   }
-  return {endpoint:`http://127.0.0.1:${port}/api/v1`,setupToken,stop};
+  const endpoint=`http://127.0.0.1:${port}/api/v1`;
+  try {
+    const response=await fetch(`${endpoint}/status`);
+    if(!response.ok)throw new Error(`status returned ${response.status}`);
+    const status=await response.json();
+    const cleanup=()=>rm(dataDir,{recursive:true,force:true});
+    return {endpoint,instanceId:status.instanceId,dataDir,setupToken,stop,cleanup};
+  } catch(error) {
+    await stop();
+    throw error;
+  }
 }

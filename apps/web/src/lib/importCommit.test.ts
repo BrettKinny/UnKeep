@@ -21,9 +21,13 @@ const attachment: ImportedAttachment = {
 
 function target(overrides: Partial<ImportCommitTarget> = {}): ImportCommitTarget {
   return {
-    saveAttachment: vi.fn(async () => {}),
-    deleteAttachment: vi.fn(async () => {}),
-    saveNotesAtomically: vi.fn(async () => {}),
+    saveAttachment: vi.fn(async imported => ({
+      noteId: imported.noteId,
+      attachmentId: imported.attachment.id,
+      generation: `generation-${imported.attachment.id}`,
+    })),
+    discardAttachment: vi.fn(async () => {}),
+    saveNotesWithPendingSyncAtomically: vi.fn(async () => {}),
     ...overrides,
   };
 }
@@ -33,15 +37,21 @@ describe('commitImportBatch', () => {
     const destination = target();
     await commitImportBatch([note], [attachment], destination);
     expect(destination.saveAttachment).toHaveBeenCalledWith(attachment);
-    expect(destination.saveNotesAtomically).toHaveBeenCalledOnce();
-    expect(destination.saveNotesAtomically).toHaveBeenCalledWith([note]);
-    expect(destination.deleteAttachment).not.toHaveBeenCalled();
+    expect(destination.saveNotesWithPendingSyncAtomically).toHaveBeenCalledOnce();
+    expect(destination.saveNotesWithPendingSyncAtomically).toHaveBeenCalledWith([note]);
+    expect(destination.discardAttachment).not.toHaveBeenCalled();
   });
 
   it('removes every staged attachment when the atomic note commit fails', async () => {
-    const destination = target({ saveNotesAtomically: vi.fn(async () => { throw new Error('quota'); }) });
+    const destination = target({
+      saveNotesWithPendingSyncAtomically: vi.fn(async () => { throw new Error('quota'); }),
+    });
     await expect(commitImportBatch([note], [attachment], destination)).rejects.toThrow('quota');
-    expect(destination.deleteAttachment).toHaveBeenCalledWith('note-one', 'image-one');
+    expect(destination.discardAttachment).toHaveBeenCalledWith({
+      noteId: 'note-one',
+      attachmentId: 'image-one',
+      generation: 'generation-image-one',
+    });
   });
 
   it('does not write anything when attachment bytes disagree with the note manifest', async () => {
@@ -52,7 +62,7 @@ describe('commitImportBatch', () => {
       destination,
     )).rejects.toThrow('does not match its manifest');
     expect(destination.saveAttachment).not.toHaveBeenCalled();
-    expect(destination.saveNotesAtomically).not.toHaveBeenCalled();
+    expect(destination.saveNotesWithPendingSyncAtomically).not.toHaveBeenCalled();
   });
 
   it('rejects globally duplicate attachment IDs before writing anything', async () => {
@@ -71,7 +81,7 @@ describe('commitImportBatch', () => {
     await expect(commitImportBatch([note, secondNote], [attachment, second], destination))
       .rejects.toThrow('duplicate attachment ID: image-one');
     expect(destination.saveAttachment).not.toHaveBeenCalled();
-    expect(destination.saveNotesAtomically).not.toHaveBeenCalled();
+    expect(destination.saveNotesWithPendingSyncAtomically).not.toHaveBeenCalled();
   });
 
   it('rolls back earlier attachment writes when a later staged write fails', async () => {
@@ -87,14 +97,22 @@ describe('commitImportBatch', () => {
     };
     const saveAttachment = vi.fn(async (value: ImportedAttachment) => {
       if (value.noteId === secondNote.id) throw new Error('storage failed');
+      return {
+        noteId: value.noteId,
+        attachmentId: value.attachment.id,
+        generation: `generation-${value.attachment.id}`,
+      };
     });
     const destination = target({ saveAttachment });
 
     await expect(commitImportBatch([note, secondNote], [attachment, second], destination))
       .rejects.toThrow('storage failed');
-    expect(destination.deleteAttachment).toHaveBeenCalledTimes(2);
-    expect(destination.deleteAttachment).toHaveBeenCalledWith('note-one', 'image-one');
-    expect(destination.deleteAttachment).toHaveBeenCalledWith('note-two', 'image-two');
-    expect(destination.saveNotesAtomically).not.toHaveBeenCalled();
+    expect(destination.discardAttachment).toHaveBeenCalledOnce();
+    expect(destination.discardAttachment).toHaveBeenCalledWith({
+      noteId: 'note-one',
+      attachmentId: 'image-one',
+      generation: 'generation-image-one',
+    });
+    expect(destination.saveNotesWithPendingSyncAtomically).not.toHaveBeenCalled();
   });
 });

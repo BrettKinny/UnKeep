@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 const INITIAL_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -12,11 +14,311 @@ const INITIAL_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS pairing_requests (id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, device_id TEXT NOT NULL, device_name TEXT NOT NULL, public_key TEXT NOT NULL, poll_hash TEXT NOT NULL, response TEXT, device_token TEXT, expires_at INTEGER NOT NULL, consumed_at INTEGER);
 `;
 
+const INVALID_RECORD_METADATA = `
+  typeof(kind) <> 'text'
+  OR kind NOT IN ('note','attachment')
+  OR typeof(id) <> 'text'
+  OR length(id) NOT BETWEEN 1 AND 128
+  OR id GLOB '*[^A-Za-z0-9_-]*'
+  OR (
+    kind='note'
+    AND note_id IS NOT NULL
+  )
+  OR (
+    kind='attachment'
+    AND (
+      typeof(note_id) <> 'text'
+      OR length(note_id) NOT BETWEEN 1 AND 128
+      OR note_id GLOB '*[^A-Za-z0-9_-]*'
+    )
+  )
+  OR typeof(envelope) <> 'text'
+  OR typeof(deleted) <> 'integer'
+  OR deleted NOT IN (0,1)
+  OR typeof(revision) <> 'integer'
+  OR revision <= 0
+`;
+
+export function countProtocolInvalidRecords(db) {
+  const hasRecords = db.prepare(`
+    SELECT 1
+    FROM sqlite_master
+    WHERE type='table' AND name='records'
+  `).get();
+  if (!hasRecords) return 0;
+  return Number(db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM records
+    WHERE ${INVALID_RECORD_METADATA}
+  `).get().count);
+}
+
 const SERVER_MIGRATIONS = Object.freeze([
   Object.freeze({
     version: 1,
     name: 'initial-relay-schema',
     up(db) { db.exec(INITIAL_SCHEMA_SQL); },
+  }),
+  Object.freeze({
+    version: 2,
+    name: 'pending-pairing-and-service-issuer',
+    up(db) {
+      db.exec(`
+        ALTER TABLE pairing_requests ADD COLUMN device_token_hash TEXT;
+        ALTER TABLE service_credentials
+          ADD COLUMN issued_by_device_id TEXT REFERENCES devices(id);
+      `);
+
+      // Protocol-v1 approval inserted an immediately active device. Move each
+      // still-unconsumed approval back behind its pairing request so expiry or
+      // cancellation invalidates the provisional token. Keeping the raw token
+      // preserves an in-flight requester's ability to finish after an upgrade.
+      const pending = db.prepare(`
+        SELECT id,device_token
+        FROM pairing_requests
+        WHERE response IS NOT NULL
+          AND consumed_at IS NULL
+          AND device_token IS NOT NULL
+      `).all();
+      const savePendingHash = db.prepare(
+        'UPDATE pairing_requests SET device_token_hash=? WHERE id=?',
+      );
+      for (const row of pending) {
+        savePendingHash.run(
+          createHash('sha256').update(row.device_token).digest('hex'),
+          row.id,
+        );
+      }
+      db.exec(`
+        DELETE FROM devices
+        WHERE id IN (
+          SELECT device_id
+          FROM pairing_requests
+          WHERE response IS NOT NULL
+            AND consumed_at IS NULL
+            AND device_token_hash IS NOT NULL
+        );
+        CREATE UNIQUE INDEX pairing_requests_device_token_hash
+          ON pairing_requests(device_token_hash)
+          WHERE device_token_hash IS NOT NULL;
+        CREATE INDEX service_credentials_issuer
+          ON service_credentials(issued_by_device_id);
+      `);
+
+      // Existing service credentials remain valid for compatibility. Their
+      // issuer is unknowable, so issued_by_device_id stays NULL and operators
+      // are prompted by clients/docs to rotate them.
+    },
+  }),
+  Object.freeze({
+    version: 3,
+    name: 'service-credential-scopes',
+    up(db) {
+      // Existing credentials retain their released read/write authority.
+      // Newly minted credentials always store an explicit scope.
+      db.exec(`
+        ALTER TABLE service_credentials
+          ADD COLUMN scope TEXT NOT NULL DEFAULT 'read-write'
+          CHECK(scope IN ('read-only', 'read-write'));
+      `);
+    },
+  }),
+  Object.freeze({
+    version: 4,
+    name: 'pairing-consume-receipts-and-approvers',
+    up(db) {
+      db.exec(`
+        ALTER TABLE pairing_requests
+          ADD COLUMN approved_by_device_id TEXT REFERENCES devices(id);
+        CREATE INDEX pairing_requests_approver
+          ON pairing_requests(approved_by_device_id)
+          WHERE approved_by_device_id IS NOT NULL;
+        CREATE TABLE pairing_consume_receipts (
+          request_id TEXT PRIMARY KEY,
+          device_id TEXT NOT NULL,
+          device_token_hash TEXT NOT NULL,
+          consumed_at INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL
+        );
+        CREATE INDEX pairing_consume_receipts_expiry
+          ON pairing_consume_receipts(expires_at);
+
+        INSERT OR IGNORE INTO pairing_consume_receipts(
+          request_id,device_id,device_token_hash,consumed_at,expires_at
+        )
+        SELECT
+          id,
+          device_id,
+          device_token_hash,
+          consumed_at,
+          MAX(expires_at,consumed_at + 604800000)
+        FROM pairing_requests
+        WHERE consumed_at IS NOT NULL
+          AND device_token_hash IS NOT NULL;
+        DELETE FROM pairing_requests WHERE consumed_at IS NOT NULL;
+      `);
+      // approved_by_device_id is intentionally NULL for approvals made by an
+      // older server because their approving device cannot be reconstructed.
+    },
+  }),
+  Object.freeze({
+    version: 5,
+    name: 'hash-only-instance-bound-pairing-reservations',
+    up(db) {
+      // Pairing requests are short-lived and cannot be safely resumed across
+      // this protocol change: older rows may contain a relay-generated raw
+      // device token and are not bound to a relay instance. Rebuild the table
+      // without copying those ephemeral rows; users can start pairing again.
+      db.exec(`
+        CREATE TABLE pairing_requests_v5 (
+          id TEXT PRIMARY KEY,
+          code TEXT NOT NULL UNIQUE,
+          instance_id TEXT NOT NULL,
+          device_id TEXT NOT NULL UNIQUE,
+          device_name TEXT NOT NULL,
+          public_key TEXT NOT NULL,
+          poll_hash TEXT NOT NULL,
+          response TEXT,
+          expires_at INTEGER NOT NULL,
+          device_token_hash TEXT NOT NULL UNIQUE,
+          approved_by_device_id TEXT REFERENCES devices(id)
+        );
+        DROP TABLE pairing_requests;
+        ALTER TABLE pairing_requests_v5 RENAME TO pairing_requests;
+        CREATE INDEX pairing_requests_approver
+          ON pairing_requests(approved_by_device_id)
+          WHERE approved_by_device_id IS NOT NULL;
+      `);
+    },
+  }),
+  Object.freeze({
+    version: 6,
+    name: 'sensitive-data-vacuum',
+    up(db) {
+      // Dropping the legacy pairing table removes raw credentials from the
+      // logical schema, but SQLite may retain the old bytes in free pages or
+      // the WAL. Startup completes this task outside the migration
+      // transaction, where VACUUM is permitted, before accepting requests.
+      db.exec(`
+        CREATE TABLE maintenance_tasks (
+          name TEXT PRIMARY KEY,
+          completed_at TEXT
+        );
+        INSERT INTO maintenance_tasks(name) VALUES('legacy-pairing-token-scrub');
+      `);
+    },
+  }),
+  Object.freeze({
+    version: 7,
+    name: 'paired-device-approver-lineage',
+    up(db) {
+      db.exec(`
+        ALTER TABLE devices
+          ADD COLUMN approved_by_device_id TEXT REFERENCES devices(id);
+        CREATE INDEX devices_approver
+          ON devices(approved_by_device_id)
+          WHERE approved_by_device_id IS NOT NULL;
+      `);
+      // The first device, operator-recovered devices, and devices created by
+      // older relays remain roots with NULL lineage. Inventing an approver for
+      // those rows would make targeted incident-response revocation unsafe.
+    },
+  }),
+  Object.freeze({
+    version: 8,
+    name: 'record-storage-accounting-and-mutation-retention',
+    up(db) {
+      db.exec(`
+        CREATE TABLE record_storage_usage (
+          singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+          record_count INTEGER NOT NULL CHECK(record_count >= 0),
+          attachment_count INTEGER NOT NULL CHECK(attachment_count >= 0),
+          encrypted_bytes INTEGER NOT NULL CHECK(encrypted_bytes >= 0)
+        ) WITHOUT ROWID;
+        INSERT INTO record_storage_usage(
+          singleton,record_count,attachment_count,encrypted_bytes
+        )
+        SELECT
+          1,
+          COUNT(*),
+          COALESCE(SUM(CASE WHEN kind='attachment' THEN 1 ELSE 0 END),0),
+          COALESCE(SUM(length(CAST(envelope AS BLOB))),0)
+        FROM records;
+        CREATE TRIGGER records_storage_usage_insert
+        AFTER INSERT ON records
+        BEGIN
+          UPDATE record_storage_usage
+          SET record_count=record_count+1,
+            attachment_count=attachment_count
+              + CASE WHEN NEW.kind='attachment' THEN 1 ELSE 0 END,
+            encrypted_bytes=encrypted_bytes
+              + length(CAST(NEW.envelope AS BLOB))
+          WHERE singleton=1;
+        END;
+        CREATE TRIGGER records_storage_usage_update
+        AFTER UPDATE OF kind,envelope ON records
+        BEGIN
+          UPDATE record_storage_usage
+          SET attachment_count=attachment_count
+              + CASE WHEN NEW.kind='attachment' THEN 1 ELSE 0 END
+              - CASE WHEN OLD.kind='attachment' THEN 1 ELSE 0 END,
+            encrypted_bytes=encrypted_bytes
+              + length(CAST(NEW.envelope AS BLOB))
+              - length(CAST(OLD.envelope AS BLOB))
+          WHERE singleton=1;
+        END;
+        CREATE TRIGGER records_storage_usage_delete
+        AFTER DELETE ON records
+        BEGIN
+          UPDATE record_storage_usage
+          SET record_count=record_count-1,
+            attachment_count=attachment_count
+              - CASE WHEN OLD.kind='attachment' THEN 1 ELSE 0 END,
+            encrypted_bytes=encrypted_bytes
+              - length(CAST(OLD.envelope AS BLOB))
+          WHERE singleton=1;
+        END;
+
+        ALTER TABLE mutations
+          ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0
+          CHECK(created_at >= 0);
+        CREATE INDEX mutations_created_at
+          ON mutations(created_at,revision,id);
+      `);
+      // Treat legacy receipts as current at upgrade time. This retains their
+      // lost-response replay value for one full configured retention window
+      // instead of expiring every existing receipt immediately.
+      db.prepare('UPDATE mutations SET created_at=? WHERE created_at=0')
+        .run(Date.now());
+    },
+  }),
+  Object.freeze({
+    version: 9,
+    name: 'protocol-record-identity-guards',
+    up(db) {
+      const invalidRecords = countProtocolInvalidRecords(db);
+      if (invalidRecords > 0) {
+        throw new Error(
+          `Database contains ${invalidRecords} record(s) with protocol-invalid `
+          + 'identity or metadata; restore or repair a backup with the previous '
+          + 'server before upgrading. No record was changed.',
+        );
+      }
+      db.exec(`
+        CREATE TRIGGER records_protocol_guard_insert
+        BEFORE INSERT ON records
+        WHEN ${INVALID_RECORD_METADATA.replaceAll(/(?<![A-Za-z_])(kind|id|note_id|envelope|deleted|revision)(?![A-Za-z_])/g, 'NEW.$1')}
+        BEGIN
+          SELECT RAISE(ABORT,'invalid record protocol metadata');
+        END;
+        CREATE TRIGGER records_protocol_guard_update
+        BEFORE UPDATE ON records
+        WHEN ${INVALID_RECORD_METADATA.replaceAll(/(?<![A-Za-z_])(kind|id|note_id|envelope|deleted|revision)(?![A-Za-z_])/g, 'NEW.$1')}
+        BEGIN
+          SELECT RAISE(ABORT,'invalid record protocol metadata');
+        END;
+      `);
+    },
   }),
 ]);
 
@@ -41,6 +343,13 @@ function appliedMigrations(db) {
 
 function rollback(db) {
   try { db.exec('ROLLBACK'); } catch { /* Preserve the migration error. */ }
+}
+
+function checkpointAndTruncate(db) {
+  const result = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+  if (Number(result?.busy ?? 0) !== 0) {
+    throw new Error('Unable to obtain an exclusive WAL checkpoint for sensitive-data scrubbing');
+  }
 }
 
 export function migrateDatabase(db) {
@@ -70,4 +379,35 @@ export function migrateDatabase(db) {
   }
 
   return CURRENT_SERVER_SCHEMA_VERSION;
+}
+
+export function completeSensitiveDataScrub(db) {
+  if (!hasMigrationTable(db)) return false;
+  const task = db.prepare(`
+    SELECT completed_at
+    FROM maintenance_tasks
+    WHERE name='legacy-pairing-token-scrub'
+  `).get();
+  if (!task || task.completed_at) return false;
+
+  // Fail startup rather than serve from a database whose retired raw pairing
+  // credentials may still be recoverable from free pages or a WAL file.
+  checkpointAndTruncate(db);
+  db.exec('VACUUM');
+  checkpointAndTruncate(db);
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    db.prepare(`
+      UPDATE maintenance_tasks
+      SET completed_at=datetime('now')
+      WHERE name='legacy-pairing-token-scrub' AND completed_at IS NULL
+    `).run();
+    db.exec('COMMIT');
+  } catch (error) {
+    rollback(db);
+    throw error;
+  }
+  checkpointAndTruncate(db);
+  return true;
 }

@@ -92,4 +92,41 @@ describe('component accessibility contracts', () => {
     expect(source).toContain('<label for="edit-note-content"');
     expect(source).toContain('<label for="edit-note-labels"');
   });
+
+  it('labels Quick Send as an unencrypted snapshot before it is copied', () => {
+    const source = componentSource('NoteEditor');
+
+    expect(source).toContain(
+      'aria-label="Quick Send — copy unencrypted snapshot link"',
+    );
+    expect(source).toContain(
+      'Unencrypted Quick Send snapshot copied; anyone with the link can read it',
+    );
+  });
+
+  it('renders attachment links only after the local object-URL guard passes', () => {
+    const source = componentSource('AttachmentChip');
+
+    expect(source).toContain("import { formatAttachmentSize, hasLocalAttachmentUrl } from '$lib/attachments';");
+    expect(source).toContain('{#if hasLocalAttachmentUrl(attachment)}');
+    expect(source).not.toContain('{#if attachment.url}');
+  });
+
+  it('announces quarantine separately as a polite amber warning without retry semantics', () => {
+    const source = componentSource('SyncStatus');
+    const warningStart = source.indexOf('{#if noteStore.syncQuarantineCount > 0}');
+    const warningEnd = source.indexOf('{/if}', warningStart);
+    const warning = source.slice(warningStart, warningEnd);
+
+    expect(warningStart).toBeGreaterThan(-1);
+    expect(warning).toContain('text-amber-700');
+    expect(warning).toContain('role="status"');
+    expect(warning).toContain('aria-live="polite"');
+    expect(warning).toContain('aria-hidden="true"');
+    expect(warning).toContain('<span class="sr-only">{quarantineLabel}</span>');
+    expect(warning).not.toContain('noteStore.sync()');
+    expect(source).toMatch(
+      /\{#if noteStore\.syncStatus === 'error'\}[\s\S]*onclick=\{\(\) => noteStore\.sync\(\)\}/,
+    );
+  });
 });

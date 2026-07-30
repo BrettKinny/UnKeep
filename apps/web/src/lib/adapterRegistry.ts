@@ -1,5 +1,4 @@
-import { LocalOnlyAdapter } from '@unkeep/core';
-import type { StorageAdapter } from '@unkeep/core';
+import { LocalOnlyAdapter, type StorageAdapter } from '@unkeep/core/experimental';
 
 export interface AdapterEntry {
   id: string;
@@ -20,7 +19,7 @@ export const adapters: AdapterEntry[] = [
     displayName: 'Local Markdown Files',
     description: 'Save notes as .md files in a folder on your device (Chrome/Edge).',
     create: async () => {
-      const { LocalMarkdownAdapter } = await import('@unkeep/core');
+      const { LocalMarkdownAdapter } = await import('@unkeep/core/experimental');
       return new LocalMarkdownAdapter();
     },
   },
@@ -29,7 +28,7 @@ export const adapters: AdapterEntry[] = [
     displayName: 'Git Repository',
     description: 'Store notes as markdown files in a GitHub, Gitea, or Forgejo repository.',
     create: async () => {
-      const { GitAdapter } = await import('@unkeep/core');
+      const { GitAdapter } = await import('@unkeep/core/experimental');
       return new GitAdapter();
     },
   },
@@ -38,7 +37,7 @@ export const adapters: AdapterEntry[] = [
     displayName: 'S3-Compatible Storage',
     description: 'Store notes in any S3-compatible bucket (AWS S3, MinIO, Cloudflare R2, Backblaze B2).',
     create: async () => {
-      const { S3Adapter } = await import('@unkeep/core');
+      const { S3Adapter } = await import('@unkeep/core/experimental');
       return new S3Adapter();
     },
   },

@@ -46,6 +46,60 @@ describe('cleanRelayEndpoint', () => {
 });
 
 describe('RelayClient errors', () => {
+  it('uses the device collection endpoint for emergency revoke-all', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(null, { status: 204 }),
+    );
+    try {
+      await new RelayClient(
+        'http://localhost:3000',
+        'device-credential',
+      ).revokeAllDevices();
+
+      expect(fetch).toHaveBeenCalledWith(
+        'http://localhost:3000/api/v1/devices',
+        expect.objectContaining({
+          method: 'DELETE',
+          headers: expect.objectContaining({
+            authorization: 'Device device-credential',
+          }),
+        }),
+      );
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
+  it('mints read-only service credentials by default and forwards explicit read-write scope', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      id: 'service-one',
+      name: 'Agent',
+      scope: 'read-only',
+      createdAt: '2026-07-30 00:00:00',
+      issuedByDeviceId: 'device-one',
+      serviceCredential: 'secret',
+    }), {
+      status: 201,
+      headers: { 'content-type': 'application/json' },
+    }));
+    try {
+      const relay = new RelayClient('http://localhost:3000', 'device-credential');
+      await relay.mintServiceCredential('Reader');
+      await relay.mintServiceCredential('Writer', 'read-write');
+
+      expect(fetch.mock.calls[0]![1]).toMatchObject({
+        method: 'POST',
+        body: JSON.stringify({ name: 'Reader', scope: 'read-only' }),
+      });
+      expect(fetch.mock.calls[1]![1]).toMatchObject({
+        method: 'POST',
+        body: JSON.stringify({ name: 'Writer', scope: 'read-write' }),
+      });
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
   it('exposes typed record-conflict metadata returned by the relay', async () => {
     const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
       error: 'record_conflict',
@@ -71,11 +125,10 @@ describe('RelayClient errors', () => {
     }
   });
 
-  it('forwards an abort signal to a pairing poll request', async () => {
+  it('keeps the pairing secret out of the poll URL and forwards cancellation', async () => {
     const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      instanceId: 'vault-one',
       response: null,
-      deviceCredential: null,
-      consumed: false,
     }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
@@ -85,7 +138,61 @@ describe('RelayClient errors', () => {
       await new RelayClient('http://localhost:3000')
         .pollPairing('pairing-one', 'poll-secret', controller.signal);
 
-      expect(fetch.mock.calls[0]![1]).toMatchObject({ signal: controller.signal });
+      expect(fetch.mock.calls[0]![0]).toBe('http://localhost:3000/api/v1/pairings/pairing-one');
+      expect(fetch.mock.calls[0]![1]).toMatchObject({
+        signal: controller.signal,
+        headers: expect.objectContaining({ 'unkeep-pairing-secret': 'poll-secret' }),
+      });
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
+  it('binds setup claim and recovery requests to the previously observed relay instance', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      instanceId: 'vault-one',
+      deviceCredential: 'credential',
+    }), {
+      status: 201,
+      headers: { 'content-type': 'application/json' },
+    }));
+    try {
+      const relay=new RelayClient('http://localhost:3000');
+      await relay.claimSetup('setup-token','vault-one','first-device','First device');
+      await relay.reclaimSetup('recovery-token','vault-one','recovered-device','Recovered device');
+
+      expect(fetch.mock.calls[0]![1]).toMatchObject({
+        body:JSON.stringify({
+          expectedInstanceId:'vault-one',
+          deviceId:'first-device',
+          name:'First device',
+        }),
+      });
+      expect(fetch.mock.calls[1]![1]).toMatchObject({
+        body:JSON.stringify({
+          expectedInstanceId:'vault-one',
+          deviceId:'recovered-device',
+          name:'Recovered device',
+        }),
+      });
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
+  it('cancels a pairing with the poll secret in a header', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, {
+      status: 204,
+    }));
+    try {
+      await new RelayClient('http://localhost:3000')
+        .cancelPairing('pairing-one', 'poll-secret');
+
+      expect(fetch.mock.calls[0]![0]).toBe('http://localhost:3000/api/v1/pairings/pairing-one');
+      expect(fetch.mock.calls[0]![1]).toMatchObject({
+        method: 'DELETE',
+        headers: expect.objectContaining({ 'unkeep-pairing-secret': 'poll-secret' }),
+      });
     } finally {
       fetch.mockRestore();
     }

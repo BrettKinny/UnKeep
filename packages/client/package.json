@@ -1,6 +1,6 @@
 {
   "name": "@unkeep/client",
-  "version": "0.1.0",
+  "version": "0.2.0-rc.1",
   "description": "Framework-independent encrypted sync client for an UnKeep relay",
   "license": "MIT",
   "repository": {
@@ -46,13 +46,14 @@
     "node": ">=20"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
-    "@unkeep/core": "workspace:^"
+    "@unkeep/core": "workspace:*"
   },
   "devDependencies": {
     "@unkeep/server": "workspace:*",
-    "typescript": "^5.7.0"
+    "typescript": "^5.9.3"
   }
 }

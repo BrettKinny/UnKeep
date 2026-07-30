@@ -10,8 +10,60 @@ function note(id: string, content: string): Note {
   return { id, content, createdAt: 1, updatedAt: 1, pinned: false, archived: false };
 }
 
+test('rejects stale relay identity during setup and recovery without changing credentials', async () => {
+  const relay=await startTestServer({
+    setupToken:'test-setup-token-0000000000000001',
+    env:{UNKEEP_RECOVERY_TOKEN:'operator-recovery-token-0000000001'},
+  });
+  try {
+    const anonymous=new RelayClient(relay.endpoint);
+    const status=await anonymous.status();
+    const wrongInstance='00000000-0000-4000-8000-000000000000';
+
+    await expect(anonymous.claimSetup(
+      relay.setupToken,
+      wrongInstance,
+      'first-device',
+      'First device',
+    )).rejects.toMatchObject({status:409,code:'instance_mismatch'});
+    await expect(anonymous.status()).resolves.toMatchObject({initialized:false});
+
+    const claimed=await anonymous.claimSetup(
+      relay.setupToken,
+      status.instanceId,
+      'first-device',
+      'First device',
+    );
+    const owner=new RelayClient(relay.endpoint,claimed.deviceCredential);
+    await expect(anonymous.reclaimSetup(
+      'operator-recovery-token-0000000001',
+      wrongInstance,
+      'recovered-device',
+      'Recovered device',
+    )).rejects.toMatchObject({status:409,code:'instance_mismatch'});
+    await expect(owner.vault()).resolves.toEqual({vaultId:status.instanceId});
+    await expect(owner.devices()).resolves.toEqual({devices:[{
+      id:'first-device',
+      name:'First device',
+      revokedAt:null,
+      approvedByDeviceId:null,
+    }]});
+
+    const recovered=await anonymous.reclaimSetup(
+      'operator-recovery-token-0000000001',
+      status.instanceId,
+      'recovered-device',
+      'Recovered device',
+    );
+    await expect(new RelayClient(relay.endpoint,recovered.deviceCredential).vault())
+      .resolves.toEqual({vaultId:status.instanceId});
+  } finally {
+    await relay.stop();
+  }
+});
+
 test('prepares recoverable device keys before first-device setup is claimed', async () => {
-  const relay = await startTestServer({ setupToken: 'test-setup-token' });
+  const relay = await startTestServer({ setupToken: 'test-setup-token-0000000000000001' });
   try {
     const client = new RelayClient(relay.endpoint);
     const status = await client.status();
@@ -23,11 +75,11 @@ test('prepares recoverable device keys before first-device setup is claimed', as
     ))
       .resolves.toEqual(provisioned.masterKey);
 
-    await expect(client.claimSetup('wrong-token', provisioned.deviceId, 'First device'))
+    await expect(client.claimSetup('wrong-token', status.instanceId, provisioned.deviceId, 'First device'))
       .rejects.toThrow('invalid_setup_token');
     await expect(client.status()).resolves.toMatchObject({ initialized: false });
 
-    const claimed = await client.claimSetup(relay.setupToken, provisioned.deviceId, 'First device');
+    const claimed = await client.claimSetup(relay.setupToken, status.instanceId, provisioned.deviceId, 'First device');
     expect(claimed.instanceId).toBe(status.instanceId);
     await expect(new RelayClient(relay.endpoint, claimed.deviceCredential).vault())
       .resolves.toEqual({ vaultId: claimed.instanceId });
@@ -38,12 +90,13 @@ test('prepares recoverable device keys before first-device setup is claimed', as
 
 test('reclaims device access with an operator recovery token', async () => {
   const relay = await startTestServer({
-    setupToken: 'test-setup-token',
-    env: { UNKEEP_RECOVERY_TOKEN: 'operator-recovery-token' },
+    setupToken: 'test-setup-token-0000000000000001',
+    env: { UNKEEP_RECOVERY_TOKEN: 'operator-recovery-token-0000000001' },
   });
   try {
     const original = await new RelayClient(relay.endpoint).claimSetup(
       relay.setupToken,
+      relay.instanceId,
       'lost-device',
       'Lost device',
     );
@@ -53,7 +106,8 @@ test('reclaims device access with an operator recovery token', async () => {
     });
 
     const recovered = await new RelayClient(relay.endpoint).reclaimSetup(
-      'operator-recovery-token',
+      'operator-recovery-token-0000000001',
+      relay.instanceId,
       'recovered-device',
       'Recovered device',
     );
@@ -68,17 +122,19 @@ test('reclaims device access with an operator recovery token', async () => {
 
 test('revokes another device through the SDK', async () => {
   const relay = await startTestServer({
-    setupToken: 'test-setup-token',
-    env: { UNKEEP_RECOVERY_TOKEN: 'operator-recovery-token' },
+    setupToken: 'test-setup-token-0000000000000001',
+    env: { UNKEEP_RECOVERY_TOKEN: 'operator-recovery-token-0000000001' },
   });
   try {
     const owner = await new RelayClient(relay.endpoint).claimSetup(
       relay.setupToken,
+      relay.instanceId,
       'owner-device',
       'Owner device',
     );
     const second = await new RelayClient(relay.endpoint).reclaimSetup(
-      'operator-recovery-token',
+      'operator-recovery-token-0000000001',
+      relay.instanceId,
       'second-device',
       'Second device',
     );
@@ -97,8 +153,8 @@ test('revokes another device through the SDK', async () => {
 
 test('restores an encrypted vault after all device credentials are lost', async () => {
   const relay = await startTestServer({
-    setupToken: 'test-setup-token',
-    env: { UNKEEP_RECOVERY_TOKEN: 'operator-recovery-token' },
+    setupToken: 'test-setup-token-0000000000000001',
+    env: { UNKEEP_RECOVERY_TOKEN: 'operator-recovery-token-0000000001' },
   });
   try {
     const status = await new RelayClient(relay.endpoint).status();
@@ -106,6 +162,7 @@ test('restores an encrypted vault after all device credentials are lost', async 
     const provisioned = await originalKeys.provisionFirstDevice(status.instanceId);
     const claimed = await new RelayClient(relay.endpoint).claimSetup(
       relay.setupToken,
+      status.instanceId,
       provisioned.deviceId,
       'Only device',
     );
@@ -126,7 +183,8 @@ test('restores an encrypted vault after all device credentials are lost', async 
     );
     const recoveredDeviceId = await recoveredKeys.getDeviceId();
     const reclaimed = await new RelayClient(relay.endpoint).reclaimSetup(
-      'operator-recovery-token',
+      'operator-recovery-token-0000000001',
+      status.instanceId,
       recoveredDeviceId,
       'Recovered device',
     );

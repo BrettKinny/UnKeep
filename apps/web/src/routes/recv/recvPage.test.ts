@@ -16,4 +16,10 @@ describe('Quick Send receive route', () => {
     expect(source).toContain('received.checkboxes');
     expect(source).toContain('received.title');
   });
+
+  it('removes the unencrypted bearer payload from browser history immediately', () => {
+    expect(source).toContain("history.replaceState(null, '', `${window.location.pathname}${window.location.search}`)");
+    expect(source.indexOf('history.replaceState')).toBeLessThan(source.indexOf('decodeQuickSendNote(hash)'));
+    expect(source).toContain('Quick Send links do not expire and cannot be revoked');
+  });
 });

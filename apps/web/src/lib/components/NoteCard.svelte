@@ -3,7 +3,7 @@
   import { noteStore } from '$lib/noteStore.svelte';
   import { toastStore } from '$lib/toast.svelte';
   import { colorMap } from '$lib/colors';
-  import { isImageAttachment } from '$lib/attachments';
+  import { hasLocalAttachmentUrl, isImageAttachment } from '$lib/attachments';
   import AttachmentChip from './AttachmentChip.svelte';
   import ColorPicker from './ColorPicker.svelte';
   import LinkedText from './LinkedText.svelte';
@@ -13,7 +13,9 @@
   let showActions = $state(false);
   let showColorPicker = $state(false);
   let actionsVisible = $derived(showActions || showColorPicker);
-  let visibleImages = $derived(note.images?.filter(attachment => isImageAttachment(attachment) && attachment.url) ?? []);
+  let visibleImages = $derived(note.images?.filter(
+    attachment => isImageAttachment(attachment) && hasLocalAttachmentUrl(attachment),
+  ) ?? []);
   let editLabel = $derived.by(() => {
     const summary = note.title?.trim()
       || note.content.trim()

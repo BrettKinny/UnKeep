@@ -1,15 +1,20 @@
 process.env.NODE_ENV='test';
 
-const {server}=await import('../src/index.mjs');let stopping=false;
+const {server,shutdown}=await import('../src/index.mjs');let stopping=false;
 
 function finish(error){
   if(error)console.error(error);
   process.exitCode=error ? 1 : 0;
   if(process.connected)process.disconnect();
 }
-function stop(){
+async function stop(){
   if(stopping)return;stopping=true;
-  if(server.listening)server.close(finish);else finish();
+  try {
+    await shutdown();
+    finish();
+  } catch (error) {
+    finish(error);
+  }
 }
 
 process.on('message',message=>{if(message?.type==='stop')stop()});

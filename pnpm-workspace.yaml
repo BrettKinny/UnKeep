@@ -2,5 +2,8 @@ packages:
   - 'apps/*'
   - 'packages/*'
 
+overrides:
+  cookie@<0.7.0: 0.7.2
+
 onlyBuiltDependencies:
   - esbuild

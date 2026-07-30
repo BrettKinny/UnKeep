@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { parseSharePayload, stashPendingShare, takePendingShares } from './shareTarget.js';
+import {
+  listPendingShares,
+  MAX_PENDING_SHARES,
+  MAX_SHARE_PAYLOAD_CHARACTERS,
+  parseSharePayload,
+  removePendingShares,
+  stashPendingShare,
+} from './shareTarget.js';
 
 describe('parseSharePayload', () => {
   it('parses a bare URL-encoded fragment as text (iOS Shortcut path)', () => {
@@ -51,32 +58,133 @@ describe('parseSharePayload', () => {
   it('returns null for a malformed percent-encoded fragment', () => {
     expect(parseSharePayload('', '#%E0%A4%A')).toBeNull();
   });
+
+  it('rejects oversized fragment and parameter payloads', () => {
+    const oversized = 'x'.repeat(MAX_SHARE_PAYLOAD_CHARACTERS + 1);
+    expect(parseSharePayload('', `#${oversized}`)).toBeNull();
+    expect(parseSharePayload(`?text=${oversized}`, '')).toBeNull();
+  });
 });
 
-describe('stashPendingShare/takePendingShares', () => {
+describe('pending shares', () => {
+  let values: Map<string, string>;
+
   beforeEach(() => {
-    const store = new Map<string, string>();
+    values = new Map<string, string>();
     vi.stubGlobal('localStorage', {
-      getItem: (k: string) => store.get(k) ?? null,
-      setItem: (k: string, v: string) => void store.set(k, v),
-      removeItem: (k: string) => void store.delete(k),
-    });
+      get length() { return values.size; },
+      clear: () => values.clear(),
+      getItem: (key: string) => values.get(key) ?? null,
+      key: (index: number) => [...values.keys()][index] ?? null,
+      removeItem: (key: string) => { values.delete(key); },
+      setItem: (key: string, value: string) => { values.set(key, value); },
+    } satisfies Storage);
   });
 
-  it('returns stashed shares once, in order', () => {
-    stashPendingShare({ title: 'a', text: 'first' });
-    stashPendingShare({ title: '', text: 'second' });
-    expect(takePendingShares()).toEqual([
-      { title: 'a', text: 'first' },
-      { title: '', text: 'second' },
+  it('keeps shares queued until each durable save is acknowledged', () => {
+    const first = stashPendingShare({ title: 'a', text: 'first' }, 'vault-a');
+    const second = stashPendingShare({ title: '', text: 'second' });
+    expect(listPendingShares()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: first.id, title: 'a', text: 'first', targetInstanceId: 'vault-a' }),
+      expect.objectContaining({ id: second.id, title: '', text: 'second', targetInstanceId: null }),
+    ]));
+    expect(listPendingShares()).toHaveLength(2);
+
+    removePendingShares([first.id]);
+    expect(listPendingShares()).toEqual([
+      expect.objectContaining({ id: second.id, text: 'second' }),
     ]);
-    expect(takePendingShares()).toEqual([]);
+
+    removePendingShares([second.id]);
+    expect(listPendingShares()).toEqual([]);
   });
 
-  it('ignores corrupt stash data', () => {
+  it('ignores corrupt entries and migrates legacy shares as unbound', () => {
     localStorage.setItem('unkeep-pending-shares', 'not json');
-    expect(takePendingShares()).toEqual([]);
+    expect(listPendingShares()).toEqual([]);
     localStorage.setItem('unkeep-pending-shares', '[{"bogus":true},{"title":"t","text":"x"}]');
-    expect(takePendingShares()).toEqual([{ title: 't', text: 'x' }]);
+    expect(listPendingShares()).toEqual([
+      expect.objectContaining({ title: 't', text: 'x', targetInstanceId: null }),
+    ]);
+  });
+
+  it('migrates an ID-less legacy share once under a two-tab interleaving', () => {
+    localStorage.setItem(
+      'unkeep-pending-shares',
+      JSON.stringify([{ title: 'legacy', text: 'one logical share' }]),
+    );
+    const originalSet = localStorage.setItem.bind(localStorage);
+    let nested = false;
+    const set = vi.spyOn(localStorage, 'setItem').mockImplementation((key, value) => {
+      if (key === 'unkeep-pending-shares' && !nested) {
+        nested = true;
+        listPendingShares();
+        nested = false;
+      }
+      originalSet(key, value);
+    });
+
+    const migrated = listPendingShares();
+    set.mockRestore();
+
+    expect(migrated).toEqual([{
+      id: 'legacy-0',
+      targetInstanceId: null,
+      createdAt: 0,
+      title: 'legacy',
+      text: 'one logical share',
+    }]);
+    expect(listPendingShares()).toEqual(migrated);
+    expect([...values.keys()].filter(key => key.startsWith('unkeep-pending-share:')))
+      .toEqual(['unkeep-pending-share:legacy-0']);
+  });
+
+  it('bounds both individual shares and the durable pending queue', () => {
+    expect(() => stashPendingShare({
+      title: '',
+      text: 'x'.repeat(MAX_SHARE_PAYLOAD_CHARACTERS + 1),
+    })).toThrow('too large');
+    for (let index = 0; index < MAX_PENDING_SHARES; index += 1) {
+      stashPendingShare({ title: '', text: `share-${index}` });
+    }
+    expect(() => stashPendingShare({ title: '', text: 'one too many' }))
+      .toThrow('Too many shared notes');
+  });
+
+  it('does not lose distinct stashes or removals under cross-tab interleaving', () => {
+    const originalSet = localStorage.setItem.bind(localStorage);
+    let nested = false;
+    let second: ReturnType<typeof stashPendingShare> | null = null;
+    const set = vi.spyOn(localStorage, 'setItem').mockImplementation((key, value) => {
+      if (key.startsWith('unkeep-pending-share:') && !nested) {
+        nested = true;
+        second = stashPendingShare({ title: '', text: 'second tab' });
+        nested = false;
+      }
+      originalSet(key, value);
+    });
+    const first = stashPendingShare({ title: '', text: 'first tab' });
+    set.mockRestore();
+
+    expect(listPendingShares().map(share => share.id)).toEqual(
+      expect.arrayContaining([first.id, second!.id]),
+    );
+    expect(listPendingShares()).toHaveLength(2);
+
+    const originalRemove = localStorage.removeItem.bind(localStorage);
+    let third: ReturnType<typeof stashPendingShare> | null = null;
+    const remove = vi.spyOn(localStorage, 'removeItem').mockImplementation(key => {
+      if (key.endsWith(first.id) && !third) {
+        third = stashPendingShare({ title: '', text: 'arrived during removal' });
+      }
+      originalRemove(key);
+    });
+    removePendingShares([first.id]);
+    remove.mockRestore();
+
+    expect(listPendingShares().map(share => share.id)).toEqual(
+      expect.arrayContaining([second!.id, third!.id]),
+    );
+    expect(listPendingShares()).toHaveLength(2);
   });
 });

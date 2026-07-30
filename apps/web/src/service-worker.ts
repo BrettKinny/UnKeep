@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 
 import { build, files, prerendered, version } from '$service-worker';
+import { redirectSharedParams, redirectSharedPost } from './lib/serviceWorkerShare';
 
 const worker = self as unknown as ServiceWorkerGlobalScope;
 const CACHE_NAME = `unkeep-${version}`;
@@ -20,10 +21,22 @@ worker.addEventListener('activate', (event) => {
 });
 
 worker.addEventListener('fetch', (event) => {
-  if (event.request.method !== 'GET') return;
-
   const url = new URL(event.request.url);
   if (url.origin !== worker.location.origin) return;
+
+  // The installed Android share target POSTs into the service worker. Convert
+  // the form to a fragment locally so note content never reaches relay or
+  // reverse-proxy request logs. Also absorb legacy GET share targets locally.
+  if (url.pathname === '/share' && event.request.method === 'POST') {
+    event.respondWith(redirectSharedPost(event.request, worker.location.origin));
+    return;
+  }
+  if (url.pathname === '/share' && event.request.method === 'GET' && url.search) {
+    event.respondWith(redirectSharedParams(url.searchParams, worker.location.origin));
+    return;
+  }
+
+  if (event.request.method !== 'GET') return;
 
   // API state must always come from the relay. Replaying cached setup,
   // credential, pairing, or sync responses would be both stale and unsafe.
@@ -41,15 +54,17 @@ worker.addEventListener('fetch', (event) => {
 });
 
 async function networkFirstNavigation(request: Request): Promise<Response> {
+  const requestUrl = new URL(request.url);
+  const cacheKey = new Request(`${requestUrl.origin}${requestUrl.pathname}`);
   try {
     const response = await fetch(request);
     if (response.ok) {
       const cache = await caches.open(CACHE_NAME);
-      await cache.put(request, response.clone());
+      await cache.put(cacheKey, response.clone());
     }
     return response;
   } catch {
-    return await caches.match(request, { ignoreSearch: true })
+    return await caches.match(cacheKey)
       ?? await caches.match('/')
       ?? Response.error();
   }

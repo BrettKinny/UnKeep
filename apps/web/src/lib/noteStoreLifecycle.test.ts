@@ -1,14 +1,30 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
-  ConfigField,
   Note,
+  NoteAttachment,
   NoteMetadata,
+} from '@unkeep/core';
+import type {
+  ConfigField,
+  DurableNoteStorageAdapter,
+  ImportCommitState,
+  PendingNoteSync,
   StorageAdapter,
   SyncResult,
   ValidationResult,
-} from '@unkeep/core';
-import { MemoryClientStorage, type ClientStorage } from '@unkeep/client';
-import { AttachmentStore, AttachmentUrlCache } from './attachmentStorage';
+} from '@unkeep/core/experimental';
+import {
+  MemoryClientStorage,
+  RecordConflictError,
+  type ClientStorage,
+  type RelaySession,
+} from '@unkeep/client';
+import {
+  AttachmentStore,
+  AttachmentUrlCache,
+  STAGED_UPLOAD_TTL_MS,
+} from './attachmentStorage';
+import { IndexedDbClientStorage } from './clientStorage';
 
 interface TestVaultResources {
   attachments: AttachmentStore;
@@ -21,16 +37,23 @@ let NoteStore: new (readVaultResources?: () => TestVaultResources) => {
   adapter: StorageAdapter | null;
   notes: Note[];
   syncStatus: 'synced' | 'syncing' | 'offline' | 'error';
-  initWithAdapter(adapter: StorageAdapter, config: Record<string, unknown>): Promise<void>;
+  syncQuarantineCount: number;
+  initWithAdapter(adapter: DurableNoteStorageAdapter, config: Record<string, unknown>): Promise<void>;
+  enableEncryptedSync(
+    session: RelaySession,
+    masterKey: Uint8Array<ArrayBuffer>,
+  ): Promise<void>;
+  disableEncryptedSync(): Promise<void>;
   prepareQuickSend(note: Note): Promise<{ attachments?: Array<{ bytes: Uint8Array<ArrayBuffer> }> }>;
   createReceivedNote(draft: {
     content: string;
     attachments?: Array<{ name: string; mimeType: string; size: number; bytes: Uint8Array<ArrayBuffer> }>;
-  }): Promise<Note>;
+  }, options?: { idempotencyKey?: string; createdAt?: number }): Promise<Note>;
   addAttachment(noteId: string, file: File): Promise<void>;
   removeAttachment(noteId: string, attachmentId: string): Promise<void>;
   deleteNote(noteId: string): Promise<unknown | null>;
   undoDelete(token: unknown): Promise<void>;
+  sync(): Promise<void>;
 };
 
 const localValues = new Map<string, string>();
@@ -73,12 +96,16 @@ function cloneNote(note: Note): Note {
   return structuredClone(note);
 }
 
-class TestAdapter implements StorageAdapter {
+class TestAdapter implements DurableNoteStorageAdapter {
   readonly id = 'test';
   readonly displayName = 'Test';
   readonly description = 'Test adapter';
   readonly configSchema: ConfigField[] = [];
   private readonly values = new Map<string, Note>();
+  private readonly pending = new Map<string, PendingNoteSync>();
+  private readonly claims = new Map<string, { id: string; token: string; claimedAt: number }>();
+  private readonly importCommits = new Map<string, Exclude<ImportCommitState, 'none'>>();
+  private tokenSequence = 0;
   failNextSave = false;
 
   constructor(notes: readonly Note[] = [], private readonly initialize?: () => Promise<void>) {
@@ -102,6 +129,122 @@ class TestAdapter implements StorageAdapter {
       throw new Error('note persistence failed');
     }
     this.values.set(note.id, cloneNote(note));
+  }
+  async saveNoteWithPendingSync(
+    note: Note,
+    { beforeAttachments }: { beforeAttachments?: Note } = {},
+  ): Promise<PendingNoteSync> {
+    if (this.failNextSave) {
+      this.failNextSave = false;
+      throw new Error('note persistence failed');
+    }
+    const stored = cloneNote(note);
+    const pending = {
+      id: stored.id,
+      token: `token-${++this.tokenSequence}`,
+      note: cloneNote(stored),
+      ...(beforeAttachments
+        ? { beforeAttachments: cloneNote(beforeAttachments) }
+        : {}),
+    };
+    this.values.set(stored.id, stored);
+    this.pending.set(stored.id, pending);
+    return structuredClone(pending);
+  }
+  async saveNotesWithPendingSyncAtomically(
+    notes: Note[],
+    { importCommitToken }: { importCommitToken?: string } = {},
+  ): Promise<PendingNoteSync[]> {
+    if (importCommitToken && this.importCommits.get(importCommitToken) !== 'pending') {
+      throw new Error('Import commit is not pending');
+    }
+    const pending: PendingNoteSync[] = [];
+    for (const note of notes) pending.push(await this.saveNoteWithPendingSync(note));
+    if (importCommitToken) this.importCommits.set(importCommitToken, 'committed');
+    return pending;
+  }
+  async prepareImportCommit(token: string): Promise<void> {
+    if (this.importCommits.get(token) === 'cancelled') {
+      throw new Error('Import commit was cancelled');
+    }
+    if (!this.importCommits.has(token)) this.importCommits.set(token, 'pending');
+  }
+  async importCommitState(token: string): Promise<ImportCommitState> {
+    return this.importCommits.get(token) ?? 'none';
+  }
+  async cancelImportCommit(token: string): Promise<ImportCommitState> {
+    const state = this.importCommits.get(token);
+    if (!state) return 'none';
+    if (state === 'pending') {
+      this.importCommits.set(token, 'cancelled');
+      return 'cancelled';
+    }
+    return state;
+  }
+  async clearImportCommit(token: string): Promise<void> {
+    this.importCommits.delete(token);
+  }
+  async createNoteWithPendingSyncIfAbsent(note: Note) {
+    const existing = this.values.get(note.id);
+    if (existing) return { created: false as const, note: cloneNote(existing) };
+    const pending = await this.saveNoteWithPendingSync(note);
+    return { created: true as const, note: cloneNote(note), pending };
+  }
+  async claimNoteCreation(id: string, now = Date.now()) {
+    const existing = this.values.get(id);
+    if (existing) return { status: 'existing' as const, note: cloneNote(existing) };
+    const claim = this.claims.get(id);
+    if (claim && now - claim.claimedAt < 30_000) return { status: 'busy' as const };
+    const created = {
+      id,
+      token: `claim-${++this.tokenSequence}`,
+      claimedAt: now,
+    };
+    this.claims.set(id, created);
+    return { status: 'claimed' as const, claim: structuredClone(created) };
+  }
+  async finalizeClaimedNote(note: Note, claimToken: string) {
+    const existing = this.values.get(note.id);
+    if (existing) return { created: false as const, note: cloneNote(existing) };
+    const claim = this.claims.get(note.id);
+    if (!claim || claim.token !== claimToken) throw new Error('note creation claim lost');
+    const pending = await this.saveNoteWithPendingSync(note);
+    this.claims.delete(note.id);
+    return { created: true as const, note: cloneNote(note), pending };
+  }
+  async renewNoteCreationClaim(id: string, claimToken: string, now = Date.now()): Promise<boolean> {
+    const claim = this.claims.get(id);
+    if (!claim || claim.token !== claimToken) return false;
+    claim.claimedAt = now;
+    return true;
+  }
+  async releaseNoteCreationClaim(id: string, claimToken: string): Promise<boolean> {
+    const claim = this.claims.get(id);
+    if (!claim || claim.token !== claimToken) return false;
+    this.claims.delete(id);
+    return true;
+  }
+  async queueNoteForSync(id: string): Promise<PendingNoteSync | null> {
+    const existing = this.pending.get(id);
+    if (existing) return structuredClone(existing);
+    const note = this.values.get(id);
+    if (!note) return null;
+    const pending = {
+      id,
+      token: `token-${++this.tokenSequence}`,
+      note: cloneNote(note),
+    };
+    this.pending.set(id, pending);
+    return structuredClone(pending);
+  }
+  async listPendingNoteSync(): Promise<PendingNoteSync[]> {
+    return [...this.pending.values()].map(value => structuredClone(value));
+  }
+  async completePendingNoteSync(id: string, token: string): Promise<boolean> {
+    const pending = this.pending.get(id);
+    if (!pending || pending.token !== token) return false;
+    this.pending.delete(id);
+    return true;
   }
   async deleteNote(id: string): Promise<void> {
     const note = await this.getNote(id);
@@ -128,6 +271,72 @@ function resources(
     pendingKey: `pending:${name}`,
     importJournalKey: `import:${name}`,
   };
+}
+
+class RevisionedSyncDouble {
+  readonly events: string[] = [];
+  attachmentPresent = true;
+  failNextAttachmentDelete = false;
+  failNextPush = false;
+  pullCalls = 0;
+  acknowledgeCalls = 0;
+
+  constructor(
+    private readonly conflictingNoteId: string | null,
+    private readonly winningNote: Note,
+    private readonly attachment: { id: string; name: string; mimeType: string; size: number },
+    private readonly bytes: Uint8Array<ArrayBuffer>,
+  ) {}
+
+  async push(value: Note): Promise<number> {
+    this.events.push(`push:${value.id}`);
+    if (this.failNextPush) {
+      this.failNextPush = false;
+      throw new Error('relay temporarily unavailable');
+    }
+    if (value.id === this.conflictingNoteId) throw new RecordConflictError(2);
+    return 3;
+  }
+
+  async uploadAttachment(_noteId: string, value: { id: string }): Promise<void> {
+    this.events.push(`upload:${value.id}`);
+  }
+
+  async deleteAttachment(_noteId: string, value: { id: string }): Promise<void> {
+    this.events.push(`delete:${value.id}`);
+    if (this.failNextAttachmentDelete) {
+      this.failNextAttachmentDelete = false;
+      throw new Error('relay temporarily unavailable');
+    }
+    this.attachmentPresent = false;
+  }
+
+  async pull() {
+    this.pullCalls += 1;
+    return {
+      notes: [cloneNote(this.winningNote)],
+      deletedIds: [],
+      attachments: this.attachmentPresent
+        ? [{ noteId: this.winningNote.id, attachment: this.attachment, bytes: this.bytes }]
+        : [],
+      deletedAttachments: this.attachmentPresent
+        ? []
+        : [{ noteId: this.winningNote.id, attachmentId: this.attachment.id }],
+      cursor: 3,
+      revisions: [],
+    };
+  }
+
+  async acknowledge(): Promise<void> {
+    this.acknowledgeCalls += 1;
+  }
+}
+
+function useTestSync(store: object, sync: object): void {
+  if (!Reflect.has(sync, 'getQuarantinedRecords')) {
+    Reflect.set(sync, 'getQuarantinedRecords', async () => []);
+  }
+  Reflect.set(store, 'encryptedSync', sync);
 }
 
 describe('NoteStore vault lifecycle', () => {
@@ -185,6 +394,7 @@ describe('NoteStore vault lifecycle', () => {
       set: <T>(key: string, value: T) => backing.set(key, value),
       delete: (key: string) => backing.delete(key),
       update: <T>(key: string, change: (value: T | null) => T | null) => backing.update(key, change),
+      transact: (keys, change) => backing.transact(keys, change),
     };
     const oldAttachments = new AttachmentStore(delayedStorage, 'old');
     const oldResources = resources('old', oldAttachments);
@@ -214,15 +424,19 @@ describe('NoteStore vault lifecycle', () => {
     let blockAttachmentSave = false;
     const delayedStorage: ClientStorage = {
       get: <T>(key: string) => backing.get<T>(key),
-      set: async <T>(key: string, value: T) => {
-        if (blockAttachmentSave && key.startsWith('unkeep-attachment:old:')) {
+      set: <T>(key: string, value: T) => backing.set(key, value),
+      delete: (key: string) => backing.delete(key),
+      update: <T>(key: string, change: (value: T | null) => T | null) => backing.update(key, change),
+      transact: async (keys, change) => {
+        if (
+          blockAttachmentSave
+          && keys.some(key => key.startsWith('unkeep-attachment:old:'))
+        ) {
           saveStarted.resolve();
           await releaseSave.promise;
         }
-        await backing.set(key, value);
+        await backing.transact(keys, change);
       },
-      delete: (key: string) => backing.delete(key),
-      update: <T>(key: string, change: (value: T | null) => T | null) => backing.update(key, change),
     };
     const oldResources = resources('old', new AttachmentStore(delayedStorage, 'old'));
     const newResources = resources('new');
@@ -253,6 +467,236 @@ describe('NoteStore vault lifecycle', () => {
     expect(store.notes.map(value => value.id)).toEqual(['new-note']);
   });
 
+  it('saves a note and its retry intent even when localStorage quota writes fail', async () => {
+    const adapter = new TestAdapter();
+    const store = new NoteStore(() => resources('quota'));
+    await store.initWithAdapter(adapter, {});
+    const setItem = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+      throw new DOMException('Storage quota exceeded', 'QuotaExceededError');
+    });
+
+    try {
+      const created = await store.createReceivedNote({ content: 'durable without localStorage' });
+
+      await expect(adapter.getNote(created.id)).resolves.toMatchObject({
+        content: 'durable without localStorage',
+      });
+      await expect(adapter.listPendingNoteSync()).resolves.toEqual([
+        expect.objectContaining({
+          id: created.id,
+          note: expect.objectContaining({ content: 'durable without localStorage' }),
+        }),
+      ]);
+    } finally {
+      setItem.mockRestore();
+    }
+  });
+
+  it('ingests one pending share only once when two tabs race or retry after a crash', async () => {
+    const adapter = new TestAdapter();
+    const firstTab = new NoteStore(() => resources('share-first'));
+    const secondTab = new NoteStore(() => resources('share-second'));
+    await Promise.all([
+      firstTab.initWithAdapter(adapter, {}),
+      secondTab.initWithAdapter(adapter, {}),
+    ]);
+
+    const [first, second] = await Promise.all([
+      firstTab.createReceivedNote(
+        { content: 'one shared payload' },
+        { idempotencyKey: 'pending-share-token', createdAt: 123 },
+      ),
+      secondTab.createReceivedNote(
+        { content: 'one shared payload' },
+        { idempotencyKey: 'pending-share-token', createdAt: 123 },
+      ),
+    ]);
+
+    expect(first.id).toBe(second.id);
+    await expect(adapter.listNotes()).resolves.toHaveLength(1);
+    await expect(adapter.listPendingNoteSync()).resolves.toHaveLength(1);
+  });
+
+  it('lets only the claim owner stage a shared attachment across two tabs', async () => {
+    const backing = new MemoryClientStorage();
+    let attachmentWrites = 0;
+    const countingStorage: ClientStorage = {
+      get: <T>(key: string) => backing.get<T>(key),
+      set: async <T>(key: string, value: T) => {
+        if (key.startsWith('unkeep-attachment:shared-race:')) attachmentWrites += 1;
+        await backing.set(key, value);
+      },
+      delete: key => backing.delete(key),
+      update: <T>(key: string, change: (value: T | null) => T | null) =>
+        backing.update(key, change),
+      transact: (keys, change) => backing.transact(keys, transaction => {
+        change({
+          get: <T>(key: string) => transaction.get<T>(key),
+          set: <T>(key: string, value: T) => {
+            if (
+              key.startsWith('unkeep-attachment:shared-race:')
+              && (value as { needsUpload?: unknown }).needsUpload === true
+            ) {
+              attachmentWrites += 1;
+            }
+            transaction.set(key, value);
+          },
+          delete: key => transaction.delete(key),
+        });
+      }),
+    };
+    const attachments = new AttachmentStore(countingStorage, 'shared-race');
+    const activeResources = resources('shared-race', attachments);
+    const adapter = new TestAdapter();
+    const firstTab = new NoteStore(() => activeResources);
+    const secondTab = new NoteStore(() => activeResources);
+    await Promise.all([
+      firstTab.initWithAdapter(adapter, {}),
+      secondTab.initWithAdapter(adapter, {}),
+    ]);
+    const draft = {
+      content: 'shared with bytes',
+      attachments: [{
+        name: 'shared.png',
+        mimeType: 'image/png',
+        size: 3,
+        bytes: new Uint8Array([1, 2, 3]),
+      }],
+    };
+
+    const [first, second] = await Promise.all([
+      firstTab.createReceivedNote(
+        draft,
+        { idempotencyKey: 'same-share-with-attachment', createdAt: 123 },
+      ),
+      secondTab.createReceivedNote(
+        draft,
+        { idempotencyKey: 'same-share-with-attachment', createdAt: 123 },
+      ),
+    ]);
+
+    expect(first.id).toBe(second.id);
+    expect(attachmentWrites).toBe(1);
+    expect(first.images).toHaveLength(1);
+    await expect(attachments.get(first.id, first.images![0].id)).resolves.toMatchObject({
+      bytes: new Uint8Array([1, 2, 3]),
+    });
+    await expect(attachments.pendingUploads()).resolves.toHaveLength(1);
+  });
+
+  it('reclaims a crashed shared-note attachment stage without duplicating bytes', async () => {
+    const idempotencyKey = 'crashed-share-with-attachment';
+    const digest = await crypto.subtle.digest(
+      'SHA-256',
+      new TextEncoder().encode(idempotencyKey),
+    );
+    const noteId = `shared_${[...new Uint8Array(digest)]
+      .map(value => value.toString(16).padStart(2, '0'))
+      .join('')}`;
+    const attachmentId = `${noteId}_attachment_0`;
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'shared-crash');
+    const activeResources = resources('shared-crash', attachments);
+    const adapter = new TestAdapter();
+    const abandoned = await adapter.claimNoteCreation(noteId, Date.now() - 30_001);
+    expect(abandoned.status).toBe('claimed');
+    await attachments.save(
+      noteId,
+      { id: attachmentId, name: 'shared.png', mimeType: 'image/png', size: 3 },
+      new Uint8Array([9, 9, 9]),
+      { pendingUpload: true },
+    );
+    const store = new NoteStore(() => activeResources);
+    await store.initWithAdapter(adapter, {});
+
+    const created = await store.createReceivedNote({
+      content: 'retry after browser stop',
+      attachments: [{
+        name: 'shared.png',
+        mimeType: 'image/png',
+        size: 3,
+        bytes: new Uint8Array([1, 2, 3]),
+      }],
+    }, {
+      idempotencyKey,
+      createdAt: 123,
+    });
+
+    expect(created.id).toBe(noteId);
+    expect(created.images).toEqual([
+      expect.objectContaining({ id: attachmentId, name: 'shared.png' }),
+    ]);
+    await expect(attachments.get(noteId, attachmentId)).resolves.toMatchObject({
+      bytes: new Uint8Array([1, 2, 3]),
+    });
+    await expect(attachments.pendingUploads()).resolves.toHaveLength(1);
+    await expect(adapter.listNotes()).resolves.toHaveLength(1);
+    await expect(adapter.listPendingNoteSync()).resolves.toHaveLength(1);
+  });
+
+  it('cleans failed shared staging while still owning the claim', async () => {
+    const adapter = new TestAdapter();
+    const events: string[] = [];
+    const originalRelease = adapter.releaseNoteCreationClaim.bind(adapter);
+    adapter.releaseNoteCreationClaim = async (id, token) => {
+      events.push('release');
+      return originalRelease(id, token);
+    };
+    class FailingAttachmentStore extends AttachmentStore {
+      private stages = 0;
+
+      override async stageUpload(
+        noteId: string,
+        value: NoteAttachment,
+        bytes: Uint8Array<ArrayBuffer>,
+        options: { stagedAt?: number; generation?: string } = {},
+      ) {
+        this.stages += 1;
+        if (this.stages === 2) throw new Error('second attachment failed');
+        return super.stageUpload(noteId, value, bytes, options);
+      }
+
+      override async discardStage(handle: {
+        noteId: string;
+        attachmentId: string;
+        generation: string;
+      }): Promise<boolean> {
+        const waiting = await adapter.claimNoteCreation(handle.noteId);
+        events.push(`cleanup:${waiting.status}`);
+        return super.discardStage(handle);
+      }
+    }
+    const attachments = new FailingAttachmentStore(
+      new MemoryClientStorage(),
+      'claim-cleanup',
+    );
+    const store = new NoteStore(() => resources('claim-cleanup', attachments));
+    await store.initWithAdapter(adapter, {});
+
+    await expect(store.createReceivedNote({
+      content: 'fail after one stage',
+      attachments: [
+        {
+          name: 'first.bin',
+          mimeType: 'application/octet-stream',
+          size: 1,
+          bytes: new Uint8Array([1]),
+        },
+        {
+          name: 'second.bin',
+          mimeType: 'application/octet-stream',
+          size: 1,
+          bytes: new Uint8Array([2]),
+        },
+      ],
+    }, {
+      idempotencyKey: 'claim-cleanup-share',
+      createdAt: 123,
+    })).rejects.toThrow('second attachment failed');
+
+    expect(events).toEqual(['cleanup:busy', 'release']);
+    await expect(attachments.stagedUploads()).resolves.toEqual([]);
+  });
+
   it('adds an attachment only to the vault where file reading began', async () => {
     const oldResources = resources('old');
     const newResources = resources('new');
@@ -280,6 +724,155 @@ describe('NoteStore vault lifecycle', () => {
     expect(store.notes.map(value => value.id)).toEqual(['new-note']);
   });
 
+  it('keeps attachment removal crash-safe until the note snapshot authorizes deletion', async () => {
+    const saveStarted = deferred<void>();
+    const releaseSave = deferred<void>();
+    class PausedAdapter extends TestAdapter {
+      override async saveNoteWithPendingSync(
+        value: Note,
+        options: { beforeAttachments?: Note } = {},
+      ): Promise<PendingNoteSync> {
+        saveStarted.resolve();
+        await releaseSave.promise;
+        return super.saveNoteWithPendingSync(value, options);
+      }
+    }
+
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'remove-crash');
+    const vaultResources = resources('remove-crash', attachments);
+    const attachment = {
+      id: 'crash-image',
+      name: 'crash.png',
+      mimeType: 'image/png',
+      size: 3,
+    };
+    const original = { ...note('crash-note', 'survives a crash'), images: [attachment] };
+    const bytes = new Uint8Array([1, 2, 3]);
+    const adapter = new PausedAdapter([original]);
+    await attachments.save(original.id, attachment, bytes);
+    const store = new NoteStore(() => vaultResources);
+    await store.initWithAdapter(adapter, {});
+
+    const removing = store.removeAttachment(original.id, attachment.id);
+    await saveStarted.promise;
+    try {
+      // A tab can terminate at any await. Until the note and its pending
+      // outbox snapshot commit atomically, the old note must retain its bytes.
+      await expect(adapter.getNote(original.id)).resolves.toMatchObject({
+        images: [attachment],
+      });
+      await expect(attachments.get(original.id, attachment.id)).resolves.toEqual({
+        attachment,
+        bytes,
+      });
+      await expect(attachments.pendingDeletes()).resolves.toEqual([]);
+
+      const restarted = new NoteStore(() => vaultResources);
+      await restarted.initWithAdapter(adapter, {});
+      let pulls = 0;
+      useTestSync(restarted, {
+        push: async () => 1,
+        uploadAttachment: async () => undefined,
+        deleteAttachment: async () => undefined,
+        pull: async () => {
+          pulls += 1;
+          return {
+            notes: [],
+            deletedIds: [],
+            attachments: [],
+            deletedAttachments: [],
+            cursor: 0,
+            revisions: [],
+          };
+        },
+        acknowledge: async () => undefined,
+      });
+
+      await restarted.sync();
+
+      expect(pulls).toBe(1);
+      expect(restarted.syncStatus).toBe('synced');
+    } finally {
+      releaseSave.resolve();
+      await removing;
+    }
+  });
+
+  it('replays a committed attachment removal after restart before pulling', async () => {
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'remove-restart');
+    const vaultResources = resources('remove-restart', attachments);
+    const attachment = {
+      id: 'restart-image',
+      name: 'restart.png',
+      mimeType: 'image/png',
+      size: 3,
+    };
+    const original = { ...note('restart-note', 'resume removal'), images: [attachment] };
+    const bytes = new Uint8Array([4, 5, 6]);
+    const adapter = new TestAdapter([original]);
+    await attachments.save(original.id, attachment, bytes);
+    const firstRun = new NoteStore(() => vaultResources);
+    await firstRun.initWithAdapter(adapter, {});
+    useTestSync(firstRun, {
+      push: async () => {
+        throw new TypeError('simulated tab termination after local commit');
+      },
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    await firstRun.removeAttachment(original.id, attachment.id);
+    warn.mockRestore();
+
+    await expect(adapter.getNote(original.id)).resolves.toMatchObject({ images: undefined });
+    await expect(adapter.listPendingNoteSync()).resolves.toEqual([
+      expect.objectContaining({
+        id: original.id,
+        beforeAttachments: expect.objectContaining({ images: [attachment] }),
+      }),
+    ]);
+    await expect(attachments.get(original.id, attachment.id)).resolves.toEqual({
+      attachment,
+      bytes,
+    });
+    await expect(attachments.pendingDeletes()).resolves.toEqual([
+      { noteId: original.id, attachment, retainBytes: true },
+    ]);
+
+    const events: string[] = [];
+    const restarted = new NoteStore(() => vaultResources);
+    await restarted.initWithAdapter(adapter, {});
+    useTestSync(restarted, {
+      push: async (value: Note) => {
+        events.push(value.images?.length ? 'push:predecessor' : 'push:final');
+        return 2;
+      },
+      uploadAttachment: async () => undefined,
+      deleteAttachment: async (_noteId: string, value: NoteAttachment) => {
+        events.push(`delete:${value.id}`);
+      },
+      pull: async () => {
+        events.push('pull');
+        return {
+          notes: [],
+          deletedIds: [],
+          attachments: [],
+          deletedAttachments: [],
+          cursor: 0,
+          revisions: [],
+        };
+      },
+      acknowledge: async () => undefined,
+    });
+
+    await restarted.sync();
+
+    expect(events).toEqual(['push:final', `delete:${attachment.id}`, 'pull']);
+    expect(restarted.syncStatus).toBe('synced');
+    await expect(adapter.listPendingNoteSync()).resolves.toEqual([]);
+    await expect(attachments.pendingDeletes()).resolves.toEqual([]);
+    await expect(attachments.get(original.id, attachment.id)).resolves.toBeNull();
+  });
+
   it('removes an attachment only from the vault where removal began', async () => {
     const backing = new MemoryClientStorage();
     const readStarted = deferred<void>();
@@ -297,6 +890,7 @@ describe('NoteStore vault lifecycle', () => {
       set: <T>(key: string, value: T) => backing.set(key, value),
       delete: (key: string) => backing.delete(key),
       update: <T>(key: string, change: (value: T | null) => T | null) => backing.update(key, change),
+      transact: (keys, change) => backing.transact(keys, change),
     };
     const oldAttachments = new AttachmentStore(delayedStorage, 'old');
     const newAttachments = new AttachmentStore(new MemoryClientStorage(), 'new');
@@ -327,8 +921,11 @@ describe('NoteStore vault lifecycle', () => {
     await removing;
 
     await expect(oldAdapter.getNote(oldNote.id)).resolves.toMatchObject({ images: undefined });
-    await expect(oldAttachments.get(oldNote.id, attachment.id)).resolves.toBeNull();
-    await expect(oldAttachments.pendingDeletes()).resolves.toEqual([{ noteId: oldNote.id, attachment }]);
+    await expect(oldAttachments.get(oldNote.id, attachment.id)).resolves.toEqual({
+      attachment,
+      bytes: oldBytes,
+    });
+    await expect(oldAttachments.pendingDeletes()).resolves.toEqual([]);
     await expect(newAdapter.getNote(newNote.id)).resolves.toMatchObject({ content: 'new vault', images: [attachment] });
     await expect(newAttachments.get(newNote.id, attachment.id)).resolves.toEqual({ attachment, bytes: newBytes });
     await expect(newAttachments.pendingDeletes()).resolves.toEqual([]);
@@ -336,17 +933,21 @@ describe('NoteStore vault lifecycle', () => {
     expect(store.notes).toEqual([expect.objectContaining({ content: 'new vault', images: [expect.objectContaining(attachment)] })]);
     expect(oldRevoked).toEqual(['blob:old']);
     expect(newRevoked).toEqual([]);
-    expect(localValues.get(oldResources.pendingKey)).toContain(oldNote.id);
+    await expect(oldAdapter.listPendingNoteSync()).resolves.toEqual([
+      expect.objectContaining({
+        id: oldNote.id,
+        beforeAttachments: expect.objectContaining({ images: [attachment] }),
+      }),
+    ]);
     expect(localValues.get(newResources.pendingKey)).toBeUndefined();
   });
 
-  it('rolls a failed old-vault removal back without creating work in the replacement vault', async () => {
+  it('leaves a failed old-vault removal intact without creating work in the replacement vault', async () => {
     const backing = new MemoryClientStorage();
     const readStarted = deferred<void>();
     const releaseRead = deferred<void>();
     let blockedKey = '';
     let blockReads = false;
-    let failDeleteQueue = false;
     const delayedStorage: ClientStorage = {
       get: async <T>(key: string) => {
         if (blockReads && key === blockedKey) {
@@ -357,13 +958,9 @@ describe('NoteStore vault lifecycle', () => {
       },
       set: <T>(key: string, value: T) => backing.set(key, value),
       delete: (key: string) => backing.delete(key),
-      update: async <T>(key: string, change: (value: T | null) => T | null) => {
-        if (failDeleteQueue && key.startsWith('unkeep-pending-attachment-uploads')) {
-          failDeleteQueue = false;
-          throw new Error('IndexedDB queue update failed');
-        }
-        await backing.update(key, change);
-      },
+      update: <T>(key: string, change: (value: T | null) => T | null) =>
+        backing.update(key, change),
+      transact: (keys, change) => backing.transact(keys, change),
     };
     const oldAttachments = new AttachmentStore(delayedStorage, 'old');
     const newAttachments = new AttachmentStore(new MemoryClientStorage(), 'new');
@@ -388,14 +985,14 @@ describe('NoteStore vault lifecycle', () => {
     await readStarted.promise;
     activeResources = newResources;
     await store.initWithAdapter(newAdapter, {});
-    failDeleteQueue = true;
+    oldAdapter.failNextSave = true;
     releaseRead.resolve();
     await removing;
 
     await expect(oldAdapter.getNote(oldNote.id)).resolves.toMatchObject({ content: 'old vault', images: [attachment] });
     await expect(oldAttachments.get(oldNote.id, attachment.id)).resolves.toEqual({ attachment, bytes: oldBytes });
     await expect(oldAttachments.pendingDeletes()).resolves.toEqual([]);
-    await expect(oldAttachments.pendingUploads()).resolves.toEqual([{ noteId: oldNote.id, attachment, bytes: oldBytes }]);
+    await expect(oldAttachments.pendingUploads()).resolves.toEqual([]);
     await expect(newAdapter.getNote(newNote.id)).resolves.toMatchObject({ content: 'new vault', images: [attachment] });
     await expect(newAttachments.get(newNote.id, attachment.id)).resolves.toEqual({ attachment, bytes: newBytes });
     await expect(newAttachments.pendingDeletes()).resolves.toEqual([]);
@@ -408,19 +1005,23 @@ describe('NoteStore vault lifecycle', () => {
     const backing = new MemoryClientStorage();
     const readStarted = deferred<void>();
     const releaseRead = deferred<void>();
-    let blockReads = false;
+    let blockTransaction = false;
     const delayedStorage: ClientStorage = {
-      get: async <T>(key: string) => {
-        if (blockReads && key.startsWith('unkeep-attachment:old:')) {
-          blockReads = false;
-          readStarted.resolve();
-          await releaseRead.promise;
-        }
-        return backing.get<T>(key);
-      },
+      get: <T>(key: string) => backing.get<T>(key),
       set: <T>(key: string, value: T) => backing.set(key, value),
       delete: (key: string) => backing.delete(key),
       update: <T>(key: string, change: (value: T | null) => T | null) => backing.update(key, change),
+      transact: async (keys, change) => {
+        if (
+          blockTransaction
+          && keys.some(key => key.startsWith('unkeep-attachment:old:'))
+        ) {
+          blockTransaction = false;
+          readStarted.resolve();
+          await releaseRead.promise;
+        }
+        await backing.transact(keys, change);
+      },
     };
     const oldAttachments = new AttachmentStore(delayedStorage, 'old');
     const oldResources = resources('old', oldAttachments);
@@ -434,7 +1035,7 @@ describe('NoteStore vault lifecycle', () => {
     await oldAttachments.save(oldNote.id, attachment, new Uint8Array([1, 2, 3]));
     const store = new NoteStore(() => activeResources);
     await store.initWithAdapter(oldAdapter, {});
-    blockReads = true;
+    blockTransaction = true;
 
     const deleting = store.deleteNote(oldNote.id);
     await readStarted.promise;
@@ -472,6 +1073,7 @@ describe('NoteStore vault lifecycle', () => {
       set: <T>(key: string, value: T) => backing.set(key, value),
       delete: (key: string) => backing.delete(key),
       update: <T>(key: string, change: (value: T | null) => T | null) => backing.update(key, change),
+      transact: (keys, change) => backing.transact(keys, change),
     };
     const oldAttachments = new AttachmentStore(delayedStorage, 'old');
     const oldResources = resources('old', oldAttachments);
@@ -499,16 +1101,232 @@ describe('NoteStore vault lifecycle', () => {
     releaseRead.resolve();
     await undoing;
 
-    await expect(oldAdapter.getNote(oldNote.id)).resolves.toMatchObject({
+    const restoredOld = await oldAdapter.getNote(oldNote.id);
+    expect(restoredOld).toMatchObject({
       content: 'old vault',
       deleted: false,
-      images: [attachment],
+      images: [expect.objectContaining({
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        size: attachment.size,
+      })],
     });
-    await expect(oldAttachments.get(oldNote.id, attachment.id))
-      .resolves.toEqual({ attachment, bytes: oldBytes });
+    expect(restoredOld.images![0].id).not.toBe(attachment.id);
+    await expect(oldAttachments.get(oldNote.id, attachment.id)).resolves.toBeNull();
+    await expect(oldAttachments.get(oldNote.id, restoredOld.images![0].id))
+      .resolves.toEqual({ attachment: restoredOld.images![0], bytes: oldBytes });
     await expect(newAdapter.getNote(newNote.id)).resolves.toMatchObject({ content: 'new vault' });
     expect(store.notes).toEqual([expect.objectContaining({ id: newNote.id, content: 'new vault' })]);
     expect(localValues.get(newResources.pendingKey)).toBeUndefined();
+  });
+
+  it('restores a fast online delete with fresh relay attachment IDs', async () => {
+    const attachment = {
+      id: 'immutable-old-id',
+      name: 'old.png',
+      mimeType: 'image/png',
+      size: 3,
+    };
+    const bytes = new Uint8Array([1, 2, 3]);
+    const original = { ...note('online-undo-note', 'restore me'), images: [attachment] };
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'online-undo');
+    await attachments.save(original.id, attachment, bytes);
+    const adapter = new TestAdapter([original]);
+    const store = new NoteStore(() => resources('online-undo', attachments));
+    await store.initWithAdapter(adapter, {});
+    const sync = new RevisionedSyncDouble(null, original, attachment, bytes);
+    useTestSync(store, sync);
+
+    const token = await store.deleteNote(original.id);
+    expect(token).not.toBeNull();
+    await store.undoDelete(token!);
+
+    const restored = await adapter.getNote(original.id);
+    expect(restored.deleted).toBe(false);
+    expect(restored.images).toHaveLength(1);
+    const fresh = restored.images![0];
+    expect(fresh.id).not.toBe(attachment.id);
+    expect(sync.events).toEqual([
+      `push:${original.id}`,
+      `delete:${attachment.id}`,
+      `push:${original.id}`,
+      `upload:${fresh.id}`,
+      `push:${original.id}`,
+    ]);
+    await expect(attachments.get(original.id, attachment.id)).resolves.toBeNull();
+    await expect(attachments.get(original.id, fresh.id)).resolves.toEqual({
+      attachment: fresh,
+      bytes,
+    });
+    await expect(adapter.listPendingNoteSync()).resolves.toEqual([]);
+  });
+
+  it('survives ambiguous tombstone and Undo predecessor failures across restart', async () => {
+    const oldAttachment = {
+      id: 'ambiguous-old-id',
+      name: 'proof.bin',
+      mimeType: 'application/octet-stream',
+      size: 3,
+    };
+    const bytes = new Uint8Array([1, 2, 3]);
+    const original = { ...note('ambiguous-undo-note', 'restore after restart'), images: [oldAttachment] };
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'ambiguous-undo');
+    await attachments.save(original.id, oldAttachment, bytes);
+    const adapter = new TestAdapter([original]);
+    const activeResources = resources('ambiguous-undo', attachments);
+    let failTombstoneResponse = true;
+    let failPredecessorResponse = true;
+    let remoteNote: Note = cloneNote(original);
+    const remoteAttachments = new Map([[oldAttachment.id, bytes]]);
+    const events: string[] = [];
+    const sync = {
+      async push(value: Note) {
+        const kind = value.deleted ? 'tombstone' : value.images?.length ? 'final' : 'predecessor';
+        events.push(`push:${kind}`);
+        remoteNote = cloneNote(value);
+        if (value.deleted) remoteAttachments.clear();
+        if (value.deleted && failTombstoneResponse) {
+          failTombstoneResponse = false;
+          throw new TypeError('tombstone response lost');
+        }
+        if (!value.deleted && !value.images?.length && failPredecessorResponse) {
+          failPredecessorResponse = false;
+          throw new TypeError('predecessor response lost');
+        }
+        return 3;
+      },
+      async uploadAttachment(_noteId: string, value: NoteAttachment, valueBytes: Uint8Array<ArrayBuffer>) {
+        events.push(`upload:${value.id}`);
+        if (remoteNote.deleted) throw new Error('cannot attach bytes to a tombstoned note');
+        remoteAttachments.set(value.id, new Uint8Array(valueBytes));
+      },
+      async deleteAttachment(_noteId: string, value: NoteAttachment) {
+        events.push(`delete:${value.id}`);
+        remoteAttachments.delete(value.id);
+      },
+      async pull() {
+        return {
+          notes: remoteNote.deleted ? [] : [cloneNote(remoteNote)],
+          deletedIds: remoteNote.deleted ? [remoteNote.id] : [],
+          attachments: (remoteNote.images ?? []).flatMap(value => {
+            const valueBytes = remoteAttachments.get(value.id);
+            return valueBytes
+              ? [{ noteId: remoteNote.id, attachment: value, bytes: valueBytes }]
+              : [];
+          }),
+          deletedAttachments: [],
+          cursor: 3,
+          revisions: [],
+        };
+      },
+      async acknowledge() {},
+    };
+    const firstRun = new NoteStore(() => activeResources);
+    await firstRun.initWithAdapter(adapter, {});
+    useTestSync(firstRun, sync);
+
+    const undoToken = await firstRun.deleteNote(original.id);
+    expect(undoToken).not.toBeNull();
+    await firstRun.undoDelete(undoToken!);
+    expect(events).toEqual(['push:tombstone', 'push:predecessor']);
+    await expect(adapter.listPendingNoteSync()).resolves.toEqual([
+      expect.objectContaining({
+        id: original.id,
+        beforeAttachments: expect.objectContaining({ images: undefined }),
+      }),
+    ]);
+
+    const restarted = new NoteStore(() => activeResources);
+    await restarted.initWithAdapter(adapter, {});
+    useTestSync(restarted, sync);
+    await restarted.sync();
+
+    const restored = await adapter.getNote(original.id);
+    const fresh = restored.images![0];
+    expect(events).toEqual([
+      'push:tombstone',
+      'push:predecessor',
+      'push:predecessor',
+      `upload:${fresh.id}`,
+      'push:final',
+      `delete:${oldAttachment.id}`,
+    ]);
+    expect(remoteNote).toMatchObject({
+      id: original.id,
+      deleted: false,
+      images: [expect.objectContaining({ id: fresh.id })],
+    });
+    expect(remoteAttachments.has(fresh.id)).toBe(true);
+    await expect(adapter.listPendingNoteSync()).resolves.toEqual([]);
+  });
+
+  it('retires the original Undo upload after a predecessor conflict preserves a copy', async () => {
+    const oldAttachment = {
+      id: 'pre-conflict-old-id',
+      name: 'proof.bin',
+      mimeType: 'application/octet-stream',
+      size: 3,
+    };
+    const bytes = new Uint8Array([1, 2, 3]);
+    const original = { ...note('undo-predecessor-conflict', 'local edit'), images: [oldAttachment] };
+    const winner = { ...note(original.id, 'concurrent winner'), updatedAt: 5 };
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'undo-predecessor-conflict');
+    await attachments.save(original.id, oldAttachment, bytes);
+    const adapter = new TestAdapter([original]);
+    const store = new NoteStore(() => resources('undo-predecessor-conflict', attachments));
+    await store.initWithAdapter(adapter, {});
+    const events: string[] = [];
+    const sync = {
+      async push(value: Note) {
+        events.push(`push:${value.id}:${value.deleted ? 'deleted' : value.images?.length ? 'images' : 'plain'}`);
+        if (value.id === original.id && !value.deleted && !value.images?.length) {
+          throw new RecordConflictError(5);
+        }
+        return 5;
+      },
+      async uploadAttachment(noteId: string, value: NoteAttachment) {
+        events.push(`upload:${noteId}:${value.id}`);
+      },
+      async deleteAttachment(noteId: string, value: NoteAttachment) {
+        events.push(`delete:${noteId}:${value.id}`);
+      },
+      async pull() {
+        return {
+          notes: [cloneNote(winner)],
+          deletedIds: [],
+          attachments: [],
+          deletedAttachments: [],
+          cursor: 5,
+          revisions: [],
+        };
+      },
+      async acknowledge() {},
+    };
+    useTestSync(store, sync);
+
+    const undoToken = await store.deleteNote(original.id);
+    expect(undoToken).not.toBeNull();
+    await store.undoDelete(undoToken!);
+    const rejected = await adapter.getNote(original.id);
+    const rejectedFreshId = rejected.images![0].id;
+    const eventsAfterPreservation = [...events];
+
+    await expect(adapter.listPendingNoteSync()).resolves.toEqual([]);
+    await expect(attachments.get(original.id, rejectedFreshId)).resolves.toBeNull();
+    await expect(attachments.pendingUploads()).resolves.toEqual([]);
+    await expect(attachments.stagedUploads()).resolves.toEqual([]);
+
+    await store.sync();
+
+    expect(events).toEqual(eventsAfterPreservation);
+    await expect(adapter.listPendingNoteSync()).resolves.toEqual([]);
+    expect((await adapter.getAllNotes())).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: winner.id, content: winner.content }),
+      expect.objectContaining({
+        title: expect.stringMatching(/conflict copy/i),
+        images: [expect.objectContaining({ id: expect.not.stringMatching(rejectedFreshId) })],
+      }),
+    ]));
   });
 
   it('treats an expired Undo invoked after a vault switch as a no-op', async () => {
@@ -570,5 +1388,434 @@ describe('NoteStore vault lifecycle', () => {
     ]);
     await expect(attachments.pendingUploads()).resolves.toEqual([]);
     expect(store.notes).toEqual([]);
+  });
+
+  it('does not let a stale attachment removal delete the attachment from a winning edit', async () => {
+    const attachment = { id: 'shared-image', name: 'shared.png', mimeType: 'image/png', size: 3 };
+    const bytes = new Uint8Array([1, 2, 3]);
+    const stale = { ...note('shared-note', 'stale base'), images: [attachment] };
+    const winner = { ...stale, content: 'winning edit', updatedAt: 2 };
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'conflicting-remove');
+    await attachments.save(stale.id, attachment, bytes);
+    const activeResources = resources('conflicting-remove', attachments);
+    const store = new NoteStore(() => activeResources);
+    await store.initWithAdapter(new TestAdapter([stale]), {});
+    const sync = new RevisionedSyncDouble(stale.id, winner, attachment, bytes);
+    useTestSync(store, sync);
+
+    await store.removeAttachment(stale.id, attachment.id);
+    await store.sync();
+
+    expect(sync.attachmentPresent).toBe(true);
+    expect(sync.events).toContain(`push:${stale.id}`);
+    expect(sync.events).not.toContain(`delete:${attachment.id}`);
+    await expect(attachments.pendingDeletes()).resolves.toEqual([]);
+    expect(store.notes).toEqual([
+      expect.objectContaining({
+        id: winner.id,
+        content: winner.content,
+        images: [expect.objectContaining(attachment)],
+      }),
+      expect.objectContaining({ title: 'Conflict copy', images: undefined }),
+    ]);
+  });
+
+  it('does not let a stale note deletion tombstone attachments from a winning edit, including retry', async () => {
+    const attachment = { id: 'shared-image', name: 'shared.png', mimeType: 'image/png', size: 3 };
+    const bytes = new Uint8Array([1, 2, 3]);
+    const stale = { ...note('shared-note', 'stale base'), images: [attachment] };
+    const winner = { ...stale, content: 'winning edit', updatedAt: 2 };
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'conflicting-delete');
+    await attachments.save(stale.id, attachment, bytes);
+    const activeResources = resources('conflicting-delete', attachments);
+    const store = new NoteStore(() => activeResources);
+    await store.initWithAdapter(new TestAdapter([stale]), {});
+    const sync = new RevisionedSyncDouble(stale.id, winner, attachment, bytes);
+    useTestSync(store, sync);
+
+    expect(await store.deleteNote(stale.id)).not.toBeNull();
+    await store.sync();
+
+    expect(sync.attachmentPresent).toBe(true);
+    expect(sync.events).toContain(`push:${stale.id}`);
+    expect(sync.events).not.toContain(`delete:${attachment.id}`);
+    await expect(attachments.pendingDeletes()).resolves.toEqual([]);
+    expect(store.notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: winner.id,
+        content: winner.content,
+        images: [expect.objectContaining(attachment)],
+      }),
+    ]));
+  });
+
+  it('retries a failed attachment deletion only after the owning note is accepted', async () => {
+    const attachment = { id: 'removed-image', name: 'removed.png', mimeType: 'image/png', size: 3 };
+    const bytes = new Uint8Array([1, 2, 3]);
+    const original = { ...note('current-note', 'current'), images: [attachment] };
+    const removed = { ...original, images: undefined, updatedAt: 2 };
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'delete-retry');
+    await attachments.save(original.id, attachment, bytes);
+    const activeResources = resources('delete-retry', attachments);
+    const store = new NoteStore(() => activeResources);
+    await store.initWithAdapter(new TestAdapter([original]), {});
+    const sync = new RevisionedSyncDouble(null, removed, attachment, bytes);
+    sync.failNextAttachmentDelete = true;
+    useTestSync(store, sync);
+
+    await store.removeAttachment(original.id, attachment.id);
+
+    expect(sync.events).toEqual([`push:${original.id}`, `delete:${attachment.id}`]);
+    expect(sync.attachmentPresent).toBe(true);
+    await expect(attachments.pendingDeletes()).resolves.toEqual([
+      { noteId: original.id, attachment, retainBytes: true },
+    ]);
+
+    sync.events.length = 0;
+    await store.sync();
+
+    expect(sync.events).toEqual([`push:${original.id}`, `delete:${attachment.id}`]);
+    expect(sync.attachmentPresent).toBe(false);
+    await expect(attachments.pendingDeletes()).resolves.toEqual([]);
+  });
+
+  it('never pulls over a durable local edit when its relay mutation failed transiently', async () => {
+    const local = { ...note('pending-note', 'local edit'), updatedAt: 2 };
+    const remote = { ...local, content: 'concurrent remote edit', updatedAt: 3 };
+    const activeResources = resources('failed-push');
+    const adapter = new TestAdapter([local]);
+    const store = new NoteStore(() => activeResources);
+    await store.initWithAdapter(adapter, {});
+    await adapter.queueNoteForSync(local.id);
+    const sync = new RevisionedSyncDouble(
+      null,
+      remote,
+      { id: 'unused', name: 'unused.bin', mimeType: 'application/octet-stream', size: 0 },
+      new Uint8Array(),
+    );
+    sync.failNextPush = true;
+    useTestSync(store, sync);
+
+    await store.sync();
+
+    expect(sync.events).toEqual([`push:${local.id}`]);
+    expect(sync.pullCalls).toBe(0);
+    expect(sync.acknowledgeCalls).toBe(0);
+    await expect(adapter.getNote(local.id)).resolves.toMatchObject({ content: 'local edit' });
+    expect(store.notes).toEqual([expect.objectContaining({ id: local.id, content: 'local edit' })]);
+    expect(store.syncStatus).toBe('offline');
+    await expect(adapter.listPendingNoteSync()).resolves.toEqual([
+      expect.objectContaining({ id: local.id }),
+    ]);
+  });
+
+  it('surfaces durable quarantines after a successful sync without reporting a sync error', async () => {
+    const store = new NoteStore(() => resources('quarantine-success'));
+    await store.initWithAdapter(new TestAdapter(), {});
+    const quarantined = [{
+      kind: 'note' as const,
+      id: 'poison-note',
+      revision: 7,
+      reason: 'note_invalid_or_undecryptable' as const,
+    }];
+    useTestSync(store, {
+      async pull() {
+        return {
+          notes: [],
+          deletedIds: [],
+          attachments: [],
+          deletedAttachments: [],
+          quarantined,
+          cursor: 7,
+          revisions: [{ kind: 'note', id: 'poison-note', revision: 7 }],
+        };
+      },
+      async acknowledge() {},
+      async getQuarantinedRecords() {
+        return quarantined;
+      },
+    });
+
+    await store.sync();
+
+    expect(store.syncStatus).toBe('synced');
+    expect(store.syncQuarantineCount).toBe(1);
+  });
+
+  it('clears a quarantine warning after a later valid sync clears durable quarantine', async () => {
+    const store = new NoteStore(() => resources('quarantine-cleared'));
+    await store.initWithAdapter(new TestAdapter(), {});
+    let quarantined = [{
+      kind: 'note' as const,
+      id: 'recovered-note',
+      revision: 7,
+      reason: 'note_invalid_or_undecryptable' as const,
+    }];
+    useTestSync(store, {
+      async pull() {
+        return {
+          notes: [],
+          deletedIds: [],
+          attachments: [],
+          deletedAttachments: [],
+          quarantined,
+          cursor: 8,
+          revisions: [],
+        };
+      },
+      async acknowledge() {},
+      async getQuarantinedRecords() {
+        return quarantined;
+      },
+    });
+
+    await store.sync();
+    expect(store.syncQuarantineCount).toBe(1);
+
+    quarantined = [];
+    await store.sync();
+
+    expect(store.syncStatus).toBe('synced');
+    expect(store.syncQuarantineCount).toBe(0);
+  });
+
+  it('resets a prior quarantine warning when a different vault adapter is initialized', async () => {
+    const store = new NoteStore(() => resources('quarantine-vault-reset'));
+    await store.initWithAdapter(new TestAdapter(), {});
+    const quarantined = [{
+      kind: 'note' as const,
+      id: 'old-vault-note',
+      revision: 4,
+      reason: 'note_invalid_or_undecryptable' as const,
+    }];
+    useTestSync(store, {
+      async pull() {
+        return {
+          notes: [],
+          deletedIds: [],
+          attachments: [],
+          deletedAttachments: [],
+          quarantined,
+          cursor: 4,
+          revisions: [],
+        };
+      },
+      async acknowledge() {},
+      async getQuarantinedRecords() {
+        return quarantined;
+      },
+    });
+    await store.sync();
+    expect(store.syncQuarantineCount).toBe(1);
+
+    await store.initWithAdapter(new TestAdapter(), {});
+
+    expect(store.syncQuarantineCount).toBe(0);
+  });
+
+  it('loads durable quarantine on session enable and clears it on session disable', async () => {
+    const quarantineKey = 'unkeep-sync-quarantine:paired-vault';
+    const quarantined = [{
+      kind: 'note' as const,
+      id: 'durably-quarantined-note',
+      revision: 9,
+      reason: 'note_invalid_or_undecryptable' as const,
+    }];
+    const readState = vi.spyOn(IndexedDbClientStorage.prototype, 'get')
+      .mockImplementation(async <T>(key: string) => (
+        key === quarantineKey
+          ? { version: 1, records: quarantined } as T
+          : null
+      ));
+    const previousWindow = globalThis.window;
+    const previousDocument = globalThis.document;
+    vi.stubGlobal('window', {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      setInterval: vi.fn(() => 1),
+      clearInterval: vi.fn(),
+    });
+    vi.stubGlobal('document', {
+      visibilityState: 'visible',
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+
+    try {
+      const store = new NoteStore();
+      await store.enableEncryptedSync({
+        endpoint: 'https://relay.example',
+        instanceId: 'paired-vault',
+        deviceId: 'paired-device',
+        credential: 'test-credential',
+      }, new Uint8Array(32));
+
+      expect(readState).toHaveBeenCalledWith(quarantineKey);
+      expect(store.syncStatus).toBe('synced');
+      expect(store.syncQuarantineCount).toBe(1);
+
+      await store.disableEncryptedSync();
+
+      expect(store.syncQuarantineCount).toBe(0);
+    } finally {
+      readState.mockRestore();
+      vi.stubGlobal('window', previousWindow);
+      vi.stubGlobal('document', previousDocument);
+    }
+  });
+
+  it('does not surface a stale vault quarantine when a newer session enables first', async () => {
+    const oldReadStarted = deferred<void>();
+    const releaseOldRead = deferred<unknown>();
+    const readState = vi.spyOn(IndexedDbClientStorage.prototype, 'get')
+      .mockImplementation(async <T>(key: string) => {
+        if (key === 'unkeep-sync-quarantine:old-vault') {
+          oldReadStarted.resolve();
+          return await releaseOldRead.promise as T;
+        }
+        return null;
+      });
+    const previousWindow = globalThis.window;
+    const previousDocument = globalThis.document;
+    vi.stubGlobal('window', {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      setInterval: vi.fn(() => 1),
+      clearInterval: vi.fn(),
+    });
+    vi.stubGlobal('document', {
+      visibilityState: 'visible',
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+
+    try {
+      const store = new NoteStore();
+      const oldEnable = store.enableEncryptedSync({
+        endpoint: 'https://old.example',
+        instanceId: 'old-vault',
+        deviceId: 'old-device',
+        credential: 'old-credential',
+      }, new Uint8Array(32));
+      await oldReadStarted.promise;
+
+      await store.enableEncryptedSync({
+        endpoint: 'https://new.example',
+        instanceId: 'new-vault',
+        deviceId: 'new-device',
+        credential: 'new-credential',
+      }, new Uint8Array(32));
+      releaseOldRead.resolve({
+        version: 1,
+        records: [{
+          kind: 'note',
+          id: 'old-poison',
+          revision: 5,
+          reason: 'note_invalid_or_undecryptable',
+        }],
+      });
+      await oldEnable;
+
+      expect(store.syncStatus).toBe('synced');
+      expect(store.syncQuarantineCount).toBe(0);
+    } finally {
+      readState.mockRestore();
+      vi.stubGlobal('window', previousWindow);
+      vi.stubGlobal('document', previousDocument);
+    }
+  });
+
+  it('keeps a crash-staged upload enumerable but excludes it from relay I/O', async () => {
+    const local = note('orphan-owner', 'note saved before attachment crash');
+    const orphan = {
+      id: 'orphan-upload',
+      name: 'orphan.bin',
+      mimeType: 'application/octet-stream',
+      size: 3,
+    };
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'orphan-upload');
+    await attachments.stageUpload(local.id, orphan, new Uint8Array([1, 2, 3]), {
+      stagedAt: Date.now() - STAGED_UPLOAD_TTL_MS,
+    });
+    const adapter = new TestAdapter([local]);
+    await adapter.queueNoteForSync(local.id);
+    const store = new NoteStore(() => resources('orphan-upload', attachments));
+    await store.initWithAdapter(adapter, {});
+    const sync = new RevisionedSyncDouble(null, local, orphan, new Uint8Array([1, 2, 3]));
+    sync.failNextPush = true;
+    useTestSync(store, sync);
+
+    await store.sync();
+
+    expect(sync.events).toEqual([`push:${local.id}`]);
+    await expect(attachments.pendingUploads()).resolves.toEqual([]);
+    await expect(attachments.stagedUploads()).resolves.toEqual([
+      expect.objectContaining({ noteId: local.id, attachment: orphan }),
+    ]);
+    await expect(attachments.get(local.id, orphan.id)).resolves.not.toBeNull();
+  });
+
+  it('preserves staged bytes when no durable note authorizes reconciliation', async () => {
+    const orphan = {
+      id: 'unowned-stage',
+      name: 'unowned.bin',
+      mimeType: 'application/octet-stream',
+      size: 3,
+    };
+    const bytes = new Uint8Array([1, 2, 3]);
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'unowned-stage');
+    await attachments.stageUpload('missing-note', orphan, bytes, {
+      stagedAt: Date.now() - STAGED_UPLOAD_TTL_MS - 1,
+    });
+    const adapter = new TestAdapter();
+    const store = new NoteStore(() => resources('unowned-stage', attachments));
+    await store.initWithAdapter(adapter, {});
+    let pullCalls = 0;
+    useTestSync(store, {
+      async push() { throw new Error('No note is authorized for upload'); },
+      async uploadAttachment() { throw new Error('No attachment is authorized for upload'); },
+      async deleteAttachment() { throw new Error('No attachment is authorized for deletion'); },
+      async pull() {
+        pullCalls += 1;
+        return {
+          notes: [],
+          deletedIds: [],
+          attachments: [],
+          deletedAttachments: [],
+          cursor: 0,
+          revisions: [],
+        };
+      },
+      async acknowledge() {},
+    });
+
+    await store.sync();
+
+    expect(pullCalls).toBe(1);
+    await expect(attachments.get('missing-note', orphan.id)).resolves.toEqual({
+      attachment: orphan,
+      bytes,
+    });
+    await expect(attachments.stagedUploads()).resolves.toEqual([
+      expect.objectContaining({ noteId: 'missing-note', attachment: orphan }),
+    ]);
+  });
+
+  it('migrates legacy localStorage pending IDs before removing the old marker', async () => {
+    const local = { ...note('legacy-pending-note', 'unsynced legacy edit'), updatedAt: 2 };
+    const activeResources = resources('legacy-pending');
+    localValues.set(activeResources.pendingKey, JSON.stringify([local.id]));
+    const adapter = new TestAdapter([local]);
+    const store = new NoteStore(() => activeResources);
+
+    await store.initWithAdapter(adapter, {});
+
+    await expect(adapter.listPendingNoteSync()).resolves.toEqual([
+      expect.objectContaining({
+        id: local.id,
+        note: expect.objectContaining({ content: local.content }),
+      }),
+    ]);
+    expect(localValues.get(activeResources.pendingKey)).toBeUndefined();
   });
 });

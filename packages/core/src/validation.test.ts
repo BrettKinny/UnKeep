@@ -41,6 +41,10 @@ describe('validateNoteId', () => {
   it('throws for IDs with unicode', () => {
     expect(() => validateNoteId('café')).toThrow('Invalid note ID');
   });
+
+  it('throws for IDs longer than the route-safe limit', () => {
+    expect(() => validateNoteId('a'.repeat(129))).toThrow('1-128 characters');
+  });
 });
 
 describe('isValidNoteId', () => {
@@ -55,5 +59,6 @@ describe('isValidNoteId', () => {
     expect(isValidNoteId('has space')).toBe(false);
     expect(isValidNoteId('file.md')).toBe(false);
     expect(isValidNoteId('path/to')).toBe(false);
+    expect(isValidNoteId('a'.repeat(129))).toBe(false);
   });
 });

@@ -16,6 +16,9 @@
 
   onMount(async () => {
     const hash = window.location.hash.slice(1);
+    // Quick Send is an unencrypted bearer snapshot. Remove it from the visible
+    // URL and browser history as soon as this page has captured the payload.
+    history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
     if (!hash) {
       error = 'No note data found in the URL.';
       return;
@@ -141,7 +144,8 @@
       </div>
 
       <p class="text-xs text-on-surface-muted text-center mt-4">
-        This note was shared via URL. The content never left your browser — it was encoded entirely in the URL fragment.
+        This was an unencrypted bearer link: anyone who received the original URL could read it.
+        Quick Send links do not expire and cannot be revoked.
       </p>
     {:else}
       <div class="text-center py-8">

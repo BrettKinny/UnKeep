@@ -14,15 +14,31 @@ const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const node = process.execPath;
 const repositoryLicense = readFileSync(join(repositoryRoot, 'LICENSE'), 'utf8');
+const publicRegistry = 'https://registry.npmjs.org/';
+const suppliedTarballs = process.argv.slice(2).map((path) => resolve(path));
 
 const packages = [
-  { name: '@unkeep/core', directory: 'packages/core' },
-  { name: '@unkeep/client', directory: 'packages/client' },
-  { name: '@unkeep/cli', directory: 'apps/cli', bin: 'unkeep' },
+  { name: '@unkeep/core', directory: 'packages/core', library: true, internalDependencies: [] },
+  {
+    name: '@unkeep/client',
+    directory: 'packages/client',
+    library: true,
+    internalDependencies: ['@unkeep/core'],
+  },
+  {
+    name: '@unkeep/cli',
+    directory: 'apps/cli',
+    bin: 'unkeep',
+    internalDependencies: ['@unkeep/client', '@unkeep/core'],
+  },
 ];
 
 function fail(message) {
   throw new Error(message);
+}
+
+if (suppliedTarballs.length !== 0 && suppliedTarballs.length !== packages.length) {
+  fail(`Expected no tarball arguments or exactly ${packages.length}, received ${suppliedTarballs.length}`);
 }
 
 function run(command, args, cwd) {
@@ -52,22 +68,30 @@ function installedPackageDirectory(name) {
   return join(consumerDirectory, 'node_modules', ...name.split('/'));
 }
 
-mkdirSync(tarballDirectory);
+if (!suppliedTarballs.length) mkdirSync(tarballDirectory);
 mkdirSync(consumerDirectory);
 
 try {
-  const tarballs = [];
+  const tarballs = [...suppliedTarballs];
 
-  for (const packageDefinition of packages) {
-    const before = new Set(readdirSync(tarballDirectory));
-    run(
-      pnpm,
-      ['pack', '--pack-destination', tarballDirectory],
-      join(repositoryRoot, packageDefinition.directory),
-    );
-    const created = readdirSync(tarballDirectory).filter((file) => file.endsWith('.tgz') && !before.has(file));
-    if (created.length !== 1) fail(`Expected one tarball for ${packageDefinition.name}, found ${created.length}`);
-    tarballs.push(join(tarballDirectory, created[0]));
+  if (!tarballs.length) {
+    for (const packageDefinition of packages) {
+      const before = new Set(readdirSync(tarballDirectory));
+      run(
+        pnpm,
+        ['pack', '--pack-destination', tarballDirectory],
+        join(repositoryRoot, packageDefinition.directory),
+      );
+      const created = readdirSync(tarballDirectory).filter((file) => file.endsWith('.tgz') && !before.has(file));
+      if (created.length !== 1) fail(`Expected one tarball for ${packageDefinition.name}, found ${created.length}`);
+      tarballs.push(join(tarballDirectory, created[0]));
+    }
+  } else {
+    for (const tarball of tarballs) {
+      if (!existsSync(tarball) || !statSync(tarball).isFile()) {
+        fail(`Supplied package tarball does not exist: ${tarball}`);
+      }
+    }
   }
 
   writeFileSync(
@@ -93,8 +117,19 @@ try {
     if (manifest.private) fail(`${packageDefinition.name} is still marked private`);
     if (manifest.license !== 'MIT') fail(`${packageDefinition.name} is missing its MIT license metadata`);
     if (manifest.publishConfig?.access !== 'public') fail(`${packageDefinition.name} is missing public publishConfig`);
+    if (manifest.publishConfig?.registry !== publicRegistry) {
+      fail(`${packageDefinition.name} must publish only to ${publicRegistry}`);
+    }
     if (!manifest.engines?.node) fail(`${packageDefinition.name} is missing a Node engine requirement`);
     if (!manifest.repository?.url) fail(`${packageDefinition.name} is missing repository metadata`);
+    for (const dependency of packageDefinition.internalDependencies) {
+      if (manifest.dependencies?.[dependency] !== manifest.version) {
+        fail(
+          `${packageDefinition.name} must depend on ${dependency} at its exact release version `
+          + `${manifest.version}; received ${JSON.stringify(manifest.dependencies?.[dependency])}`,
+        );
+      }
+    }
     if (readFileSync(join(directory, 'LICENSE'), 'utf8') !== repositoryLicense) {
       fail(`${packageDefinition.name} does not contain the repository license text`);
     }
@@ -108,7 +143,9 @@ try {
     }
 
     const files = walk(directory);
-    for (const requiredFile of ['README.md', 'LICENSE', 'dist/index.js', 'dist/index.d.ts']) {
+    const requiredFiles = ['README.md', 'LICENSE'];
+    if (packageDefinition.library) requiredFiles.push('dist/index.js', 'dist/index.d.ts');
+    for (const requiredFile of requiredFiles) {
       if (!files.includes(requiredFile)) fail(`${packageDefinition.name} is missing ${requiredFile}`);
     }
     if (files.some((file) => /(?:^|\/)(?:src|test|tests)(?:\/|$)/.test(file))) {
@@ -118,15 +155,19 @@ try {
       fail(`${packageDefinition.name} contains compiled test artifacts`);
     }
 
-    for (const [field, target] of [
-      ['main', manifest.main],
-      ['types', manifest.types],
-      ['exports.import', manifest.exports?.['.']?.import],
-      ['exports.types', manifest.exports?.['.']?.types],
-    ]) {
-      if (typeof target !== 'string' || !existsSync(join(directory, target.replace(/^\.\//, '')))) {
-        fail(`${packageDefinition.name} has an invalid ${field} target`);
+    if (packageDefinition.library) {
+      for (const [field, target] of [
+        ['main', manifest.main],
+        ['types', manifest.types],
+        ['exports.import', manifest.exports?.['.']?.import],
+        ['exports.types', manifest.exports?.['.']?.types],
+      ]) {
+        if (typeof target !== 'string' || !existsSync(join(directory, target.replace(/^\.\//, '')))) {
+          fail(`${packageDefinition.name} has an invalid ${field} target`);
+        }
       }
+    } else if (Object.keys(manifest.exports ?? {}).length !== 0) {
+      fail(`${packageDefinition.name} must remain a binary-only package`);
     }
     if (packageDefinition.bin) {
       const target = manifest.bin?.[packageDefinition.bin];
@@ -139,17 +180,18 @@ try {
   const expectedCliVersion = installedVersions.get('@unkeep/cli');
   writeFileSync(
     join(consumerDirectory, 'smoke.mjs'),
-    `import { generateMasterKey } from '@unkeep/core';
+    `import * as core from '@unkeep/core';
+import { LocalOnlyAdapter, generateCodeVerifier } from '@unkeep/core/experimental';
 import { cleanRelayEndpoint, MemoryClientStorage } from '@unkeep/client';
-import { VERSION } from '@unkeep/cli';
 
-const key = generateMasterKey();
+const key = core.generateMasterKey();
 if (!(key instanceof Uint8Array) || key.byteLength !== 32) throw new Error('core import failed');
+if ('LocalOnlyAdapter' in core || 'generateCodeVerifier' in core) throw new Error('experimental core API leaked from package root');
+if (typeof LocalOnlyAdapter !== 'function' || generateCodeVerifier().length < 43) throw new Error('core experimental import failed');
 if (cleanRelayEndpoint('https://notes.example.com/path') !== 'https://notes.example.com') throw new Error('client import failed');
 const storage = new MemoryClientStorage();
 await storage.set('ready', true);
 if (await storage.get('ready') !== true) throw new Error('client storage failed');
-if (VERSION !== ${JSON.stringify(expectedCliVersion)}) throw new Error('CLI library version does not match its package');
 `,
   );
   run(node, ['smoke.mjs'], consumerDirectory);

@@ -1,9 +1,22 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, truncate, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import {
+  link,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  truncate,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { afterEach, expect, test } from 'vitest';
+import { afterEach, expect, test, vi } from 'vitest';
 import { startTestServer, type TestServer } from '@unkeep/server/test';
 import {
   approvePairingCode,
@@ -13,12 +26,21 @@ import {
   RelayClient,
   type RelaySession,
 } from '@unkeep/client';
-import { MAX_ATTACHMENT_SIZE, runCli, type CliInput, type CliOutput } from './cli.js';
+import { encryptNote, type NoteAttachment } from '@unkeep/core';
+import {
+  MAX_ATTACHMENT_SIZE,
+  MAX_STDIN_CONTENT_LENGTH,
+  runCli,
+  type CliInput,
+  type CliOutput,
+} from './cli.js';
 import { encodeVaultKey } from './config.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   await Promise.all(cleanups.splice(0).map(cleanup => cleanup()));
 });
 
@@ -46,6 +68,7 @@ async function firstDevice(relay: TestServer): Promise<{ session: RelaySession; 
   const provisioned = await keys.provisionFirstDevice(status.instanceId);
   const claimed = await relayClient.claimSetup(
     relay.setupToken,
+    status.instanceId,
     provisioned.deviceId,
     'CLI test owner',
   );
@@ -90,10 +113,17 @@ async function testContext(): Promise<{
 async function invoke(
   arguments_: string[],
   environment: Record<string, string>,
-  options: { stdin?: CliInput; now?: () => number; cwd?: string; configDir?: string } = {},
+  options: {
+    stdin?: CliInput;
+    now?: () => number;
+    cwd?: string;
+    configDir?: string;
+    stdoutIsTTY?: boolean;
+    stderrIsTTY?: boolean;
+  } = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-  const stdout = new Capture();
-  const stderr = new Capture();
+  const stdout = new Capture(options.stdoutIsTTY);
+  const stderr = new Capture(options.stderrIsTTY);
   const code = await runCli(arguments_, {
     environment,
     stdin: options.stdin ?? input(),
@@ -126,7 +156,12 @@ test('uses env-only auth for put, list, get, sync, filters, and stable JSON', as
 
   result = await invoke(['sync', '--json'], context.environment);
   expect(result.code).toBe(0);
-  expect(JSON.parse(result.stdout)).toEqual({ cursor: 1, pulled: 1, deleted: 0 });
+  expect(JSON.parse(result.stdout)).toEqual({
+    cursor: 1,
+    pulled: 1,
+    deleted: 0,
+    quarantined: 0,
+  });
 
   result = await invoke(['list', '--label', 'work', '--search', 'HELLO', '--json'], context.environment);
   expect(result.code).toBe(0);
@@ -147,6 +182,41 @@ test('uses env-only auth for put, list, get, sync, filters, and stable JSON', as
   const second = new EncryptedSync(context.session, context.masterKey, new MemoryClientStorage());
   const pulled = await second.pull();
   expect(pulled.notes.map(note => note.id).sort()).toEqual(['archived-note', 'cli-note']);
+});
+
+test('surfaces durable poison-note quarantine on JSON and implicit sync commands', async () => {
+  const context = await testContext();
+  const poisonId = 'cli-poison';
+  const poisonPlaintext = 'must-not-appear-in-cli-diagnostics';
+  const envelope = await encryptNote({
+    id: poisonId,
+    content: poisonPlaintext,
+    createdAt: 1,
+    updatedAt: 1,
+    pinned: false,
+    archived: false,
+  }, globalThis.crypto.getRandomValues(new Uint8Array(32)), {
+    ownerId: context.session.instanceId,
+    noteId: poisonId,
+  });
+  await new RelayClient(context.session.endpoint, context.session.credential).putNote(poisonId, {
+    mutationId: globalThis.crypto.randomUUID(),
+    baseRevision: 0,
+    envelope,
+    deleted: false,
+    deviceId: context.session.deviceId,
+  });
+
+  let result = await invoke(['sync', '--json'], context.environment);
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({ pulled: 0, deleted: 0, quarantined: 1 });
+  expect(result.stderr).toContain('1 remote note record is quarantined');
+  expect(result.stderr).not.toContain(poisonPlaintext);
+
+  result = await invoke(['list', '--json'], context.environment);
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual([]);
+  expect(result.stderr).toContain('1 remote note record is quarantined');
 });
 
 test('reads put content from stdin and sends failures only to stderr', async () => {
@@ -171,6 +241,42 @@ test('reads put content from stdin and sends failures only to stderr', async () 
   expect(result.stderr).toContain('Unknown command');
 });
 
+test('escapes terminal controls in interactive human output without changing JSON or piped output', async () => {
+  const context = await testContext();
+  const hostileTitle = 'status\u001b]52;c;Y2xpcGJvYXJk\u0007\u202Etxt.exe';
+  const hostileContent = 'first line\nsecond\tcolumn\u009b31m\u2066hidden\u2069';
+
+  let result = await invoke([
+    'put',
+    'hostile-terminal-note',
+    '--title',
+    hostileTitle,
+    '--content',
+    hostileContent,
+    '--json',
+  ], context.environment, { stdoutIsTTY: true, now: () => 350 });
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    title: hostileTitle,
+    content: hostileContent,
+  });
+
+  result = await invoke(['list'], context.environment, { stdoutIsTTY: true });
+  expect(result.stdout).toBe(
+    'hostile-terminal-note\t'
+    + String.raw`status\u{1b}]52;c;Y2xpcGJvYXJk\u{7}\u{202e}txt.exe`
+    + '\n',
+  );
+
+  result = await invoke(['get', 'hostile-terminal-note'], context.environment, { stdoutIsTTY: true });
+  expect(result.stdout).toBe(String.raw`first line\nsecond\tcolumn\u{9b}31m\u{2066}hidden\u{2069}` + '\n');
+
+  result = await invoke(['get', 'hostile-terminal-note'], context.environment);
+  expect(result.stdout).toBe(`${hostileContent}\n`);
+
+  result = await invoke(['get', 'hostile-terminal-note', '--json'], context.environment, { stdoutIsTTY: true });
+  expect(JSON.parse(result.stdout).content).toBe(hostileContent);
+});
+
 test('creates notes with generated IDs and deletes them with tombstones', async () => {
   const context = await testContext();
   let result = await invoke(['put', '--content', 'scratch entry', '--json'], context.environment, { now: () => 400 });
@@ -185,6 +291,28 @@ test('creates notes with generated IDs and deletes them with tombstones', async 
   const pipedId = result.stdout.trim();
   expect(pipedId).toMatch(/^[0-9a-f-]{36}$/);
 
+  const splitUnicode = Readable.from([
+    Buffer.from([0xf0, 0x9f]),
+    Buffer.from([0x8c, 0x8f]),
+  ]) as Readable & { isTTY?: boolean };
+  splitUnicode.isTTY = false;
+  result = await invoke(
+    ['put', 'split-unicode', '--json'],
+    context.environment,
+    { stdin: splitUnicode as CliInput, now: () => 401.5 },
+  );
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout).content).toBe('🌏');
+
+  result = await invoke(
+    ['put', 'oversized-stdin'],
+    context.environment,
+    { stdin: input('x'.repeat(MAX_STDIN_CONTENT_LENGTH + 1)), now: () => 401.75 },
+  );
+  expect(result.code).toBe(1);
+  expect(result.stdout).toBe('');
+  expect(result.stderr).toContain(`${MAX_STDIN_CONTENT_LENGTH}-character note limit`);
+
   result = await invoke(['delete', created.id, '--json'], context.environment, { now: () => 402 });
   expect(result).toEqual({ code: 0, stdout: `${JSON.stringify({ id: created.id, deleted: true })}\n`, stderr: '' });
 
@@ -197,13 +325,67 @@ test('creates notes with generated IDs and deletes them with tombstones', async 
   expect(result.stderr).toContain(`Note not found: ${created.id}`);
 
   result = await invoke(['list', '--json'], context.environment);
-  expect(JSON.parse(result.stdout).map((note: { id: string }) => note.id)).toEqual([pipedId]);
+  expect(JSON.parse(result.stdout).map((note: { id: string }) => note.id)).toEqual([
+    'split-unicode',
+    pipedId,
+  ]);
 
   // Another device sees the tombstone, not the deleted note.
   const second = new EncryptedSync(context.session, context.masterKey, new MemoryClientStorage());
   const pulled = await second.pull();
-  expect(pulled.notes.map(note => note.id)).toEqual([pipedId]);
+  expect(pulled.notes.map(note => note.id)).toEqual([pipedId, 'split-unicode']);
   expect(pulled.deletedIds).toContain(created.id);
+});
+
+test('round-trips the valid __proto__ note ID without corrupting the local cache', async () => {
+  const context = await testContext();
+  let result = await invoke(
+    ['put', '__proto__', '--content', 'prototype-safe note', '--json'],
+    context.environment,
+    { now: () => 425 },
+  );
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    id: '__proto__',
+    content: 'prototype-safe note',
+  });
+
+  result = await invoke(['get', '__proto__', '--json'], context.environment);
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    id: '__proto__',
+    content: 'prototype-safe note',
+  });
+
+  // A fresh CLI cache exercises remote-pull assignment as well as local put.
+  const secondDirectory = await mkdtemp(join(tmpdir(), 'unkeep-cli-prototype-cache-'));
+  cleanups.push(() => rm(secondDirectory, { recursive: true, force: true }));
+  const secondEnvironment = {
+    ...context.environment,
+    XDG_CONFIG_HOME: secondDirectory,
+  };
+  result = await invoke(['sync', '--json'], secondEnvironment);
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({ pulled: 1 });
+
+  result = await invoke(['list', '--json'], secondEnvironment);
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual([
+    expect.objectContaining({ id: '__proto__', content: 'prototype-safe note' }),
+  ]);
+
+  result = await invoke(['delete', '__proto__', '--json'], secondEnvironment, {
+    now: () => 426,
+  });
+  expect(result).toEqual({
+    code: 0,
+    stdout: `${JSON.stringify({ id: '__proto__', deleted: true })}\n`,
+    stderr: '',
+  });
+
+  result = await invoke(['list', '--json'], context.environment);
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual([]);
 });
 
 test('persists pulled record revisions across invocations before editing a remote note', async () => {
@@ -229,6 +411,160 @@ test('persists pulled record revisions across invocations before editing a remot
   expect(current.notes[0].content).toBe('edited by a later CLI process');
 });
 
+test('never sends a stored bearer credential to an endpoint-only override', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'unkeep-cli-endpoint-binding-'));
+  cleanups.push(() => rm(directory, { recursive: true, force: true }));
+  const configDirectory = join(directory, 'unkeep');
+  await mkdir(configDirectory, { recursive: true });
+  const storedCredential = 'stored-device-credential-must-not-leave';
+  const storedVaultKey = encodeVaultKey(new Uint8Array(32).fill(1));
+  await writeFile(join(configDirectory, 'config.json'), `${JSON.stringify({
+    endpoint: 'https://stored-relay.example',
+    credential: storedCredential,
+    vaultKey: storedVaultKey,
+    'unkeep-relay-session': {
+      endpoint: 'https://stored-relay.example',
+      instanceId: 'stored-instance',
+      deviceId: 'stored-device',
+      credential: storedCredential,
+    },
+  })}\n`);
+
+  const capturedAuthorization: Array<string | undefined> = [];
+  const capture = createServer((request, response) => {
+    capturedAuthorization.push(request.headers.authorization);
+    response.setHeader('content-type', 'application/json');
+    if (request.url === '/api/v1/status') {
+      response.end(JSON.stringify({
+        protocol: 2,
+        instanceId: 'capture-instance',
+        initialized: true,
+      }));
+    } else if (request.url === '/api/v1/vault') {
+      response.end(JSON.stringify({ vaultId: 'capture-instance' }));
+    } else if (request.url === '/api/v1/changes?since=0') {
+      response.end(JSON.stringify({ changes: [], cursor: 0 }));
+    } else {
+      response.statusCode = 404;
+      response.end(JSON.stringify({ error: 'not_found' }));
+    }
+  });
+  await new Promise<void>((resolve, reject) => {
+    capture.once('error', reject);
+    capture.listen(0, '127.0.0.1', resolve);
+  });
+  cleanups.push(() => new Promise<void>((resolve, reject) => {
+    capture.close(error => error ? reject(error) : resolve());
+  }));
+  const address = capture.address();
+  if (!address || typeof address === 'string') throw new Error('Capture server did not bind TCP');
+  const endpoint = `http://127.0.0.1:${address.port}`;
+
+  let result = await invoke(
+    ['list', '--endpoint', endpoint],
+    { XDG_CONFIG_HOME: directory },
+  );
+  expect(result.code).toBe(1);
+  expect(result.stdout).toBe('');
+  expect(result.stderr).toContain('Relay endpoint differs from the stored profile');
+  expect(capturedAuthorization).toEqual([]);
+
+  const explicitCredential = 'explicit-credential-for-capture';
+  result = await invoke(
+    [
+      'list',
+      '--endpoint',
+      endpoint,
+      '--credential',
+      explicitCredential,
+      '--vault-key',
+      encodeVaultKey(new Uint8Array(32).fill(2)),
+    ],
+    { XDG_CONFIG_HOME: directory },
+  );
+  expect(result.code).toBe(0);
+  expect(result.stderr).toBe('');
+  expect(capturedAuthorization.length).toBeGreaterThan(0);
+  expect(capturedAuthorization).not.toContain(`Device ${storedCredential}`);
+  expect(new Set(capturedAuthorization)).toEqual(new Set([`Device ${explicitCredential}`]));
+});
+
+test('applies an attachment-only tombstone on a later page before acknowledging it', async () => {
+  const context = await testContext();
+  const remote = new EncryptedSync(context.session, context.masterKey, new MemoryClientStorage());
+  const attachment = {
+    id: 'later-page-attachment',
+    name: 'later-page.txt',
+    mimeType: 'text/plain',
+    size: 4,
+  };
+  await remote.uploadAttachment('attachment-owner', attachment, new TextEncoder().encode('data'));
+  await remote.push({
+    id: 'attachment-owner',
+    content: 'attachment metadata must follow its tombstone',
+    createdAt: 1,
+    updatedAt: 1,
+    pinned: false,
+    archived: false,
+    images: [attachment],
+  });
+
+  let result = await invoke(['sync', '--json'], context.environment);
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({ cursor: 2, pulled: 1 });
+
+  const realFetch = globalThis.fetch.bind(globalThis);
+  const requestedCursors: number[] = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const requestUrl = new URL(input instanceof Request ? input.url : input.toString());
+    if (requestUrl.pathname !== '/api/v1/changes') return realFetch(input, init);
+    const since = Number(requestUrl.searchParams.get('since'));
+    requestedCursors.push(since);
+    if (since === 2) {
+      return Response.json({
+        changes: [{
+          kind: 'attachment',
+          id: 'unrelated-page-boundary',
+          noteId: 'unrelated-owner',
+          deleted: false,
+          revision: 3,
+        }],
+        cursor: 3,
+      });
+    }
+    if (since === 3) {
+      return Response.json({
+        changes: [{
+          kind: 'attachment',
+          id: attachment.id,
+          noteId: 'attachment-owner',
+          deleted: true,
+          revision: 4,
+        }],
+        cursor: 4,
+      });
+    }
+    return Response.json({ changes: [], cursor: since });
+  });
+
+  result = await invoke(['sync', '--json'], context.environment);
+  expect(result).toEqual({
+    code: 0,
+    stdout: `${JSON.stringify({
+      cursor: 4,
+      pulled: 0,
+      deleted: 0,
+      quarantined: 0,
+    })}\n`,
+    stderr: '',
+  });
+  expect(requestedCursors).toEqual([2, 3, 4]);
+
+  result = await invoke(['clip', '--list', '--json'], context.environment);
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual([]);
+});
+
 test('login pairs as a normal device and persists reusable state', async () => {
   const context = await testContext();
   const stdout = new Capture(true);
@@ -242,6 +578,8 @@ test('login pairs as a normal device and persists reusable state', async () => {
   });
   expect(code).toBe(0);
   expect(stderr.value).toMatch(/Pairing code: [A-Z2-9]{8}/);
+  expect(stderr.value).toMatch(/Pairing fingerprint: [A-HJ-NP-Z2-9]{4}(?:-[A-HJ-NP-Z2-9]{4}){3}/);
+  expect(stderr.value).toContain('Verify the fingerprint exactly matches the approving device.');
   expect(JSON.parse(stdout.value)).toMatchObject({ endpoint: context.relay.endpoint.replace('/api/v1', ''), paired: true });
 
   const persisted = JSON.parse(await readFile(join(context.directory, 'unkeep', 'config.json'), 'utf8'));
@@ -252,6 +590,61 @@ test('login pairs as a normal device and persists reusable state', async () => {
   const reused = await invoke(['sync', '--json'], { XDG_CONFIG_HOME: context.directory });
   expect(reused.code).toBe(0);
   expect(reused.stderr).toBe('');
+});
+
+test('login preserves atomic local access and resumes after a lost consume response', async () => {
+  const context = await testContext();
+  const stdout = new Capture(true);
+  const stderr = new Capture(true);
+  const realFetch = globalThis.fetch.bind(globalThis);
+  let loseConsumeResponse = true;
+  let loseActiveDeviceCheck = true;
+  const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (loseConsumeResponse && url.endsWith('/consume')) {
+      loseConsumeResponse = false;
+      const accepted = await realFetch(input, init);
+      await accepted.arrayBuffer();
+      throw new TypeError('consume response lost');
+    }
+    if (loseActiveDeviceCheck && url.endsWith('/devices')) {
+      loseActiveDeviceCheck = false;
+      throw new TypeError('verification connection lost');
+    }
+    return realFetch(input, init);
+  });
+
+  const code = await runCli(['login', '--endpoint', context.relay.endpoint, '--json'], {
+    environment: { XDG_CONFIG_HOME: context.directory },
+    stdin: input('', true),
+    stdout,
+    stderr,
+    onPairingCode: pairingCode => approvePairingCode(
+      context.session,
+      pairingCode,
+      context.masterKey,
+    ),
+  });
+  expect(code).toBe(0);
+  expect(stderr.value).toContain(
+    'Pairing is saved locally; server finalization will retry on the next command.',
+  );
+
+  const path = join(context.directory, 'unkeep', 'config.json');
+  let persisted = JSON.parse(await readFile(path, 'utf8'));
+  expect(persisted.vaultKey).toBe(encodeVaultKey(context.masterKey));
+  expect(persisted.credential).toBeTruthy();
+  expect(persisted['unkeep-relay-session']).toMatchObject({
+    credential: persisted.credential,
+    pendingPairingRequestId: expect.any(String),
+  });
+
+  fetchSpy.mockRestore();
+  const resumed = await invoke(['sync', '--json'], { XDG_CONFIG_HOME: context.directory });
+  expect(resumed.code).toBe(0);
+  expect(resumed.stderr).toBe('');
+  persisted = JSON.parse(await readFile(path, 'utf8'));
+  expect(persisted['unkeep-relay-session']).not.toHaveProperty('pendingPairingRequestId');
 });
 
 test('login refuses to prompt when stdio is not a TTY', async () => {
@@ -266,9 +659,11 @@ test('login refuses to prompt when stdio is not a TTY', async () => {
 test('provisions env-only agents, lists credentials, and revokes access on the next request', async () => {
   const context = await testContext();
   const freshConfig = await mkdtemp(join(tmpdir(), 'unkeep-cli-agent-'));
+  const readOnlyConfig = await mkdtemp(join(tmpdir(), 'unkeep-cli-read-only-agent-'));
   cleanups.push(() => rm(freshConfig, { recursive: true, force: true }));
+  cleanups.push(() => rm(readOnlyConfig, { recursive: true, force: true }));
 
-  let result = await invoke(['provision', '--name', 'JSON agent', '--json'], context.environment);
+  let result = await invoke(['provision', '--name', 'JSON agent', '--scope', 'read-write', '--json'], context.environment);
   expect(result.code).toBe(0);
   expect(result.stderr).toBe('');
   const bundle = JSON.parse(result.stdout) as Record<string, string>;
@@ -276,6 +671,7 @@ test('provisions env-only agents, lists credentials, and revokes access on the n
     UNKEEP_ENDPOINT: new URL(context.relay.endpoint).origin,
     UNKEEP_CREDENTIAL: expect.any(String),
     UNKEEP_VAULT_KEY: encodeVaultKey(context.masterKey),
+    UNKEEP_SCOPE: 'read-write',
   });
 
   result = await invoke(['provision', '--name', 'Env agent'], context.environment);
@@ -286,11 +682,14 @@ test('provisions env-only agents, lists credentials, and revokes access on the n
     'UNKEEP_ENDPOINT',
     'UNKEEP_CREDENTIAL',
     'UNKEEP_VAULT_KEY',
+    'UNKEEP_SCOPE',
   ]);
   expect(Object.fromEntries(envLines.map(line => line.split('=', 2)))).toMatchObject({
     UNKEEP_ENDPOINT: bundle.UNKEEP_ENDPOINT,
     UNKEEP_VAULT_KEY: bundle.UNKEEP_VAULT_KEY,
+    UNKEEP_SCOPE: 'read-only',
   });
+  const readOnlyBundle = Object.fromEntries(envLines.map(line => line.split('=', 2)));
 
   // The new process receives no owner config or pairing state, only the emitted bundle.
   result = await invoke(
@@ -306,6 +705,27 @@ test('provisions env-only agents, lists credentials, and revokes access on the n
   expect(result.code).toBe(0);
   expect(JSON.parse(result.stdout)).toMatchObject({ id: 'agent-note', content: 'written non-interactively' });
 
+  result = await invoke(['get', 'agent-note', '--json'], readOnlyBundle, { configDir: readOnlyConfig });
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({ id: 'agent-note', content: 'written non-interactively' });
+
+  result = await invoke(
+    ['put', 'read-only-rejection', '--content', 'must not be written', '--json'],
+    readOnlyBundle,
+    { configDir: readOnlyConfig },
+  );
+  expect(result.code).toBe(1);
+  expect(result.stdout).toBe('');
+  expect(result.stderr).toContain('service_credential_read_only');
+
+  result = await invoke(
+    ['provision', '--name', 'Invalid agent', '--scope', 'admin', '--json'],
+    context.environment,
+  );
+  expect(result.code).toBe(1);
+  expect(result.stdout).toBe('');
+  expect(result.stderr).toContain('--scope expects read-only or read-write');
+
   result = await invoke(['credentials', 'list'], context.environment);
   expect(result.code).toBe(0);
   expect(result.stdout).toContain('\tdevice\tCLI test owner\t');
@@ -318,12 +738,14 @@ test('provisions env-only agents, lists credentials, and revokes access on the n
     id: string;
     name: string;
     kind: 'device' | 'service';
+    scope?: 'read-only' | 'read-write';
     createdAt?: string;
     revokedAt: string | null;
   }>;
   expect(credentials).toEqual(expect.arrayContaining([
     expect.objectContaining({ name: 'CLI test owner', kind: 'device', revokedAt: null }),
-    expect.objectContaining({ name: 'JSON agent', kind: 'service', createdAt: expect.any(String), revokedAt: null }),
+    expect.objectContaining({ name: 'JSON agent', kind: 'service', scope: 'read-write', createdAt: expect.any(String), revokedAt: null }),
+    expect.objectContaining({ name: 'Env agent', kind: 'service', scope: 'read-only', createdAt: expect.any(String), revokedAt: null }),
   ]));
   const service = credentials.find(credential => credential.name === 'JSON agent');
   expect(service).toBeDefined();
@@ -382,6 +804,7 @@ test('clips binary files and pastes the latest or a selected clip on a second cl
   expect(result).toEqual({ code: 0, stdout: 'payload.bin\n', stderr: '' });
   expect(createHash('sha256').update(await readFile(join(destination, 'payload.bin'))).digest('hex'))
     .toBe(createHash('sha256').update(firstBytes).digest('hex'));
+  expect((await stat(join(destination, 'payload.bin'))).mode & 0o777).toBe(0o600);
 
   result = await invoke(['paste'], secondEnvironment, { cwd: destination });
   expect(result).toEqual({ code: 0, stdout: 'latest.txt\n', stderr: '' });
@@ -398,6 +821,246 @@ test('clips binary files and pastes the latest or a selected clip on a second cl
   result = await invoke(['paste', firstId, '--force'], secondEnvironment, { cwd: destination });
   expect(result.code).toBe(0);
   expect(await readFile(join(destination, 'payload.bin'))).toEqual(Buffer.from(firstBytes));
+  expect((await stat(join(destination, 'payload.bin'))).mode & 0o777).toBe(0o600);
+
+  const symlinkTarget = join(destination, 'symlink-target');
+  await writeFile(symlinkTarget, 'must remain unchanged');
+  await unlink(join(destination, 'latest.txt'));
+  await symlink(symlinkTarget, join(destination, 'latest.txt'));
+  result = await invoke(['paste', latestClip.id, '--force'], secondEnvironment, { cwd: destination });
+  expect(result.code).toBe(1);
+  expect(result.stderr).toContain('Refusing to replace unsafe destination latest.txt');
+  expect(await readFile(symlinkTarget, 'utf8')).toBe('must remain unchanged');
+
+  const hardlinkTarget = join(destination, 'hardlink-target');
+  await writeFile(hardlinkTarget, 'shared inode must remain unchanged');
+  await unlink(join(destination, 'payload.bin'));
+  await link(hardlinkTarget, join(destination, 'payload.bin'));
+  result = await invoke(['paste', firstId, '--force'], secondEnvironment, { cwd: destination });
+  expect(result.code).toBe(1);
+  expect(result.stderr).toContain('Refusing to replace unsafe destination payload.bin');
+  expect(await readFile(hardlinkTarget, 'utf8')).toBe('shared inode must remain unchanged');
+});
+
+test.each([
+  ['attachment acknowledgement', '/api/v1/attachments/'],
+  ['Clipboard note acknowledgement', '/api/v1/notes/unkeep-clipboard'],
+])('recovers a clip after losing the %s response', async (_description, targetPath) => {
+  const context = await testContext();
+  const source = join(context.directory, 'interrupted.bin');
+  const bytes = new TextEncoder().encode('survives a lost response');
+  await writeFile(source, bytes);
+  const originalFetch = globalThis.fetch;
+  let responseDropped = false;
+
+  vi.stubGlobal('fetch', async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    const url = typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.href
+        : input.url;
+    const response = await originalFetch(input, init);
+    if (
+      !responseDropped
+      && (init?.method ?? (input instanceof Request ? input.method : 'GET')) === 'PUT'
+      && new URL(url).pathname.startsWith(targetPath)
+    ) {
+      responseDropped = true;
+      throw new TypeError('simulated lost mutation response');
+    }
+    return response;
+  });
+
+  const interrupted = await invoke(
+    ['clip', source, '--json'],
+    context.environment,
+    { now: () => 700 },
+  );
+  expect(interrupted.code).toBe(1);
+  expect(interrupted.stdout).toBe('');
+  expect(responseDropped).toBe(true);
+
+  vi.stubGlobal('fetch', originalFetch);
+  const recovered = await invoke(
+    ['clip', '--list', '--json'],
+    context.environment,
+  );
+  expect(recovered.code).toBe(0);
+  expect(recovered.stderr).toContain('Recovered interrupted clip');
+  const listed = JSON.parse(recovered.stdout) as NoteAttachment[];
+  expect(listed).toHaveLength(1);
+  expect(listed[0]).toMatchObject({
+    name: 'interrupted.bin',
+    size: bytes.byteLength,
+  });
+
+  const reader = new EncryptedSync(
+    context.session,
+    context.masterKey,
+    new MemoryClientStorage(),
+  );
+  const pulled = await reader.pull();
+  expect(pulled.notes[0].images?.map(value => value.id)).toEqual([listed[0].id]);
+  expect(pulled.attachments).toHaveLength(1);
+  expect(pulled.attachments[0].bytes).toEqual(bytes);
+  expect(
+    await readdir(join(context.directory, 'unkeep', 'clip-staging')),
+  ).toEqual([]);
+});
+
+test('a missing private stage flushes a pending note before tombstoning its attachment', async () => {
+  const context = await testContext();
+  const source = join(context.directory, 'missing-stage.txt');
+  await writeFile(source, 'bytes that cannot be recovered');
+  const originalFetch = globalThis.fetch;
+  let noteRequestBlocked = false;
+
+  vi.stubGlobal('fetch', async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    const url = typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.href
+        : input.url;
+    if (
+      !noteRequestBlocked
+      && init?.method === 'PUT'
+      && new URL(url).pathname === '/api/v1/notes/unkeep-clipboard'
+    ) {
+      noteRequestBlocked = true;
+      throw new TypeError('simulated crash before note upload');
+    }
+    return originalFetch(input, init);
+  });
+
+  const interrupted = await invoke(['clip', source], context.environment);
+  expect(interrupted.code).toBe(1);
+  expect(noteRequestBlocked).toBe(true);
+
+  const configPath = join(context.directory, 'unkeep', 'config.json');
+  const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
+  const pending = Object.entries(config).find(([key]) =>
+    key.startsWith('unkeep-cli-pending-clip:')
+  )?.[1] as {
+    attachment: NoteAttachment;
+    staged: { fileName: string };
+  };
+  expect(pending).toBeDefined();
+  await unlink(join(
+    context.directory,
+    'unkeep',
+    'clip-staging',
+    pending.staged.fileName,
+  ));
+
+  vi.stubGlobal('fetch', originalFetch);
+  const recovered = await invoke(
+    ['clip', '--list', '--json'],
+    context.environment,
+  );
+  expect(recovered.code).toBe(0);
+  expect(JSON.parse(recovered.stdout)).toEqual([]);
+  expect(recovered.stderr).toContain('Discarded interrupted clip');
+
+  const reader = new EncryptedSync(
+    context.session,
+    context.masterKey,
+    new MemoryClientStorage(),
+  );
+  const pulled = await reader.pull();
+  expect(pulled.notes[0].images).toBeUndefined();
+  expect(pulled.attachments).toEqual([]);
+  expect(pulled.deletedAttachments).toContainEqual({
+    noteId: 'unkeep-clipboard',
+    attachmentId: pending.attachment.id,
+  });
+});
+
+test('merges a concurrent Clipboard edit after its first note push conflicts', async () => {
+  const context = await testContext();
+  const source = join(context.directory, 'local.txt');
+  await writeFile(source, 'local bytes');
+  const originalFetch = globalThis.fetch;
+  const other = new EncryptedSync(
+    context.session,
+    context.masterKey,
+    new MemoryClientStorage(),
+  );
+  const otherAttachment: NoteAttachment = {
+    id: 'other-clip',
+    name: 'other.txt',
+    mimeType: 'text/plain',
+    size: 11,
+  };
+  let concurrentWriteInjected = false;
+
+  vi.stubGlobal('fetch', async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    const url = typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.href
+        : input.url;
+    const response = await originalFetch(input, init);
+    if (
+      !concurrentWriteInjected
+      && init?.method === 'PUT'
+      && new URL(url).pathname.startsWith('/api/v1/attachments/')
+    ) {
+      concurrentWriteInjected = true;
+      await other.uploadAttachment(
+        'unkeep-clipboard',
+        otherAttachment,
+        new TextEncoder().encode('other bytes'),
+      );
+      await other.push({
+        id: 'unkeep-clipboard',
+        title: 'Clipboard from another device',
+        content: 'Concurrent fields must survive.',
+        createdAt: 400,
+        updatedAt: 800,
+        pinned: true,
+        archived: false,
+        labels: ['remote'],
+        images: [otherAttachment],
+      });
+    }
+    return response;
+  });
+
+  const result = await invoke(
+    ['clip', source, '--json'],
+    context.environment,
+    { now: () => 500 },
+  );
+  expect(result.code).toBe(0);
+  expect(concurrentWriteInjected).toBe(true);
+  const localAttachment = JSON.parse(result.stdout) as NoteAttachment;
+
+  vi.stubGlobal('fetch', originalFetch);
+  const reader = new EncryptedSync(
+    context.session,
+    context.masterKey,
+    new MemoryClientStorage(),
+  );
+  const pulled = await reader.pull();
+  expect(pulled.notes[0]).toMatchObject({
+    title: 'Clipboard from another device',
+    content: 'Concurrent fields must survive.',
+    pinned: true,
+  });
+  expect(pulled.notes[0].images?.map(value => value.id)).toEqual([
+    otherAttachment.id,
+    localAttachment.id,
+  ]);
+  expect(pulled.attachments).toHaveLength(2);
 });
 
 test('rejects an oversized clip before reading or uploading it', async () => {
@@ -412,5 +1075,14 @@ test('rejects an oversized clip before reading or uploading it', async () => {
   expect(result.stderr).toContain('oversized.bin is too large. Attachments must be 25 MB or smaller.');
 
   const reader = new EncryptedSync(context.session, context.masterKey, new MemoryClientStorage());
+  await expect(reader.pull()).resolves.toMatchObject({ notes: [], attachments: [] });
+
+  const target = join(context.directory, 'private-target.txt');
+  const symbolicLink = join(context.directory, 'linked.txt');
+  await writeFile(target, 'must not be followed');
+  await symlink(target, symbolicLink);
+  const linked = await invoke(['clip', symbolicLink], context.environment);
+  expect(linked.code).toBe(1);
+  expect(linked.stderr).toContain('Refusing to clip a symbolic link');
   await expect(reader.pull()).resolves.toMatchObject({ notes: [], attachments: [] });
 });

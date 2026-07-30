@@ -14,7 +14,9 @@ pnpm --filter @unkeep/web build                                          # outpu
 
 # Relay server serves the built PWA + sync API from one process:
 cd apps/server
-UNKEEP_SETUP_TOKEN=test-setup-token-12345 UNKEEP_DATA_DIR=/tmp/unkeep-data PORT=3111 node src/index.mjs
+UNKEEP_SETUP_TOKEN=test-setup-token-12345678901234567890 \
+UNKEEP_RECOVERY_TOKEN=test-recovery-token-1234567890123456 \
+UNKEEP_DATA_DIR=/tmp/unkeep-data PORT=3111 node src/index.mjs
 ```
 
 `/api/v1/status` returns `{"initialized":false}` on a fresh data dir. Unknown

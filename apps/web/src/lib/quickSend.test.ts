@@ -6,6 +6,19 @@ import {
   encodeQuickSendNote,
 } from './quickSend.js';
 
+async function encodeUnchecked(content: string): Promise<string> {
+  const compressed = new Uint8Array(await new Response(
+    new Blob([new TextEncoder().encode(content)])
+      .stream()
+      .pipeThrough(new CompressionStream('deflate-raw')),
+  ).arrayBuffer());
+  let binary = '';
+  for (let offset = 0; offset < compressed.length; offset += 0x8000) {
+    binary += String.fromCharCode(...compressed.subarray(offset, offset + 0x8000));
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
 describe('encodeNote/decodeNote', () => {
   it('roundtrips simple text', async () => {
     const content = 'Hello, World!';
@@ -56,6 +69,12 @@ describe('encodeNote/decodeNote', () => {
     // Should not throw
     const encoded = await encodeNote(content);
     expect(encoded).toBeTruthy();
+  });
+
+  it('stops a compressed fragment once decoded data exceeds the share budget', async () => {
+    const encoded = await encodeUnchecked('x'.repeat(102_401));
+    await expect(decodeQuickSendNote(encoded))
+      .rejects.toThrow('Decoded note exceeds the 100KB Quick Send limit');
   });
 
   it('handles special characters', async () => {
@@ -126,5 +145,57 @@ describe('encodeNote/decodeNote', () => {
       content: '',
       attachments: [{ name: 'huge.bin', mimeType: 'application/octet-stream', size: bytes.length, bytes }],
     })).rejects.toThrow('too large');
+  });
+
+  it('rejects oversized structured collections before rendering a received note', async () => {
+    const encoded = await encodeNote(JSON.stringify({
+      format: 'unkeep-quick-send',
+      version: 1,
+      content: '',
+      labels: Array.from({ length: 1_001 }, (_, index) => `l${index}`),
+    }));
+
+    await expect(decodeQuickSendNote(encoded))
+      .rejects.toThrow('Invalid or unsupported Quick Send note');
+    await expect(encodeQuickSendNote({
+      content: '',
+      labels: Array.from({ length: 1_001 }, (_, index) => `l${index}`),
+    })).rejects.toThrow('Invalid Quick Send note');
+  });
+
+  it('rejects duplicate or route-unsafe checklist identities from a shared URL', async () => {
+    for (const checkboxes of [
+      [
+        { id: 'same', text: 'one', checked: false },
+        { id: 'same', text: 'two', checked: true },
+      ],
+      [{ id: '../unsafe', text: 'one', checked: false }],
+    ]) {
+      const encoded = await encodeNote(JSON.stringify({
+        format: 'unkeep-quick-send',
+        version: 1,
+        content: '',
+        checkboxes,
+      }));
+      await expect(decodeQuickSendNote(encoded))
+        .rejects.toThrow('Invalid or unsupported Quick Send note');
+    }
+  });
+
+  it('rejects impossible attachment metadata before decoding attachment bytes', async () => {
+    const encoded = await encodeNote(JSON.stringify({
+      format: 'unkeep-quick-send',
+      version: 1,
+      content: '',
+      attachments: [{
+        name: 'oversized.bin',
+        mimeType: 'application/octet-stream',
+        size: 25 * 1024 * 1024 + 1,
+        dataBase64: '',
+      }],
+    }));
+
+    await expect(decodeQuickSendNote(encoded))
+      .rejects.toThrow('Invalid or unsupported Quick Send note');
   });
 });

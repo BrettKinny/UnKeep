@@ -7,7 +7,7 @@
     type ImportedAttachment,
     type ImportPreview,
   } from '$lib/keepImporter';
-  import { parseVaultExport } from '$lib/vaultExport';
+  import { isVaultExportFile, parseVaultExport, readVaultExportFile } from '$lib/vaultExport';
   import { noteStore } from '$lib/noteStore.svelte';
   import { toastStore } from '$lib/toast.svelte';
   import type { Note } from '@unkeep/core';
@@ -67,19 +67,15 @@
   async function handleFiles(files: FileList | File[]) {
     const fileArray = Array.from(files);
     try {
-      if (fileArray.length === 1 && fileArray[0].name.toLowerCase().endsWith('.json')) {
-        const serialized = await fileArray[0].text();
-        let candidate: unknown;
-        try { candidate = JSON.parse(serialized); } catch { candidate = null; }
-        if (candidate && typeof candidate === 'object' && 'format' in candidate && candidate.format === 'unkeep-vault') {
-          const restored = parseVaultExport(serialized);
-          importNotes = restored.notes;
-          importAttachments = restored.attachments;
-          preview = summarizeImport(restored.notes);
-          importSource = 'UnKeep backup';
-          step = 'preview';
-          return;
-        }
+      if (fileArray.length === 1 && await isVaultExportFile(fileArray[0])) {
+        const serialized = await readVaultExportFile(fileArray[0]);
+        const restored = parseVaultExport(serialized);
+        importNotes = restored.notes;
+        importAttachments = restored.attachments;
+        preview = summarizeImport(restored.notes);
+        importSource = 'UnKeep backup';
+        step = 'preview';
+        return;
       }
       importSource = 'Google Keep';
       if (fileArray.length === 1 && fileArray[0].name.endsWith('.zip')) {

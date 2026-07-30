@@ -1,13 +1,14 @@
-import type { ChecklistItem, NoteColor } from '@unkeep/core';
+import {
+  normalizeNoteRecord,
+  type ChecklistItem,
+  type Note,
+  type NoteColor,
+} from '@unkeep/core';
 
 const MAX_SHARE_BYTES = 102_400;
-const MAX_DECODED_BYTES = 1_048_576;
+const MAX_DECODED_BYTES = MAX_SHARE_BYTES;
 const QUICK_SEND_FORMAT = 'unkeep-quick-send';
 const QUICK_SEND_VERSION = 1;
-const noteColors = new Set<NoteColor>([
-  'default', 'red', 'orange', 'yellow', 'green', 'teal', 'blue',
-  'purple', 'pink', 'brown', 'gray',
-]);
 
 export interface QuickSendNote {
   version: typeof QUICK_SEND_VERSION;
@@ -83,17 +84,26 @@ async function compressText(content: string): Promise<string> {
 
   const stream = new CompressionStream('deflate-raw');
   const writer = stream.writable.getWriter();
-  void writer.write(data);
-  void writer.close();
+  const writing = writer.write(data).then(() => writer.close());
+  // Attach a rejection observer immediately; the reader may fail or cancel
+  // before this promise is awaited.
+  void writing.catch(() => undefined);
 
   const reader = stream.readable.getReader();
   const chunks: Uint8Array[] = [];
   let totalLength = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    totalLength += value.length;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      totalLength += value.length;
+    }
+    await writing;
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    await writing.catch(() => undefined);
+    throw error;
   }
 
   const compressed = new Uint8Array(totalLength);
@@ -115,21 +125,28 @@ async function decompressText(encoded: string): Promise<string> {
   const compressed = base64UrlToBytes(encoded);
   const stream = new DecompressionStream('deflate-raw');
   const writer = stream.writable.getWriter();
-  void writer.write(compressed);
-  void writer.close();
+  const writing = writer.write(compressed).then(() => writer.close());
+  void writing.catch(() => undefined);
 
   const reader = stream.readable.getReader();
   const chunks: Uint8Array[] = [];
   let totalLength = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    totalLength += value.length;
-    if (totalLength > MAX_DECODED_BYTES) {
-      await reader.cancel();
-      throw new Error('Decoded note exceeds 1MB limit — the URL may be malicious');
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalLength += value.length;
+      if (totalLength > MAX_DECODED_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error('Decoded note exceeds the 100KB Quick Send limit');
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
+    await writing;
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    await writing.catch(() => undefined);
+    throw error;
   }
 
   const data = new Uint8Array(totalLength);
@@ -145,16 +162,36 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function normalizeQuickSendFields(
+  value: Record<string, unknown>,
+  attachments: readonly Pick<SerializedQuickSendAttachment, 'name' | 'mimeType' | 'size'>[] | undefined,
+): Note {
+  return normalizeNoteRecord({
+    id: 'quick_send_preview',
+    content: value.content,
+    createdAt: 0,
+    updatedAt: 0,
+    ...(value.title !== undefined ? { title: value.title } : {}),
+    ...(value.checkboxes !== undefined ? { checkboxes: value.checkboxes } : {}),
+    ...(value.labels !== undefined ? { labels: value.labels } : {}),
+    ...(value.color !== undefined ? { color: value.color } : {}),
+    ...(attachments !== undefined
+      ? {
+          images: attachments.map((attachment, index) => ({
+            id: `quick_send_attachment_${index}`,
+            name: attachment.name,
+            mimeType: attachment.mimeType || 'application/octet-stream',
+            size: attachment.size,
+          })),
+        }
+      : {}),
+  });
+}
+
 function parseEnvelope(value: unknown): QuickSendNote {
   if (!isRecord(value)
     || value.format !== QUICK_SEND_FORMAT
     || value.version !== QUICK_SEND_VERSION
-    || typeof value.content !== 'string'
-    || (value.title !== undefined && typeof value.title !== 'string')
-    || (value.labels !== undefined
-      && (!Array.isArray(value.labels) || !value.labels.every(label => typeof label === 'string')))
-    || (value.color !== undefined
-      && (typeof value.color !== 'string' || !noteColors.has(value.color as NoteColor)))
     || (value.attachments !== undefined
       && (!Array.isArray(value.attachments)
         || value.attachments.length > 20
@@ -169,16 +206,19 @@ function parseEnvelope(value: unknown): QuickSendNote {
           && Number.isSafeInteger(attachment.size)
           && attachment.size >= 0
           && typeof attachment.dataBase64 === 'string')))
-    || (value.checkboxes !== undefined
-      && (!Array.isArray(value.checkboxes) || !value.checkboxes.every(item =>
-        isRecord(item)
-        && typeof item.id === 'string'
-        && typeof item.text === 'string'
-        && typeof item.checked === 'boolean')))) {
+  ) {
     throw new Error('Invalid or unsupported Quick Send note');
   }
 
-  const attachments = (value.attachments as SerializedQuickSendAttachment[] | undefined)?.map(attachment => {
+  const serializedAttachments = value.attachments as SerializedQuickSendAttachment[] | undefined;
+  let normalized: Note;
+  try {
+    normalized = normalizeQuickSendFields(value, serializedAttachments);
+  } catch {
+    throw new Error('Invalid or unsupported Quick Send note');
+  }
+
+  const attachments = serializedAttachments?.map(attachment => {
     let bytes: Uint8Array<ArrayBuffer>;
     try {
       bytes = base64ToBytes(attachment.dataBase64);
@@ -198,11 +238,11 @@ function parseEnvelope(value: unknown): QuickSendNote {
 
   return {
     version: QUICK_SEND_VERSION,
-    ...(value.title !== undefined ? { title: value.title as string } : {}),
-    content: value.content,
-    ...(value.checkboxes !== undefined ? { checkboxes: value.checkboxes as ChecklistItem[] } : {}),
-    ...(value.labels !== undefined ? { labels: value.labels as string[] } : {}),
-    ...(value.color !== undefined ? { color: value.color as NoteColor } : {}),
+    ...(normalized.title !== undefined ? { title: normalized.title } : {}),
+    content: normalized.content,
+    ...(normalized.checkboxes !== undefined ? { checkboxes: normalized.checkboxes } : {}),
+    ...(normalized.labels !== undefined ? { labels: normalized.labels } : {}),
+    ...(normalized.color !== undefined ? { color: normalized.color } : {}),
     ...(attachments?.length ? { attachments } : {}),
   };
 }
@@ -233,14 +273,23 @@ export async function encodeQuickSendNote(note: QuickSendDraft): Promise<string>
       dataBase64: bytesToBase64(attachment.bytes),
     };
   });
+  let normalized: Note;
+  try {
+    normalized = normalizeQuickSendFields(
+      note as unknown as Record<string, unknown>,
+      attachments,
+    );
+  } catch {
+    throw new Error('Invalid Quick Send note');
+  }
   const envelope: QuickSendEnvelope = {
     format: QUICK_SEND_FORMAT,
     version: QUICK_SEND_VERSION,
-    ...(note.title ? { title: note.title } : {}),
-    content: note.content,
-    ...(note.checkboxes?.length ? { checkboxes: note.checkboxes } : {}),
-    ...(note.labels?.length ? { labels: note.labels } : {}),
-    ...(note.color ? { color: note.color } : {}),
+    ...(normalized.title ? { title: normalized.title } : {}),
+    content: normalized.content,
+    ...(normalized.checkboxes?.length ? { checkboxes: normalized.checkboxes } : {}),
+    ...(normalized.labels?.length ? { labels: normalized.labels } : {}),
+    ...(normalized.color ? { color: normalized.color } : {}),
     ...(attachments?.length ? { attachments } : {}),
   };
   return compressText(JSON.stringify(envelope));

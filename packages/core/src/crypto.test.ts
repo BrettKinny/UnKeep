@@ -13,6 +13,8 @@ import {
   recoverMasterKey,
   unwrapMasterKeyForDevice,
   wrapMasterKeyForDevice,
+  type EncryptedEnvelopeV1,
+  type NoteEncryptionContext,
 } from './crypto.js';
 
 const note: Note = {
@@ -25,12 +27,45 @@ const note: Note = {
   color: 'teal',
 };
 
+function toBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+async function encryptRawNote(
+  value: unknown,
+  masterKey: Uint8Array<ArrayBuffer>,
+  context: NoteEncryptionContext,
+): Promise<EncryptedEnvelopeV1> {
+  const key = await crypto.subtle.importKey('raw', masterKey, { name: 'AES-GCM' }, false, ['encrypt']);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const additionalData = new TextEncoder().encode(
+    `unkeep:1:note:${context.ownerId}:${context.noteId}:${context.noteId}`,
+  );
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv, additionalData, tagLength: 128 },
+    key,
+    new TextEncoder().encode(JSON.stringify(value)),
+  );
+  return {
+    version: 1,
+    algorithm: 'AES-GCM',
+    keyId: context.noteId,
+    iv: toBase64(iv),
+    ciphertext: toBase64(new Uint8Array(ciphertext)),
+  };
+}
+
 describe('E2EE envelopes', () => {
   it('round trips a note and authenticates its owner and id', async () => {
     const masterKey = generateMasterKey();
     const envelope = await encryptNote(note, masterKey, { ownerId: 'owner-1', noteId: note.id });
 
-    await expect(decryptNote(envelope, masterKey, { ownerId: 'owner-1', noteId: note.id })).resolves.toEqual(note);
+    await expect(decryptNote(envelope, masterKey, { ownerId: 'owner-1', noteId: note.id })).resolves.toEqual({
+      ...note,
+      schemaVersion: 1,
+    });
     await expect(decryptNote(envelope, masterKey, { ownerId: 'owner-2', noteId: note.id })).rejects.toThrow();
   });
 
@@ -40,6 +75,47 @@ describe('E2EE envelopes', () => {
     const tampered = { ...envelope, ciphertext: `${envelope.ciphertext.slice(0, -2)}AA` };
 
     await expect(decryptNote(tampered, masterKey, { ownerId: 'owner-1', noteId: note.id })).rejects.toThrow();
+  });
+
+  it('normalizes decrypted notes and discards executable attachment URLs', async () => {
+    const masterKey = generateMasterKey();
+    const hostile = {
+      ...note,
+      images: [{
+        id: 'attachment-1',
+        name: 'payload.txt',
+        mimeType: 'text/plain',
+        size: 7,
+        url: 'javascript:alert(document.domain)',
+      }],
+    };
+    const context = { ownerId: 'owner-1', noteId: hostile.id };
+    const envelope = await encryptRawNote(hostile, masterKey, context);
+
+    await expect(decryptNote(envelope, masterKey, context)).resolves.toEqual({
+      ...note,
+      schemaVersion: 1,
+      images: [{
+        id: 'attachment-1',
+        name: 'payload.txt',
+        mimeType: 'text/plain',
+        size: 7,
+      }],
+    });
+  });
+
+  it('rejects a decrypted note whose identity differs from its envelope context', async () => {
+    const masterKey = generateMasterKey();
+    const envelope = await encryptRawNote(
+      { ...note, id: 'other-note' },
+      masterKey,
+      { ownerId: 'owner-1', noteId: 'note-1' },
+    );
+
+    await expect(decryptNote(envelope, masterKey, {
+      ownerId: 'owner-1',
+      noteId: 'note-1',
+    })).rejects.toThrow();
   });
 
   it('wraps a master key with a non-exportable device key', async () => {
@@ -87,6 +163,11 @@ describe('E2EE envelopes', () => {
     expect(legacy.version).toBe(1);
     await expect(recoverMasterKey(legacy, 'vault-1'))
       .rejects.toThrow('explicit migration flow');
+  });
+
+  it('rejects an oversized recovery kit before parsing JSON', () => {
+    expect(() => importRecoveryKit(' '.repeat(64 * 1024 + 1)))
+      .toThrow('Recovery kit is too large');
   });
 
   it('round trips a non-image attachment envelope', async () => {

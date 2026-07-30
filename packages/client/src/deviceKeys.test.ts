@@ -2,6 +2,7 @@ import { expect, test } from 'vitest';
 import { generateMasterKey, importRecoveryKit } from '@unkeep/core';
 import { clearDeviceAccess } from './index.js';
 import {
+  DEVICE_KEYS_KEY,
   DeviceKeyStore,
   VaultInstanceMismatchError,
   VaultKeyMismatchError,
@@ -48,22 +49,32 @@ async function legacyRecoveryKit(masterKey: Uint8Array<ArrayBuffer>): Promise<st
   });
 }
 
-class RecordingStorage implements ClientStorage {
-  readonly values = new Map<string, unknown>();
+class RecordingStorage extends MemoryClientStorage {
   writes = 0;
 
-  async get<T>(key: string): Promise<T | null> {
-    return (this.values.get(key) as T | undefined) ?? null;
+  override async set<T>(key: string, value: T): Promise<void> {
+    this.writes += 1;
+    await super.set(key, value);
   }
 
-  async set<T>(key: string, value: T): Promise<void> {
+  override async delete(key: string): Promise<void> {
     this.writes += 1;
-    this.values.set(key, value);
+    await super.delete(key);
   }
+}
 
-  async delete(key: string): Promise<void> {
-    this.writes += 1;
-    this.values.delete(key);
+class FailingTransactionStorage extends MemoryClientStorage {
+  failNextTransaction = false;
+
+  override transact(
+    keys: readonly string[],
+    change: Parameters<MemoryClientStorage['transact']>[1],
+  ): Promise<void> {
+    if (this.failNextTransaction) {
+      this.failNextTransaction = false;
+      return Promise.reject(new Error('injected transaction failure'));
+    }
+    return super.transact(keys, change);
   }
 }
 
@@ -162,4 +173,124 @@ test('explicitly clears the device identity, stored vault key, and relay session
   expect(await sessions.load()).toBeNull();
   expect(await keys.getDeviceId()).not.toBe(provisioned.deviceId);
   expect(await sessions.defaultEndpoint('https://fallback.example')).toBe('https://vault.example');
+});
+
+test('does not expose a torn wrapped key when its atomic install fails', async () => {
+  const storage = new FailingTransactionStorage();
+  const keys = new DeviceKeyStore(storage);
+  const deviceId = await keys.getDeviceId();
+  storage.failNextTransaction = true;
+
+  await expect(keys.provisionFirstDevice('vault-instance'))
+    .rejects.toThrow('injected transaction failure');
+  await expect(keys.hasDeviceKeys()).resolves.toBe(false);
+  await expect(keys.snapshotPairingAccess('vault-instance')).resolves.toEqual({
+    storedKeys: null,
+    fingerprint: null,
+  });
+  await expect(keys.getDeviceId()).resolves.toBe(deviceId);
+});
+
+test('rolls session, wrapped key, and device identity back together when clear fails', async () => {
+  const storage = new FailingTransactionStorage();
+  const keys = new DeviceKeyStore(storage);
+  const provisioned = await keys.provisionFirstDevice('vault-instance');
+  const sessions = new RelaySessionStore(storage);
+  const session = {
+    endpoint: 'https://vault.example',
+    instanceId: 'vault-instance',
+    deviceId: provisioned.deviceId,
+    credential: 'device-credential',
+  };
+  await sessions.save(session);
+  storage.failNextTransaction = true;
+
+  await expect(clearDeviceAccess(keys, sessions))
+    .rejects.toThrow('injected transaction failure');
+  await expect(sessions.load()).resolves.toEqual(session);
+  await expect(keys.unlockDevice('vault-instance')).resolves.toEqual(
+    provisioned.masterKey,
+  );
+  await expect(keys.getDeviceId()).resolves.toBe(provisioned.deviceId);
+});
+
+test('fails closed before installing keys on storage without atomic transactions', async () => {
+  const backing = new Map<string, unknown>();
+  const storage: ClientStorage = {
+    get: async <T>(key: string) => (backing.get(key) as T | undefined) ?? null,
+    set: async <T>(key: string, value: T) => { backing.set(key, value); },
+    delete: async (key: string) => { backing.delete(key); },
+  };
+  const keys = new DeviceKeyStore(storage);
+
+  await expect(keys.provisionFirstDevice('vault-instance'))
+    .rejects.toThrow('atomic client storage transactions');
+  expect(backing.size).toBe(0);
+});
+
+test('fails closed before clearing access split across transaction domains', async () => {
+  const keyStorage = new MemoryClientStorage();
+  const sessionStorage = new MemoryClientStorage();
+  const keys = new DeviceKeyStore(keyStorage);
+  const provisioned = await keys.provisionFirstDevice('vault-instance');
+  const sessions = new RelaySessionStore(sessionStorage);
+  const session = {
+    endpoint: 'https://vault.example',
+    instanceId: 'vault-instance',
+    deviceId: provisioned.deviceId,
+    credential: 'device-credential',
+  };
+  await sessions.save(session);
+
+  await expect(clearDeviceAccess(keys, sessions))
+    .rejects.toThrow('same atomic client storage');
+  await expect(sessions.load()).resolves.toEqual(session);
+  await expect(keys.unlockDevice('vault-instance')).resolves.toEqual(
+    provisioned.masterKey,
+  );
+});
+
+test('uses the opaque key generation to reject stale rollback CAS', async () => {
+  const storage = new MemoryClientStorage();
+  const keys = new DeviceKeyStore(storage);
+  await keys.provisionFirstDevice('vault-instance');
+  const installed = await keys.snapshotPairingAccess('vault-instance');
+
+  await storage.transact([DEVICE_KEYS_KEY], transaction => {
+    const current = transaction.get<Record<string, unknown>>(DEVICE_KEYS_KEY);
+    if (!current) throw new Error('expected stored keys');
+    transaction.set(DEVICE_KEYS_KEY, {
+      ...current,
+      generation: 'concurrent-generation',
+    });
+  });
+
+  await expect(keys.restorePairingAccess(
+    { storedKeys: null, fingerprint: null },
+    'vault-instance',
+    installed,
+  )).rejects.toThrow('Device key state changed');
+  await expect(keys.hasDeviceKeys()).resolves.toBe(true);
+});
+
+test('fails closed when pairing finalization lacks atomic session updates', async () => {
+  const values = new Map<string, unknown>();
+  const storage: ClientStorage = {
+    get: async <T>(key: string) => (values.get(key) as T | undefined) ?? null,
+    set: async <T>(key: string, value: T) => { values.set(key, value); },
+    delete: async (key: string) => { values.delete(key); },
+  };
+  const sessions = new RelaySessionStore(storage);
+  const pending = {
+    endpoint: 'https://vault.example',
+    instanceId: 'vault-instance',
+    deviceId: 'device-one',
+    credential: 'device-credential',
+    pendingPairingRequestId: 'pairing-one',
+  };
+  await sessions.save(pending);
+
+  await expect(sessions.completePairingFinalization(pending))
+    .rejects.toThrow('atomic client storage updates');
+  await expect(sessions.load()).resolves.toEqual(pending);
 });

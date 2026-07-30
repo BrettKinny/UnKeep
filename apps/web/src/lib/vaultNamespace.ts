@@ -1,4 +1,5 @@
-import { LocalOnlyAdapter, type Note, type NoteAttachment } from '@unkeep/core';
+import type { Note, NoteAttachment } from '@unkeep/core';
+import { LocalOnlyAdapter } from '@unkeep/core/experimental';
 import type { ClientStorage } from '@unkeep/client';
 import { AttachmentStore } from './attachmentStorage';
 

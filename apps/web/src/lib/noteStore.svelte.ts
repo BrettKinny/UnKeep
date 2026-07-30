@@ -1,18 +1,38 @@
 import { nanoid } from 'nanoid';
-import type { Note, NoteAttachment, NoteColor, ChecklistItem, StorageAdapter } from '@unkeep/core';
+import type { Note, NoteAttachment, NoteColor, ChecklistItem } from '@unkeep/core';
 import { normalizeNoteRecord } from '@unkeep/core';
+import type {
+  DurableNoteStorageAdapter,
+  PendingNoteSync,
+  StorageAdapter,
+} from '@unkeep/core/experimental';
+import { NOTE_CREATION_CLAIM_TTL_MS } from '@unkeep/core/experimental';
 import { EncryptedSync, RecordConflictError, type RelaySession } from '@unkeep/client';
 import { toastStore } from './toast.svelte';
 import { clientStorage } from './clientStorage';
 import { attachmentSizeError } from './attachments';
-import { AttachmentStore, AttachmentUrlCache } from './attachmentStorage';
+import {
+  AttachmentStore,
+  AttachmentUrlCache,
+  type AttachmentUploadHandle,
+  type RemoteAttachmentHandle,
+  type StagedAttachmentHandle,
+} from './attachmentStorage';
 import type { ImportedAttachment } from './keepImporter';
 import type { QuickSendDraft } from './quickSend';
 import { createVaultExport } from './vaultExport';
 import { createConflictCopy } from './conflictCopy';
 import { resolveImportCollisions } from './importCollisions';
 import { commitImportBatch } from './importCommit';
-import { beginImportJournal, recoverImportJournal } from './importJournal';
+import {
+  IMPORT_JOURNAL_LEASE_MS,
+  beginImportJournal,
+  completeImportJournal,
+  markImportJournalCommitFailed,
+  markImportJournalCommitStarted,
+  recoverImportJournal,
+  renewImportJournal,
+} from './importJournal';
 import { initializeVaultAdapter, scopedClientStateKey } from './vaultNamespace';
 import { useForCurrentVault, VaultTaskCoordinator, type VaultTaskContext } from './vaultTaskCoordinator';
 import { applyRemoteNoteTombstone } from './remoteTombstone';
@@ -37,10 +57,56 @@ function pendingIds(key = pendingSyncKey): Set<string> {
   catch { return new Set(); }
 }
 
-function markPending(id: string, pending: boolean, key = pendingSyncKey): void {
+function durableNoteAdapter(adapter: StorageAdapter): DurableNoteStorageAdapter {
+  const candidate = adapter as Partial<DurableNoteStorageAdapter>;
+  if (
+    typeof candidate.saveNoteWithPendingSync !== 'function'
+    || typeof candidate.saveNotesWithPendingSyncAtomically !== 'function'
+    || typeof candidate.prepareImportCommit !== 'function'
+    || typeof candidate.importCommitState !== 'function'
+    || typeof candidate.cancelImportCommit !== 'function'
+    || typeof candidate.clearImportCommit !== 'function'
+    || typeof candidate.createNoteWithPendingSyncIfAbsent !== 'function'
+    || typeof candidate.claimNoteCreation !== 'function'
+    || typeof candidate.renewNoteCreationClaim !== 'function'
+    || typeof candidate.finalizeClaimedNote !== 'function'
+    || typeof candidate.releaseNoteCreationClaim !== 'function'
+    || typeof candidate.queueNoteForSync !== 'function'
+    || typeof candidate.listPendingNoteSync !== 'function'
+    || typeof candidate.completePendingNoteSync !== 'function'
+  ) {
+    throw new Error('The active storage adapter does not support durable note synchronization');
+  }
+  return candidate as DurableNoteStorageAdapter;
+}
+
+async function receivedNoteId(idempotencyKey: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(idempotencyKey),
+  );
+  const hex = [...new Uint8Array(digest)]
+    .map(value => value.toString(16).padStart(2, '0'))
+    .join('');
+  return `shared_${hex}`;
+}
+
+async function migrateLegacyPendingNoteIds(
+  adapter: StorageAdapter,
+  key: string,
+): Promise<void> {
   const ids = pendingIds(key);
-  if (pending) ids.add(id); else ids.delete(id);
-  localStorage.setItem(key, JSON.stringify([...ids]));
+  if (ids.size > 0) {
+    const durable = durableNoteAdapter(adapter);
+    for (const id of ids) await durable.queueNoteForSync(id);
+  }
+  try {
+    localStorage.removeItem(key);
+  } catch (error) {
+    // The durable records are already committed. Retaining the legacy marker
+    // merely causes an idempotent migration retry on the next startup.
+    console.warn('Could not remove migrated pending-note marker:', error);
+  }
 }
 
 interface VaultLocalResources {
@@ -78,7 +144,6 @@ interface VaultMutationTarget {
   sync: EncryptedSync | null;
   attachments: AttachmentStore;
   urls: AttachmentUrlCache;
-  pendingKey: string;
 }
 
 interface PendingDeleteUndo {
@@ -98,6 +163,7 @@ export class NoteStore {
   adapter: StorageAdapter | null = $state(null);
   loading = $state(true);
   syncStatus = $state<'synced' | 'syncing' | 'offline' | 'error'>('synced');
+  syncQuarantineCount = $state(0);
   private encryptedSync: EncryptedSync | null = null;
   private unsubscribeRealtime: (() => void) | null = null;
   private readonly syncCoordinator = new VaultTaskCoordinator();
@@ -152,6 +218,7 @@ export class NoteStore {
     this.loading = true;
     this.syncCoordinator.reset();
     const context = this.syncCoordinator.capture();
+    this.syncQuarantineCount = 0;
     this.adapter = null;
     this.preservedConflicts.clear();
     this.registerLocalLifecycle();
@@ -166,11 +233,11 @@ export class NoteStore {
       await recoverImportJournal({
         storage: clientStorage,
         journalKey: resources.importJournalKey,
-        adapter,
+        adapter: durableNoteAdapter(adapter),
         attachments: resources.attachments,
-        readPendingNoteIds: () => pendingIds(resources.pendingKey),
-        writePendingNoteIds: ids => localStorage.setItem(resources.pendingKey, JSON.stringify([...ids])),
       });
+      if (!context.isCurrent()) return;
+      await migrateLegacyPendingNoteIds(adapter, resources.pendingKey);
       if (!context.isCurrent()) return;
       const notes = await this.loadNotesFrom(adapter, resources.urls);
       if (!context.isCurrent()) {
@@ -198,10 +265,21 @@ export class NoteStore {
 
   async enableEncryptedSync(session: RelaySession, masterKey: Uint8Array<ArrayBuffer>) {
     this.syncCoordinator.reset();
+    const context = this.syncCoordinator.capture();
     this.unsubscribeRealtime?.();
     window.removeEventListener('online', this.wakeSync);
     document.removeEventListener('visibilitychange', this.syncWhenVisible);
-    this.encryptedSync = new EncryptedSync(session, masterKey, clientStorage);
+    this.syncQuarantineCount = 0;
+    const encryptedSync = new EncryptedSync(session, masterKey, clientStorage);
+    this.encryptedSync = encryptedSync;
+    try {
+      await this.refreshSyncQuarantine(encryptedSync, context);
+    } catch {
+      if (context.isCurrent() && this.encryptedSync === encryptedSync) {
+        this.syncStatus = 'error';
+      }
+    }
+    if (!context.isCurrent() || this.encryptedSync !== encryptedSync) return;
     const timer = window.setInterval(() => void this.sync(), 15_000);
     this.unsubscribeRealtime = () => window.clearInterval(timer);
     window.addEventListener('online', this.wakeSync);
@@ -222,6 +300,7 @@ export class NoteStore {
     window.removeEventListener('online', this.wakeSync);
     this.unsubscribeRealtime = null;
     this.encryptedSync = null;
+    this.syncQuarantineCount = 0;
     this.adapter = null;
     attachmentUrls.releaseAll();
     this.notes = [];
@@ -231,11 +310,14 @@ export class NoteStore {
     this.loading = true;
     this.syncCoordinator.reset();
     const context = this.syncCoordinator.capture();
+    this.syncQuarantineCount = 0;
     this.adapter = null;
     this.preservedConflicts.clear();
     const resources = this.readVaultResources();
     try {
       await adapter.init(config);
+      if (!context.isCurrent()) return;
+      await migrateLegacyPendingNoteIds(adapter, resources.pendingKey);
       if (!context.isCurrent()) return;
       const notes = await this.loadNotesFrom(adapter, resources.urls);
       if (!context.isCurrent()) return;
@@ -290,12 +372,19 @@ export class NoteStore {
     return note;
   }
 
-  async createReceivedNote(draft: QuickSendDraft): Promise<Note> {
+  async createReceivedNote(
+    draft: QuickSendDraft,
+    options: { idempotencyKey?: string; createdAt?: number } = {},
+  ): Promise<Note> {
     const target = this.captureMutationTarget();
     if (!target.adapter) throw new Error('Unlock your vault before saving this note');
-    const now = Date.now();
+    const now = typeof options.createdAt === 'number' && Number.isFinite(options.createdAt)
+      ? options.createdAt
+      : Date.now();
     const note: Note = {
-      id: nanoid(),
+      id: options.idempotencyKey
+        ? await receivedNoteId(options.idempotencyKey)
+        : nanoid(),
       ...(draft.title ? { title: draft.title } : {}),
       content: draft.content,
       createdAt: now,
@@ -308,34 +397,137 @@ export class NoteStore {
       ...(draft.labels?.length ? { labels: [...draft.labels] } : {}),
       ...(draft.color ? { color: draft.color } : {}),
     };
-    const storedAttachments: NoteAttachment[] = [];
-    try {
-      for (const incoming of draft.attachments ?? []) {
-        const attachment: NoteAttachment = {
-          id: nanoid(),
-          name: incoming.name,
-          mimeType: incoming.mimeType || 'application/octet-stream',
-          size: incoming.size,
-        };
-        await target.attachments.save(note.id, attachment, incoming.bytes, { pendingUpload: true });
-        storedAttachments.push(attachment);
+    let storedNote = note;
+    if (options.idempotencyKey) {
+      const durable = durableNoteAdapter(target.adapter);
+      let claim: { token: string; claimedAt: number } | null = null;
+      while (true) {
+        const result = await durable.claimNoteCreation(note.id);
+        if (result.status === 'existing') {
+          storedNote = result.note;
+          break;
+        }
+        if (result.status === 'claimed') {
+          claim = result.claim;
+          break;
+        }
+        if (!target.context.isCurrent()) {
+          throw new Error('The active vault changed while receiving a shared note');
+        }
+        await new Promise(resolve => setTimeout(resolve, 25));
       }
-      note.images = storedAttachments.length ? storedAttachments : undefined;
-    } catch (error) {
-      for (const attachment of storedAttachments) await target.attachments.delete(note.id, attachment.id);
-      throw error;
+      if (claim) {
+        const stagedAttachments: Array<{
+          attachment: NoteAttachment;
+          handle: StagedAttachmentHandle;
+        }> = [];
+        let claimOwned = true;
+        const heartbeat = setInterval(() => {
+          void durable.renewNoteCreationClaim(note.id, claim!.token)
+            .then(owned => { claimOwned = claimOwned && owned; })
+            .catch(() => { claimOwned = false; });
+        }, Math.floor(NOTE_CREATION_CLAIM_TTL_MS / 3));
+        try {
+          for (const [index, incoming] of (draft.attachments ?? []).entries()) {
+            claimOwned = claimOwned
+              && await durable.renewNoteCreationClaim(note.id, claim.token);
+            if (!claimOwned) throw new Error('Received-note creation claim was lost');
+            const attachment: NoteAttachment = {
+              // Stable IDs let a retry after a browser stop overwrite the
+              // same staged bytes instead of accumulating orphan records.
+              id: `${note.id}_attachment_${index}`,
+              name: incoming.name,
+              mimeType: incoming.mimeType || 'application/octet-stream',
+              size: incoming.size,
+            };
+            const handle = await target.attachments.stageUpload(
+              note.id,
+              attachment,
+              incoming.bytes,
+              { writeEpoch: claim.claimedAt },
+            );
+            stagedAttachments.push({ attachment, handle });
+          }
+          claimOwned = claimOwned
+            && await durable.renewNoteCreationClaim(note.id, claim.token);
+          if (!claimOwned) throw new Error('Received-note creation claim was lost');
+          note.images = stagedAttachments.length
+            ? stagedAttachments.map(value => value.attachment)
+            : undefined;
+          const result = await durable.finalizeClaimedNote(
+            this.portableNote(note),
+            claim.token,
+          );
+          storedNote = result.note;
+          if (result.created) await this.pushPendingNote(result.pending, target);
+        } catch (error) {
+          let stillOwned = false;
+          try {
+            stillOwned = claimOwned
+              && await durable.renewNoteCreationClaim(note.id, claim.token);
+          } catch {
+            // Ownership is uncertain. Keep the deterministic staged bytes for
+            // the durable claim/retry path instead of risking winner data.
+          }
+          if (stillOwned) {
+            const cleanup = await Promise.allSettled(stagedAttachments.map(value =>
+              target.attachments.discardStage(value.handle)));
+            if (cleanup.every(result => result.status === 'fulfilled')) {
+              await durable.releaseNoteCreationClaim(note.id, claim.token);
+            }
+          }
+          throw error;
+        } finally {
+          clearInterval(heartbeat);
+        }
+      }
+    } else {
+      const storedAttachments: Array<{
+        attachment: NoteAttachment;
+        handle: StagedAttachmentHandle;
+      }> = [];
+      try {
+        for (const incoming of draft.attachments ?? []) {
+          const attachment: NoteAttachment = {
+            id: nanoid(),
+            name: incoming.name,
+            mimeType: incoming.mimeType || 'application/octet-stream',
+            size: incoming.size,
+          };
+          const handle = await target.attachments.stageUpload(
+            note.id,
+            attachment,
+            incoming.bytes,
+          );
+          storedAttachments.push({ attachment, handle });
+        }
+        note.images = storedAttachments.length
+          ? storedAttachments.map(value => value.attachment)
+          : undefined;
+      } catch (error) {
+        for (const value of storedAttachments) {
+          await target.attachments.discardStage(value.handle);
+        }
+        throw error;
+      }
+      if (!await this.persistNote(note, {}, target)) {
+        for (const value of storedAttachments) {
+          await target.attachments.discardStage(value.handle);
+        }
+        throw new Error('The received note could not be saved locally');
+      }
     }
-    if (!await this.persistNote(note, {}, target)) {
-      for (const attachment of storedAttachments) await target.attachments.delete(note.id, attachment.id);
-      throw new Error('The received note could not be saved locally');
-    }
-    if (!target.context.isCurrent()) return note;
-    const hydrated = await target.urls.hydrate(note);
+    if (!target.context.isCurrent() || storedNote.deleted) return storedNote;
+    const hydrated = await target.urls.hydrate(storedNote);
     if (!target.context.isCurrent()) {
-      for (const attachment of storedAttachments) target.urls.release(note.id, attachment.id);
-      return note;
+      for (const attachment of storedNote.images ?? []) {
+        target.urls.release(storedNote.id, attachment.id);
+      }
+      return storedNote;
     }
-    this.notes.push(hydrated);
+    const existing = this.notes.find(value => value.id === hydrated.id);
+    if (existing) Object.assign(existing, hydrated);
+    else this.notes.push(hydrated);
     return hydrated;
   }
 
@@ -399,48 +591,27 @@ export class NoteStore {
 
   private async persistNote(
     note: Note,
-    { deferRemote = false }: { deferRemote?: boolean } = {},
+    {
+      deferRemote = false,
+      beforeAttachments,
+    }: { deferRemote?: boolean; beforeAttachments?: Note } = {},
     target = this.captureMutationTarget(),
   ): Promise<boolean> {
     // Every awaited write uses one immutable vault snapshot. A reset can make
     // this context stale, but it cannot redirect an old-vault note, attachment,
     // or pending marker into the newly selected vault.
-    const { context, adapter, sync, attachments, pendingKey: writePendingKey } = target;
+    const { context, adapter, sync } = target;
     if (!adapter) return false;
     try {
       const portable = this.portableNote(note);
-      await adapter.saveNote(portable);
-      markPending(note.id, true, writePendingKey);
-      if (sync && !deferRemote && context.isCurrent()) {
-        try {
-          const deletions = await attachments.flushDeletes(
-            (noteId, attachment) => sync.deleteAttachment(noteId, attachment),
-            note.id,
-          );
-          if (deletions.failed.length) throw new Error('Attachment deletion failed');
-          const uploads = await attachments.flushUploads(
-            (noteId, attachment, bytes) => sync.uploadAttachment(noteId, attachment, bytes),
-            note.id,
-          );
-          if (uploads.failed.length) throw new Error('Attachment upload failed');
-          await sync.push(portable);
-          markPending(note.id, false, writePendingKey);
-        } catch (error) {
-          if (error instanceof RecordConflictError && context.isCurrent()) {
-            const preserved = await this.preserveConflict(portable, target);
-            if (preserved) {
-              markPending(note.id, false, writePendingKey);
-              if (context.isCurrent()) void this.sync();
-              return true;
-            }
-          }
-          markPending(note.id, true, writePendingKey);
-          console.warn('Remote sync queued:', error);
-          if (context.isCurrent()) this.syncStatus = 'offline';
-          return true;
-        }
-      }
-      if (context.isCurrent() && !deferRemote) this.syncStatus = 'synced';
+      const durable = durableNoteAdapter(adapter);
+      const pending = await durable.saveNoteWithPendingSync(portable, {
+        ...(beforeAttachments
+          ? { beforeAttachments: this.portableNote(beforeAttachments) }
+          : {}),
+      });
+      const pushed = await this.pushPendingNote(pending, target, deferRemote);
+      if (context.isCurrent() && !deferRemote && (!sync || pushed)) this.syncStatus = 'synced';
       return true;
     } catch (e) {
       console.error('Failed to save note:', e);
@@ -449,6 +620,143 @@ export class NoteStore {
         toastStore.show('Failed to save note');
       }
       return false;
+    }
+  }
+
+  private async pushPendingNote(
+    pending: PendingNoteSync,
+    target: VaultMutationTarget,
+    deferRemote = false,
+  ): Promise<boolean> {
+    const { context, adapter, sync, attachments } = target;
+    try {
+      await attachments.prepareUploads(
+        pending.id,
+        pending.note.deleted ? [] : (pending.note.images ?? []),
+      );
+    } catch (error) {
+      console.warn('Attachment upload reconciliation queued:', error);
+      if (context.isCurrent()) this.syncStatus = 'offline';
+      return false;
+    }
+    if (!sync) return true;
+    if (!adapter || deferRemote || !context.isCurrent()) return false;
+    const durable = durableNoteAdapter(adapter);
+    let rejectedUploadHandles: AttachmentUploadHandle[] = [];
+    try {
+      rejectedUploadHandles = await attachments.pendingUploadHandles(
+        pending.id,
+        (pending.note.images ?? []).map(attachment => attachment.id),
+      );
+      await this.pushNoteWithAttachments(
+        pending.note,
+        target,
+        pending.beforeAttachments,
+      );
+      await durable.completePendingNoteSync(pending.id, pending.token);
+      return true;
+    } catch (error) {
+      let queuedError: unknown = error;
+      if (error instanceof RecordConflictError && context.isCurrent()) {
+        try {
+          // The note mutation was rejected, so none of its attachment
+          // deletions are authorized. Leaving them queued would let a later
+          // retry delete blobs still referenced by the winning note.
+          await this.cancelAttachmentDeletes(pending.id, attachments);
+          const preserved = await this.preserveConflict(pending.note, target);
+          if (preserved) {
+            await attachments.discardRejectedUploads(rejectedUploadHandles);
+            await durable.completePendingNoteSync(pending.id, pending.token);
+            if (context.isCurrent()) void this.sync();
+            return true;
+          }
+        } catch (conflictError) {
+          queuedError = conflictError;
+        }
+      }
+      console.warn('Remote sync queued:', queuedError);
+      if (context.isCurrent()) this.syncStatus = 'offline';
+      return false;
+    }
+  }
+
+  /**
+   * Apply the remote parts of one logical note mutation in dependency order:
+   * new bytes before the note references them, and removed bytes only after
+   * the note revision check accepts the version that stopped referencing them.
+   */
+  private async pushNoteWithAttachments(
+    note: Note,
+    target: VaultMutationTarget,
+    beforeAttachments?: Note,
+  ): Promise<void> {
+    const sync = target.sync;
+    if (!sync) return;
+    if (beforeAttachments) {
+      const beforeIds = new Set(
+        (beforeAttachments.images ?? []).map(attachment => attachment.id),
+      );
+      const finalAttachments = note.deleted ? [] : (note.images ?? []);
+      const referenced = new Set(finalAttachments.map(attachment => attachment.id));
+      for (const attachment of beforeAttachments.images ?? []) {
+        if (referenced.has(attachment.id)) continue;
+        await target.attachments.queueDelete(note.id, attachment, {
+          retainBytes: true,
+          purgeRetainedBytesOnComplete: true,
+        });
+      }
+      // A predecessor is needed when a tombstoned note must be reopened before
+      // new immutable attachment bytes can be uploaded (Undo). A pure removal
+      // can push the final note directly, avoiding a transient remote revision
+      // that still references bytes which may never have reached the relay.
+      if (finalAttachments.some(attachment => !beforeIds.has(attachment.id))) {
+        await sync.push(beforeAttachments);
+      }
+    }
+    await target.attachments.prepareUploads(
+      note.id,
+      note.deleted ? [] : (note.images ?? []),
+    );
+
+    // A durable delete intent may outlive the stale note version that created
+    // it. Never delete an attachment referenced by the version being pushed.
+    if (!note.deleted) {
+      const referenced = new Set((note.images ?? []).map(attachment => attachment.id));
+      if (referenced.size) {
+        for (const pending of await target.attachments.pendingDeletes()) {
+          if (pending.noteId === note.id && referenced.has(pending.attachment.id)) {
+            await target.attachments.cancelDelete(note.id, pending.attachment.id);
+          }
+        }
+      }
+    }
+
+    const uploads = await target.attachments.flushUploads(
+      (noteId, attachment, bytes) => sync.uploadAttachment(noteId, attachment, bytes),
+      note.id,
+      note.deleted ? [] : (note.images ?? []).map(attachment => attachment.id),
+      { deferConfirmation: true },
+    );
+    if (uploads.failed.length) throw uploads.error ?? new Error('Attachment upload failed');
+
+    await sync.push(note);
+    await target.attachments.confirmUploads(uploads.pendingConfirmation ?? []);
+
+    const deletions = await target.attachments.flushDeletes(
+      (noteId, attachment) => sync.deleteAttachment(noteId, attachment),
+      note.id,
+    );
+    if (deletions.failed.length) throw new Error('Attachment deletion failed');
+  }
+
+  private async cancelAttachmentDeletes(
+    noteId: string,
+    attachments: AttachmentStore,
+  ): Promise<void> {
+    for (const pending of await attachments.pendingDeletes()) {
+      if (pending.noteId === noteId) {
+        await attachments.cancelDelete(noteId, pending.attachment.id);
+      }
     }
   }
 
@@ -462,8 +770,17 @@ export class NoteStore {
       sync: this.encryptedSync,
       attachments: resources.attachments,
       urls: resources.urls,
-      pendingKey: resources.pendingKey,
     };
+  }
+
+  private async refreshSyncQuarantine(
+    sync: EncryptedSync,
+    context: VaultTaskContext,
+  ): Promise<void> {
+    const quarantined = await sync.getQuarantinedRecords();
+    if (context.isCurrent() && this.encryptedSync === sync) {
+      this.syncQuarantineCount = quarantined.length;
+    }
   }
 
   private portableNote(note: Note): Note {
@@ -482,13 +799,16 @@ export class NoteStore {
     if (!context.isCurrent()) return false;
     if (this.preservedConflicts.has(staleNote.id)) return true;
     this.preservedConflicts.add(staleNote.id);
-    const copiedAttachments: NoteAttachment[] = [];
+    const copiedAttachments: Array<{
+      attachment: NoteAttachment;
+      handle: StagedAttachmentHandle;
+    }> = [];
     let copy: Note | null = null;
     const discardCopiedAttachments = async () => {
       if (!copy) return;
-      for (const attachment of copiedAttachments) {
-        urls.release(copy.id, attachment.id);
-        await attachments.delete(copy.id, attachment.id);
+      for (const value of copiedAttachments) {
+        urls.release(copy.id, value.attachment.id);
+        await attachments.discardStage(value.handle);
       }
     };
     const abandonIfStale = async () => {
@@ -505,11 +825,13 @@ export class NoteStore {
         const stored = await attachments.get(staleNote.id, source.id);
         if (await abandonIfStale()) return false;
         if (!stored) continue;
-        await attachments.save(copy.id, copied, stored.bytes, { pendingUpload: true });
-        copiedAttachments.push(copied);
+        const handle = await attachments.stageUpload(copy.id, copied, stored.bytes);
+        copiedAttachments.push({ attachment: copied, handle });
         if (await abandonIfStale()) return false;
       }
-      copy.images = copiedAttachments.length ? copiedAttachments : undefined;
+      copy.images = copiedAttachments.length
+        ? copiedAttachments.map(value => value.attachment)
+        : undefined;
       const hydrated = await urls.hydrate(copy);
       if (await abandonIfStale()) return false;
       this.notes.push(hydrated);
@@ -550,8 +872,13 @@ export class NoteStore {
       if (target.context.isCurrent()) toastStore.show('Failed to delete note');
       return null;
     }
+    let pendingSync: PendingNoteSync;
     try {
-      await target.adapter.deleteNote(id);
+      pendingSync = await durableNoteAdapter(target.adapter).saveNoteWithPendingSync({
+        ...note,
+        deleted: true,
+        updatedAt: Date.now(),
+      });
     } catch (error) {
       console.error('Failed to delete note:', error);
       for (const attachment of queuedAttachments) {
@@ -563,20 +890,23 @@ export class NoteStore {
       return null;
     }
     if (target.sync) {
-      markPending(id, true, target.pendingKey);
       try {
-        const tombstone = await target.adapter.getNote(id);
-        const deletions = await target.attachments.flushDeletes(
-          (noteId, attachment) => target.sync!.deleteAttachment(noteId, attachment),
-          id,
+        await this.pushNoteWithAttachments(pendingSync.note, target);
+        await durableNoteAdapter(target.adapter).completePendingNoteSync(
+          pendingSync.id,
+          pendingSync.token,
         );
-        if (deletions.failed.length) throw new Error('Attachment deletion failed');
-        await target.sync.push(tombstone);
-        markPending(id, false, target.pendingKey);
-      } catch {
-        // The local tombstone and attachment deletion intents are durable;
-        // performSync will retry them in the same order when connectivity returns.
-        markPending(id, true, target.pendingKey);
+      } catch (error) {
+        if (error instanceof RecordConflictError) {
+          try {
+            await this.cancelAttachmentDeletes(id, target.attachments);
+          } catch (cancelError) {
+            console.warn('Failed to cancel rejected attachment deletions:', cancelError);
+          }
+        }
+        // The local tombstone remains durable. Non-conflicting attachment
+        // deletion intents remain queued, and performSync always retries the
+        // note revision check before attempting them.
         if (target.context.isCurrent()) this.syncStatus = 'offline';
       }
     }
@@ -613,13 +943,25 @@ export class NoteStore {
     }
     const { note, target } = pending;
     const restored = this.portableNote({ ...note, deleted: false, updatedAt: Date.now() });
+    let restoredAttachmentHandles: StagedAttachmentHandle[] = [];
     try {
-      const restoredAttachments = await target.attachments.restoreForUndo(restored.id, restored.images ?? []);
+      const restoredUploads = await target.attachments.restoreForUndoWithHandles(
+        restored.id,
+        restored.images ?? [],
+      );
+      const restoredAttachments = restoredUploads.map(value => value.attachment);
+      restoredAttachmentHandles = restoredUploads.map(value => value.handle);
       restored.images = restoredAttachments.length ? restoredAttachments : undefined;
-      if (!await this.persistNote(restored, {}, target)) throw new Error('Failed to persist restored note');
+      if (!await this.persistNote(restored, {
+        beforeAttachments: { ...restored, images: undefined },
+      }, target)) {
+        throw new Error('Failed to persist restored note');
+      }
     } catch (error) {
       const rollback = await Promise.allSettled([
         target.adapter?.deleteNote(restored.id) ?? Promise.resolve(),
+        ...restoredAttachmentHandles.map(handle =>
+          target.attachments.discardStage(handle)),
         ...((note.images ?? []).map(attachment =>
           target.attachments.queueDelete(note.id, attachment, { retainBytes: true })
         )),
@@ -628,6 +970,17 @@ export class NoteStore {
       console.error('Failed to undo note deletion:', error, rollback);
       if (target.context.isCurrent()) toastStore.show('Failed to restore note');
       return;
+    }
+    try {
+      // The restored note and its outbox snapshot now reference only fresh
+      // immutable relay IDs, so the retained tombstoned bytes are no longer
+      // the sole recovery copy.
+      await target.attachments.purgeRetained(
+        note.id,
+        (note.images ?? []).map(attachment => attachment.id),
+      );
+    } catch (error) {
+      console.warn('Failed to purge superseded Undo attachment bytes:', error);
     }
     pending.state = 'consumed';
     if (!target.context.isCurrent()) return;
@@ -735,12 +1088,12 @@ export class NoteStore {
       size: file.size,
     };
     const bytes = new Uint8Array(await file.arrayBuffer());
-    await target.attachments.save(noteId, attachment, bytes, { pendingUpload: true });
+    const staged = await target.attachments.stageUpload(noteId, attachment, bytes);
     const next = this.portableNote(note);
     next.images = [...(next.images ?? []), attachment];
     next.updatedAt = Date.now();
     if (!await this.persistNote(next, {}, target)) {
-      await target.attachments.delete(noteId, attachment.id);
+      await target.attachments.discardStage(staged);
       return;
     }
     if (!target.context.isCurrent()) return;
@@ -762,33 +1115,13 @@ export class NoteStore {
     const note = this.notes.find(value => value.id === noteId);
     const attachment = note?.images?.find(value => value.id === attachmentId);
     if (!note || !attachment) return;
-    const stored = await target.attachments.get(noteId, attachmentId);
-    const rollback = async () => {
-      await target.attachments.cancelDelete(noteId, attachmentId);
-      if (stored) {
-        await target.attachments.save(noteId, stored.attachment, stored.bytes, { pendingUpload: true });
-      }
-    };
-    try {
-      await target.attachments.queueDelete(noteId, attachment);
-    } catch (error) {
-      // queueDelete records intent first, so explicitly roll it back if a
-      // later local write fails before the visible note has changed.
-      await rollback();
-      if (target.context.isCurrent()) {
-        console.error('Failed to queue attachment deletion:', error);
-        toastStore.show('Failed to remove attachment');
-      }
-      return;
-    }
+    await target.attachments.get(noteId, attachmentId);
+    const beforeAttachments = this.portableNote(note);
     const next = this.portableNote(note);
     next.images = next.images?.filter(value => value.id !== attachmentId);
     if (!next.images?.length) next.images = undefined;
     next.updatedAt = Date.now();
-    if (!await this.persistNote(next, {}, target)) {
-      await rollback();
-      return;
-    }
+    if (!await this.persistNote(next, { beforeAttachments }, target)) return;
     target.urls.release(noteId, attachmentId);
     if (!target.context.isCurrent()) return;
     const current = this.notes.find(value => value === note);
@@ -820,13 +1153,10 @@ export class NoteStore {
   ): Promise<number> {
     const adapter = this.adapter;
     if (!adapter) throw new Error('Unlock your vault before importing notes');
-    if (!adapter.saveNotesAtomically) {
-      throw new Error('The active storage adapter does not support atomic imports');
-    }
+    const durable = durableNoteAdapter(adapter);
     const context = this.syncCoordinator.capture();
     const store = attachmentStore;
     const urls = attachmentUrls;
-    const importPendingKey = pendingSyncKey;
     const activeJournalKey = importJournalKey;
     const storedMetadata = await adapter.listNotes();
     const storedNotes = adapter.getAllNotes
@@ -852,40 +1182,105 @@ export class NoteStore {
     attachments = resolved.attachments;
     const portable = notes.map(note => this.portableNote(note));
     if (portable.length === 0) return 0;
-    const pendingBefore = pendingIds(importPendingKey);
-    const pendingAfter = new Set(pendingBefore);
-    for (const note of portable) pendingAfter.add(note.id);
-    await beginImportJournal(clientStorage, activeJournalKey, portable, attachments);
+    const importClaim = await beginImportJournal(
+      clientStorage,
+      activeJournalKey,
+      portable,
+      attachments,
+    );
+    const importHandleByAttachment = new Map(importClaim.handles.map(handle => [
+      `${handle.noteId}\0${handle.attachmentId}`,
+      handle,
+    ]));
+    let journalOwned = true;
+    const heartbeat = setInterval(() => {
+      void renewImportJournal(
+        clientStorage,
+        activeJournalKey,
+        importClaim.ownerToken,
+      ).then(owned => { journalOwned = journalOwned && owned; })
+        .catch(() => { journalOwned = false; });
+    }, Math.floor(IMPORT_JOURNAL_LEASE_MS / 3));
     try {
-      localStorage.setItem(importPendingKey, JSON.stringify([...pendingAfter]));
+      await durable.prepareImportCommit(importClaim.commitToken);
       await commitImportBatch(portable, attachments, {
-        saveAttachment: imported => store.save(
-          imported.noteId,
-          imported.attachment,
-          imported.bytes,
-          { pendingUpload: true },
-        ),
-        deleteAttachment: (noteId, attachmentId) => store.delete(noteId, attachmentId),
-        saveNotesAtomically: values => adapter.saveNotesAtomically!(values),
+        saveAttachment: async imported => {
+          journalOwned = journalOwned && await renewImportJournal(
+            clientStorage,
+            activeJournalKey,
+            importClaim.ownerToken,
+          );
+          if (!journalOwned) throw new Error('The import journal lease was lost');
+          const handle = importHandleByAttachment.get(
+            `${imported.noteId}\0${imported.attachment.id}`,
+          );
+          if (!handle) throw new Error('The import journal is missing an attachment generation');
+          return await store.stageUpload(
+            imported.noteId,
+            imported.attachment,
+            imported.bytes,
+            {
+              generation: handle.generation,
+              writeEpoch: importClaim.writeEpoch,
+            },
+          );
+        },
+        discardAttachment: handle => store.discardStage(handle),
+        saveNotesWithPendingSyncAtomically: async values => {
+          journalOwned = journalOwned && await markImportJournalCommitStarted(
+            clientStorage,
+            activeJournalKey,
+            importClaim.ownerToken,
+          );
+          if (!journalOwned) throw new Error('The import journal lease was lost');
+          try {
+            return await durable.saveNotesWithPendingSyncAtomically(values, {
+              importCommitToken: importClaim.commitToken,
+            });
+          } catch (error) {
+            await markImportJournalCommitFailed(
+              clientStorage,
+              activeJournalKey,
+              importClaim.ownerToken,
+            );
+            throw error;
+          }
+        },
       });
     } catch (error) {
       try {
         await recoverImportJournal({
           storage: clientStorage,
           journalKey: activeJournalKey,
-          adapter,
+          adapter: durable,
           attachments: store,
-          readPendingNoteIds: () => pendingIds(importPendingKey),
-          writePendingNoteIds: ids => localStorage.setItem(importPendingKey, JSON.stringify([...ids])),
+          ownerToken: importClaim.ownerToken,
         });
       } catch (recoveryError) {
-        throw new AggregateError([error, recoveryError], 'Import failed and durable rollback must retry on next startup');
+        throw new AggregateError(
+          [error, recoveryError],
+          'Import failed and durable rollback must retry on next startup',
+          { cause: recoveryError },
+        );
       }
       throw error;
+    } finally {
+      clearInterval(heartbeat);
     }
 
-    try { await clientStorage.delete(activeJournalKey); }
-    catch (error) { console.warn('Committed import journal will be finalized on next startup:', error); }
+    try {
+      await durable.clearImportCommit(importClaim.commitToken);
+      const finalized = await completeImportJournal(
+        clientStorage,
+        activeJournalKey,
+        importClaim.ownerToken,
+      );
+      if (!finalized) {
+        console.warn('Committed import journal ownership changed; startup recovery will finalize it');
+      }
+    } catch (error) {
+      console.warn('Committed import journal will be finalized on next startup:', error);
+    }
 
     if (context.isCurrent()) {
       // Persistence is already committed. A browser object-URL failure should
@@ -919,47 +1314,101 @@ export class NoteStore {
     this.syncStatus = 'syncing';
     try {
       if (encryptedSync) {
-        const deletions = await attachmentStore.flushDeletes((noteId, attachment) =>
-          encryptedSync.deleteAttachment(noteId, attachment));
-        if (!context.isCurrent()) return;
-        const uploads = await attachmentStore.flushUploads((noteId, attachment, bytes) =>
-          encryptedSync.uploadAttachment(noteId, attachment, bytes));
-        if (!context.isCurrent()) return;
-        const attachmentFailures = new Set([
-          ...deletions.failed.map(value => value.noteId),
-          ...uploads.failed.map(value => value.noteId),
+        const durable = durableNoteAdapter(adapter);
+        const mutationFailures = new Set<string>();
+        const stagedUploads = await target.attachments.stagedUploads();
+        const queuedAttachmentNoteIds = new Set([
+          ...(await target.attachments.pendingUploads()).map(value => value.noteId),
+          ...(await target.attachments.pendingDeletes()).map(value => value.noteId),
+          ...stagedUploads.map(value => value.noteId),
         ]);
-        for (const noteId of attachmentFailures) markPending(noteId, true);
-        for (const id of pendingIds()) {
-          if (attachmentFailures.has(id)) continue;
+        if (!context.isCurrent()) return;
+        for (const noteId of queuedAttachmentNoteIds) {
+          const pending = await durable.queueNoteForSync(noteId);
+          if (!pending) {
+            // A staged marker is evidence of incomplete local work, not
+            // authority to delete it. Only a durable note snapshot can decide
+            // which attachment generations are referenced.
+            continue;
+          }
+          if (stagedUploads.some(value => value.noteId === noteId)) {
+            await target.attachments.prepareUploads(
+              noteId,
+              pending.note.deleted ? [] : (pending.note.images ?? []),
+            );
+          }
+        }
+        for (const pending of await durable.listPendingNoteSync()) {
+          const id = pending.id;
+          let rejectedUploadHandles: AttachmentUploadHandle[] = [];
           try {
-            await encryptedSync.push(await adapter.getNote(id));
+            rejectedUploadHandles = await target.attachments.pendingUploadHandles(
+              id,
+              (pending.note.images ?? []).map(attachment => attachment.id),
+            );
+            await this.pushNoteWithAttachments(
+              pending.note,
+              target,
+              pending.beforeAttachments,
+            );
             if (!context.isCurrent()) return;
-            markPending(id, false);
+            await durable.completePendingNoteSync(id, pending.token);
           } catch (error) {
             if (error instanceof RecordConflictError) {
+              try {
+                await this.cancelAttachmentDeletes(id, target.attachments);
+              } catch {
+                mutationFailures.add(id);
+                continue;
+              }
               const preserved = await useForCurrentVault(
                 context,
-                () => adapter.getNote(id),
+                () => Promise.resolve(pending.note),
                 note => this.preserveConflict(note, target),
               );
               if (!context.isCurrent()) return;
-              if (preserved) markPending(id, false, target.pendingKey);
+              if (preserved) {
+                await target.attachments.discardRejectedUploads(rejectedUploadHandles);
+                await durable.completePendingNoteSync(id, pending.token);
+                continue;
+              }
             }
-            // Other failures stay queued. Pulling unrelated revisions is still useful.
+            mutationFailures.add(id);
           }
+        }
+        if (mutationFailures.size) {
+          // One global cursor covers every record. Pulling and acknowledging
+          // while a local mutation is still pending could apply a remote
+          // version of that same note over the only durable local copy. Retry
+          // the queued mutation before reading any later relay revision.
+          this.syncStatus = 'offline';
+          return;
+        }
+        // A newer mutation may have committed while an older remote push was
+        // in flight. Its different token survives the compare-and-clear above;
+        // never pull over that newly queued local snapshot.
+        if ((await durable.listPendingNoteSync()).length > 0) {
+          this.syncStatus = 'offline';
+          return;
         }
         const pulled = await encryptedSync.pull();
         if (!context.isCurrent()) return;
         const attachmentBytes = new Set<string>();
+        const remoteAttachmentHandles = new Map<string, RemoteAttachmentHandle>();
         for (const value of pulled.attachments) {
-          await attachmentStore.save(value.noteId, value.attachment, value.bytes);
+          const handle = await target.attachments.saveRemote(
+            value.noteId,
+            value.attachment,
+            value.bytes,
+          );
           if (!context.isCurrent()) return;
-          attachmentBytes.add(`${value.noteId}:${value.attachment.id}`);
+          const key = `${value.noteId}:${value.attachment.id}`;
+          attachmentBytes.add(key);
+          remoteAttachmentHandles.set(key, handle);
         }
         for (const { noteId, attachmentId } of pulled.deletedAttachments) {
-          attachmentUrls.release(noteId, attachmentId);
-          await attachmentStore.applyRemoteDelete(noteId, attachmentId);
+          target.urls.release(noteId, attachmentId);
+          await target.attachments.applyRemoteDelete(noteId, attachmentId);
           if (!context.isCurrent()) return;
           const existing = this.notes.find(note => note.id === noteId);
           if (!existing?.images?.some(attachment => attachment.id === attachmentId)) continue;
@@ -971,20 +1420,30 @@ export class NoteStore {
         for (const note of pulled.notes) {
           for (const attachment of note.images ?? []) {
             const key = `${note.id}:${attachment.id}`;
-            if (!attachmentBytes.has(key) && !await attachmentStore.get(note.id, attachment.id)) {
+            if (!attachmentBytes.has(key) && !await target.attachments.get(note.id, attachment.id)) {
               throw new Error(`Attachment bytes unavailable: ${attachment.name}`);
             }
           }
           const portable = this.portableNote(note);
           await adapter.saveNote(portable);
           if (!context.isCurrent()) return;
-          const hydrated = await attachmentUrls.hydrate(portable);
+          for (const attachment of portable.images ?? []) {
+            const handle = remoteAttachmentHandles.get(
+              `${portable.id}:${attachment.id}`,
+            );
+            if (handle && !await target.attachments.confirmRemote(handle)) {
+              throw new Error(
+                `Attachment changed locally while applying remote note: ${attachment.name}`,
+              );
+            }
+          }
+          const hydrated = await target.urls.hydrate(portable);
           if (!context.isCurrent()) return;
           const existing = this.notes.find(value => value.id === note.id);
           if (existing) {
             for (const attachment of existing.images ?? []) {
               if (!hydrated.images?.some(value => value.id === attachment.id)) {
-                attachmentUrls.release(note.id, attachment.id);
+                target.urls.release(note.id, attachment.id);
               }
             }
             Object.assign(existing, hydrated);
@@ -998,8 +1457,8 @@ export class NoteStore {
           await applyRemoteNoteTombstone(adapter, id);
           if (!context.isCurrent()) return;
           for (const attachment of existing?.images ?? []) {
-            attachmentUrls.release(id, attachment.id);
-            await attachmentStore.applyRemoteDelete(id, attachment.id);
+            target.urls.release(id, attachment.id);
+            await target.attachments.applyRemoteDelete(id, attachment.id);
             if (!context.isCurrent()) return;
           }
           this.notes = this.notes.filter(note => note.id !== id);
@@ -1007,10 +1466,8 @@ export class NoteStore {
         }
         await encryptedSync.acknowledge(pulled.cursor, pulled.revisions);
         if (!context.isCurrent()) return;
-        if (attachmentFailures.size) {
-          this.syncStatus = 'offline';
-          return;
-        }
+        await this.refreshSyncQuarantine(encryptedSync, context);
+        if (!context.isCurrent()) return;
       } else {
         const result = await adapter.sync();
         if (!context.isCurrent()) return;

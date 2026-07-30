@@ -7,26 +7,21 @@ export type {
   NoteImage,
 } from './types.js';
 
-export type {
-  AdapterConfig,
-  ValidationResult,
-  SyncResult,
-  ConfigField,
-  OAuthProviderConfig,
-  OAuthTokens,
-  StorageAdapter,
-} from './adapter.js';
-
-export {
-  generateCodeVerifier,
-  generateCodeChallenge,
-  generateState,
-} from './oauth.js';
-
-export { validateNoteId, isValidNoteId } from './validation.js';
+export { MAX_NOTE_ID_LENGTH, validateNoteId, isValidNoteId } from './validation.js';
 
 export {
   CURRENT_NOTE_SCHEMA_VERSION,
+  MAX_ATTACHMENT_MIME_TYPE_LENGTH,
+  MAX_ATTACHMENT_NAME_LENGTH,
+  MAX_CHECKLIST_ITEMS,
+  MAX_CHECKLIST_ITEM_TEXT_LENGTH,
+  MAX_NOTE_ATTACHMENTS,
+  MAX_NOTE_ATTACHMENT_SIZE,
+  MAX_NOTE_CONTENT_LENGTH,
+  MAX_NOTE_LABEL_LENGTH,
+  MAX_NOTE_LABELS,
+  MAX_NOTE_TEXT_LENGTH,
+  MAX_NOTE_TITLE_LENGTH,
   normalizeNoteRecord,
   UnsupportedNoteSchemaVersionError,
 } from './noteMigrations.js';
@@ -42,6 +37,7 @@ export type {
 } from './crypto.js';
 export {
   assertSupportedEnvelope,
+  MAX_RECOVERY_KIT_SERIALIZED_LENGTH,
   generateMasterKey,
   generateDeviceWrappingKey,
   wrapMasterKeyForDevice,
@@ -58,14 +54,3 @@ export {
 } from './crypto.js';
 
 export { noteToMarkdown, markdownToNote } from './markdown.js';
-
-export {
-  LEGACY_LOCAL_DATABASE_NAME,
-  LOCAL_DATABASE_VERSION,
-  LocalOnlyAdapter,
-  localDatabaseName,
-  validateVaultNamespace,
-} from './adapters/local.js';
-export { LocalMarkdownAdapter } from './adapters/local-markdown.js';
-export { GitAdapter } from './adapters/git.js';
-export { S3Adapter } from './adapters/s3.js';

@@ -1,10 +1,10 @@
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0-rc.1';
 
 export const HELP = `Usage: unkeep [connection options] <command> [options]
 
 Commands:
   login                 Pair this terminal with an existing UnKeep device
-  provision --name <n>  Mint a service credential and emit an agent bundle
+  provision --name <n>  Mint a scoped service credential and emit an agent bundle
   credentials list      List device and service credentials
   credentials revoke <id>
                         Revoke a service credential
@@ -20,7 +20,7 @@ Commands:
 
 Connection options (flags override environment and config file):
   --endpoint <url>       Relay URL (UNKEEP_ENDPOINT)
-  --credential <token>  Device credential (UNKEEP_CREDENTIAL)
+  --credential <token>  Device or service credential (UNKEEP_CREDENTIAL)
   --vault-key <key>      Base64/base64url/hex vault key (UNKEEP_VAULT_KEY)
   --config-dir <path>    Override the standard UnKeep config directory
 
@@ -29,8 +29,15 @@ Output options:
   -h, --help             Show help
   --version              Show version
 
+Interactive human output escapes terminal control characters. JSON and
+redirected output preserve note data exactly.
+
 Provision options:
   --name <name>          Name the new service credential
+  --scope <scope>        read-only (default) or read-write
+  Provision output includes the server-confirmed UNKEEP_SCOPE.
+  Both scopes include the vault key and can decrypt the whole vault; scope
+  controls relay writes, not labels or decryption.
 
 List options:
   --label <label>        Require a label (repeatable)

@@ -5,14 +5,18 @@ PWA cannot appear in the share sheet by itself. The workaround is a small
 Shortcut that forwards shared text to UnKeep's `/share` page.
 
 The shared content travels in the URL **fragment** (`#...`), which browsers
-never send to the server — so, like Quick Send, the text stays on your device
-until it lands encrypted in your vault.
+never send to the server. It remains local to the browser path, subject to the
+history and local-storage retention caveats below, until UnKeep saves it into
+the encrypted vault.
 
 > On Android/Chrome no shortcut is needed: the installed PWA registers itself
-> in the system share sheet via the manifest's `share_target`. Note that the
-> Android path delivers content as query parameters, which are part of the
-> request to your own UnKeep server (they are not logged by it, and never
-> reach any third party).
+> in the system share sheet via the manifest's `share_target`. Android POSTs
+> the content to the installed app's service worker, which converts it to a
+> local fragment during the normal active-worker path. If the service worker is
+> unavailable, the relay rejects the fallback instead of rendering or storing
+> it, but the plaintext POST has already crossed the reverse-proxy and relay
+> boundary. Use this fragment-based Shortcut pattern instead when that fallback
+> exposure is outside your threat model.
 
 ## Create the Shortcut
 
@@ -34,21 +38,26 @@ until it lands encrypted in your vault.
 ## Use it
 
 1. In any app, share some text or a page and pick **Save to UnKeep**.
-2. Safari opens UnKeep's `/share` page, which stashes the content locally and
-   redirects to the app.
-3. Once your vault is unlocked, the note is created and synced like any other.
+2. Safari opens UnKeep's `/share` page and shows a local preview.
+3. Confirm the preview. Once the selected vault is unlocked, the note is saved
+   durably and synced like any other.
 
 If you weren't signed in when you shared, the content waits in local storage
-and is saved as soon as the vault unlocks — sharing while offline works too.
+after confirmation. UnKeep asks before assigning an unbound share to whichever
+vault you unlock, and sharing while offline still works.
 
 ## Notes and limitations
 
 - The shortcut opens Safari (or your default browser), not the standalone
-  home-screen app window. Modern iOS shares site storage between Safari and
-  the installed PWA for the same origin, so notes land in the same vault; on
-  older iOS versions the home-screen app has separate storage — if saved notes
-  don't appear in the installed app, sync from the server will still deliver
-  them once both contexts are signed in.
+  home-screen app window. Treat that browser and the installed PWA as separate
+  UnKeep devices: pair or unlock the browser profile before saving there. Once
+  both contexts are paired to the same relay vault, encrypted sync delivers
+  the saved note to the installed app.
+- The fragment is not sent in the HTTP request, and UnKeep replaces the URL as
+  soon as its share page mounts. It can still be retained briefly by browser
+  history, URL synchronization, crash reporting, or the Shortcut itself.
+  After confirmation, a share waiting for a vault is plaintext in that browser
+  profile's local storage until UnKeep saves and removes it.
 - Very large shares can exceed URL length limits; the shortcut is intended
   for text snippets, links, and paragraphs, not documents.
 - You can also pass structured params in the fragment:

@@ -1,9 +1,21 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryClientStorage } from '@unkeep/client';
 import type { Note, NoteAttachment } from '@unkeep/core';
 import { AttachmentStore } from './attachmentStorage';
 import { MAX_ATTACHMENT_SIZE } from './attachments';
-import { createVaultExport, parseVaultExport } from './vaultExport';
+import {
+  createVaultExport,
+  isVaultExportFile,
+  MAX_VAULT_EXPORT_ATTACHMENT_BYTES,
+  MAX_VAULT_EXPORT_FILE_SIZE,
+  MAX_VAULT_EXPORT_NOTES,
+  parseVaultExport,
+  readVaultExportFile,
+} from './vaultExport';
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 const attachment: NoteAttachment = {
   id: 'photo-one',
@@ -35,10 +47,24 @@ describe('vault export', () => {
     const parsed = parseVaultExport(serialized);
 
     expect(parsed.exportedAt).toBe('2023-11-14T22:13:20.000Z');
-    expect(parsed.notes).toEqual([{ ...note, images: [{ ...attachment, url: undefined }] }]);
+    expect(parsed.notes).toEqual([{
+      ...note,
+      schemaVersion: 1,
+      images: [{
+        id: attachment.id,
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        size: attachment.size,
+      }],
+    }]);
     expect(parsed.attachments).toEqual([{
       noteId: note.id,
-      attachment: { ...attachment, url: undefined },
+      attachment: {
+        id: attachment.id,
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        size: attachment.size,
+      },
       bytes,
     }]);
   });
@@ -157,5 +183,79 @@ describe('vault export', () => {
       ...valid,
       notes: [{ ...valid.notes[0], id: '../unsafe' }],
     }))).toThrow('Invalid or unsupported UnKeep vault export');
+  });
+
+  it('rejects an oversized backup file before reading text', async () => {
+    const file = new File(['{}'], 'vault.json', { type: 'application/json' });
+    const text = vi.fn(async () => { throw new Error('must not read'); });
+    Object.defineProperty(file, 'size', { value: MAX_VAULT_EXPORT_FILE_SIZE + 1 });
+    Object.defineProperty(file, 'text', { value: text });
+
+    await expect(readVaultExportFile(file)).rejects.toThrow('256 MiB or smaller');
+    expect(text).not.toHaveBeenCalled();
+  });
+
+  it('identifies a vault export from only its bounded header', async () => {
+    const vault = new File([
+      '\uFEFF \n { "format": "unkeep-vault", "version": 1, "notes": [] }',
+    ], 'renamed.json');
+    await expect(isVaultExportFile(vault)).resolves.toBe(true);
+
+    const keep = new File([
+      '{ "title": "ordinary Keep note", "textContent": "not a vault" }',
+    ], 'note.json');
+    await expect(isVaultExportFile(keep)).resolves.toBe(false);
+  });
+
+  it('rejects excessive collection counts and aggregate attachment bytes before decoding', async () => {
+    const attachments = new AttachmentStore(new MemoryClientStorage());
+    await attachments.save(note.id, attachment, new Uint8Array([0, 255, 1, 2, 128]));
+    const valid = JSON.parse(await createVaultExport([note], attachments)) as {
+      notes: Note[];
+      attachments: Array<{ noteId: string; attachment: NoteAttachment; dataBase64: string }>;
+    };
+
+    expect(() => parseVaultExport(JSON.stringify({
+      ...valid,
+      notes: Array.from({ length: MAX_VAULT_EXPORT_NOTES + 1 }, () => valid.notes[0]),
+    }))).toThrow('Invalid or unsupported UnKeep vault export');
+
+    const declaredSize = Math.floor(MAX_VAULT_EXPORT_ATTACHMENT_BYTES / 4) + 1;
+    const oversizedImages = Array.from({ length: 4 }, (_, index) => ({
+      id: `large-${index}`,
+      name: `large-${index}.bin`,
+      mimeType: 'application/octet-stream',
+      size: declaredSize,
+    }));
+    expect(() => parseVaultExport(JSON.stringify({
+      ...valid,
+      notes: [{ ...valid.notes[0], images: oversizedImages }],
+      attachments: [],
+    }))).toThrow('attachment data exceeds 96 MiB');
+  });
+
+  it('checks declared base64 length before allocating decoded bytes', async () => {
+    const attachments = new AttachmentStore(new MemoryClientStorage());
+    await attachments.save(note.id, attachment, new Uint8Array([0, 255, 1, 2, 128]));
+    const valid = JSON.parse(await createVaultExport([note], attachments)) as {
+      attachments: Array<{ dataBase64: string }>;
+    };
+    valid.attachments[0].dataBase64 = 'A'.repeat(1_000_000);
+    const atob = vi.fn(() => { throw new Error('must not decode'); });
+    vi.stubGlobal('atob', atob);
+
+    expect(() => parseVaultExport(JSON.stringify(valid))).toThrow('Attachment size mismatch');
+    expect(atob).not.toHaveBeenCalled();
+  });
+
+  it('returns only normalized note fields from an untrusted backup', async () => {
+    const attachments = new AttachmentStore(new MemoryClientStorage());
+    await attachments.save(note.id, attachment, new Uint8Array([0, 255, 1, 2, 128]));
+    const valid = JSON.parse(await createVaultExport([note], attachments)) as {
+      notes: Array<Note & { injected?: string }>;
+    };
+    valid.notes[0].injected = '<script>not portable</script>';
+
+    expect(parseVaultExport(JSON.stringify(valid)).notes[0]).not.toHaveProperty('injected');
   });
 });

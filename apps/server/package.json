@@ -1,6 +1,6 @@
 {
   "name": "@unkeep/server",
-  "version": "0.1.0",
+  "version": "0.2.0-rc.1",
   "private": true,
   "description": "Private UnKeep ciphertext relay and static PWA host",
   "license": "MIT",
@@ -22,9 +22,10 @@
   },
   "scripts": {
     "start": "node src/index.mjs",
+    "check:data": "node src/check-database.mjs",
     "test": "node --test test/*.test.mjs"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13.0"
   }
 }

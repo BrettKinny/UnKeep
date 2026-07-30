@@ -1,10 +1,12 @@
 import type { Note } from './types.js';
+import { normalizeNoteRecord } from './noteMigrations.js';
 
 const ENVELOPE_VERSION = 1 as const;
 const RECOVERY_KIT_VERSION = 2 as const;
 const ALGORITHM = 'AES-GCM' as const;
 const KEY_BYTES = 32;
 const IV_BYTES = 12;
+export const MAX_RECOVERY_KIT_SERIALIZED_LENGTH = 64 * 1024;
 
 export interface EncryptedEnvelopeV1 {
   version: typeof ENVELOPE_VERSION;
@@ -197,6 +199,9 @@ export function exportRecoveryKit(kit: RecoveryKit): string {
 }
 
 export function importRecoveryKit(serialized: string): RecoveryKit {
+  if (serialized.length > MAX_RECOVERY_KIT_SERIALIZED_LENGTH) {
+    throw new Error('Recovery kit is too large');
+  }
   const parsed: unknown = JSON.parse(serialized);
   if (!parsed || typeof parsed !== 'object') throw new Error('Invalid recovery kit');
   const kit = parsed as Partial<RecoveryKit>;
@@ -221,9 +226,10 @@ export async function encryptNote(
   masterKey: Uint8Array<ArrayBuffer>,
   context: NoteEncryptionContext
 ): Promise<EncryptedEnvelopeV1> {
-  if (note.id !== context.noteId) throw new Error('Note ID does not match encryption context');
+  const portable = normalizeNoteRecord(note);
+  if (portable.id !== context.noteId) throw new Error('Note ID does not match encryption context');
   const key = await importAesKey(masterKey, ['encrypt']);
-  return encryptBytes(encoder.encode(JSON.stringify(note)), key, context.noteId, notePurpose(context));
+  return encryptBytes(encoder.encode(JSON.stringify(portable)), key, context.noteId, notePurpose(context));
 }
 
 export async function decryptNote(
@@ -233,7 +239,11 @@ export async function decryptNote(
 ): Promise<Note> {
   if (envelope.keyId !== context.noteId) throw new Error('Encrypted note does not match requested note');
   const key = await importAesKey(masterKey, ['decrypt']);
-  return JSON.parse(decoder.decode(await decryptBytes(envelope, key, notePurpose(context)))) as Note;
+  const note = normalizeNoteRecord(
+    JSON.parse(decoder.decode(await decryptBytes(envelope, key, notePurpose(context)))) as unknown,
+  );
+  if (note.id !== context.noteId) throw new Error('Decrypted note does not match requested note');
+  return note;
 }
 
 function attachmentPurpose(context: AttachmentEncryptionContext): string {
