@@ -223,3 +223,136 @@ test('published assets and metadata are verified against the local release bundl
     /for local_asset in release-assets\/\*; do\s+gh release verify-asset "\$GITHUB_REF_NAME" "\$local_asset"\s+done/,
   );
 });
+
+test('container corresponding sources are produced without publication authority', () => {
+  const jobs = workflowJobs(workflow);
+  const sources = jobs.get('container-sources');
+  assert.ok(sources, 'container-sources job must exist');
+  assert.equal(jobEnvironment(sources), undefined);
+  assert.deepEqual(
+    Object.fromEntries(jobPermissions(sources)),
+    { contents: 'read' },
+  );
+  assert.match(sources, /^    needs: prepare$/m);
+  assert.match(sources, /container-source-bundle\.mjs build/);
+  assert.match(sources, /container-source-bundle\.mjs verify/);
+  assert.match(
+    sources,
+    /container-source-assets-\$\{\{ needs\.prepare\.outputs\.version \}\}-\$\{\{ needs\.prepare\.outputs\.release_sha \}\}/,
+  );
+  assert.match(sources, /artifact_digest: \$\{\{ steps\.upload\.outputs\.artifact-digest \}\}/);
+  assert.doesNotMatch(sources, /packages: write|id-token: write|contents: write/);
+
+  const dryRun = jobs.get('dry-run-container');
+  assert.match(dryRun, /^      - container-sources$/m);
+  assert.match(dryRun, /container-source-bundle\.mjs verify/);
+  assert.match(dryRun, /unkeep-\$VERSION-container-sources\.tar\.gz/);
+});
+
+test('source bytes are bound out of band before every publication boundary', () => {
+  const jobs = workflowJobs(workflow);
+  const stage = jobs.get('stage_container');
+  assert.match(stage, /^      - container-sources$/m);
+  assert.match(stage, /needs\.container-sources\.outputs\.bundle_sha256/);
+  assert.match(stage, /needs\.container-sources\.outputs\.metadata_sha256/);
+  assert.ok(
+    stage.indexOf('container-source-bundle.mjs verify')
+      < stage.indexOf('Log in to GHCR'),
+    'source bytes must be verified before the first registry login',
+  );
+  assert.ok(
+    stage.indexOf('container-source-bundle.mjs bind')
+      < stage.indexOf('Record the exact staging bundle'),
+    'exact staged platform digests must be bound into the release bundle',
+  );
+  assert.match(
+    stage,
+    /--image-repository "\$IMAGE"[\s\S]*--amd64-digest "\$AMD64_DIGEST"[\s\S]*--arm64-digest "\$ARM64_DIGEST"/,
+  );
+  assert.match(
+    stage,
+    /source_binding_sha256: \$\{\{ steps\.source_binding\.outputs\.binding_sha256 \}\}/,
+  );
+
+  for (const name of [
+    'draft_release',
+    'promote_image',
+    'publish_npm',
+    'finalize_release',
+  ]) {
+    const block = jobs.get(name);
+    assert.match(
+      block,
+      /container-source-bundle\.mjs verify-binding/,
+      `${name} must validate the source/image binding`,
+    );
+    for (const asset of [
+      'container-source-binding.json',
+      'container-sources.json',
+      'container-sources.tar.gz',
+    ]) {
+      assert.match(block, new RegExp(asset.replaceAll('.', '\\.')));
+    }
+  }
+});
+
+test('container compliance review sentinel is pinned to the exact base digest', () => {
+  const jobs = workflowJobs(workflow);
+  const expected =
+    'BrettKinny/UnKeep:container-compliance:'
+    + 'c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32:v1';
+  for (const name of [
+    'stage_container',
+    'draft_release',
+    'promote_image',
+    'publish_npm',
+    'finalize_release',
+  ]) {
+    const block = jobs.get(name);
+    assert.match(
+      block,
+      /BASE_DIGEST: \$\{\{ needs\.(?:container-sources|stage_container)\.outputs\.base_digest \}\}/,
+    );
+    assert.match(
+      block,
+      /expected_compliance_guard="BrettKinny\/UnKeep:container-compliance:\$\{BASE_DIGEST\}:v1"/,
+    );
+    assert.match(
+      block,
+      /CONTAINER_COMPLIANCE_GUARD" (?:!=|=) "\$expected_compliance_guard"/,
+    );
+  }
+  assert.match(
+    jobs.get('container-sources'),
+    /base_digest: \$\{\{ steps\.sources\.outputs\.base_digest \}\}/,
+  );
+  assert.match(
+    jobs.get('stage_container'),
+    /base_digest: \$\{\{ needs\.container-sources\.outputs\.base_digest \}\}/,
+  );
+  assert.match(releasingGuide, new RegExp(expected));
+  assert.match(
+    releasingGuide,
+    /workflow derives its expected sentinel from the source producer's\s+Dockerfile-bound base digest/,
+  );
+});
+
+test('the large source archive is not duplicated in retained Actions artifacts', () => {
+  const jobs = workflowJobs(workflow);
+  const dryRun = jobs.get('dry-run-container');
+  const dryRunUpload = dryRun.slice(
+    dryRun.indexOf('Upload dry-run compliance assets'),
+  );
+  assert.doesNotMatch(dryRunUpload, /container-sources\.tar\.gz/);
+  for (const name of ['stage_container', 'finalize_release']) {
+    assert.match(
+      jobs.get(name),
+      /!release-assets\/unkeep-\$\{\{ env\.VERSION \}\}-container-sources\.tar\.gz/,
+      `${name} must reuse the independently retained source artifact`,
+    );
+  }
+  assert.match(
+    releasingGuide,
+    /logical release bundle is split across Actions artifacts/,
+  );
+});

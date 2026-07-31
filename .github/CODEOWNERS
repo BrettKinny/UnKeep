@@ -9,6 +9,7 @@
 /pnpm-lock.yaml @BrettKinny
 /docs/releasing.md @BrettKinny
 /scripts/check-release-slot* @BrettKinny
+/scripts/container-source-bundle* @BrettKinny
 /scripts/extract-release-notes.mjs @BrettKinny
 /scripts/inventory-ghcr* @BrettKinny
 /scripts/package-smoke.mjs @BrettKinny
