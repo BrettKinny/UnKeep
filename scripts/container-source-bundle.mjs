@@ -337,6 +337,30 @@ function fetchCommit(repository, commit) {
   }
 }
 
+export function fetchCommits(repository, commits) {
+  const uniqueCommits = [...new Set(commits.map(commit =>
+    validateGitCommit(commit, 'source Git commit')))];
+  if (uniqueCommits.length === 0) fail('No source Git commits were requested');
+  const reference = commit => `refs/unkeep-sources/${commit}`;
+  run('git', [
+    'fetch',
+    '--quiet',
+    '--depth=1',
+    '--no-tags',
+    'origin',
+    ...uniqueCommits.map(commit => `${commit}:${reference(commit)}`),
+  ], { cwd: repository });
+  for (const commit of uniqueCommits) {
+    const actual = run('git', [
+      'rev-parse',
+      `${reference(commit)}^{commit}`,
+    ], { cwd: repository }).trim();
+    if (actual !== commit) {
+      fail(`Fetched ${actual}; expected immutable commit ${commit}`);
+    }
+  }
+}
+
 function containerLicenseMapping(packages, nodeVersion) {
   const licenseText = identifier =>
     `licenses/spdx/${identifier}.txt`;
@@ -808,8 +832,11 @@ async function buildBundle(options) {
 
     const aportsRepository = join(temporaryRoot, 'aports.git');
     initializeRepository(aportsRepository, APORTS_REPOSITORY);
+    fetchCommits(
+      aportsRepository,
+      origins.map(item => item.aportsCommit),
+    );
     for (const item of origins) {
-      fetchCommit(aportsRepository, item.aportsCommit);
       const recipePath = listRecipePath(
         aportsRepository,
         item.aportsCommit,
