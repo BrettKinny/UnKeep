@@ -18,8 +18,9 @@ The workflow publishes:
 - OCI SBOM and provenance attestations alongside the GHCR image; and
 - a prerelease GitHub Release containing the three npm tarballs, an exported
   amd64 SPDX JSON SBOM, the image digest, `compose.release.yaml`,
-  `THIRD_PARTY_NOTICES.md`, the preserved Node runtime license, and
-  `SHA256SUMS`.
+  `THIRD_PARTY_NOTICES.md`, the preserved Node runtime license, the exact
+  container corresponding-source archive, its metadata and staged-image
+  binding, and `SHA256SUMS`.
 
 Do not create a release tag until every prerequisite below is complete.
 
@@ -91,7 +92,12 @@ that deleting its visible refs erased the retained data.
    write, and every later publication job checks it again. After the reviewed
    source/notice bundle or other documented compliance path is ready, add the
    environment variable to both environments with the exact value
-   `BrettKinny/UnKeep:container-compliance-reviewed:v1`.
+   `BrettKinny/UnKeep:container-compliance:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32:v1`.
+   The digest in this sentinel is the Dockerfile's pinned Node/Alpine OCI index.
+   The workflow derives its expected sentinel from the source producer's
+   Dockerfile-bound base digest. Any base-image change therefore requires a new
+   bundle, review, and protected-environment value; the old review cannot
+   authorize it.
 8. Restrict both environments to selected tags matching `v*-rc.*`.
 9. After the repository becomes public and before creating any release tag,
    require a maintainer to approve deployments in both environments and
@@ -270,7 +276,67 @@ A manual run:
 It does not reference either protected release environment, receive write
 permissions, log in to a registry, publish a package or image, create a tag, or
 create a GitHub Release. Inspect the `npm-release-assets` and
-`release-dry-run-<sha>` workflow artifacts before continuing.
+`release-dry-run-<sha>` workflow artifacts, plus the independently retained
+`container-source-assets-<version>-<sha>` artifact, before continuing.
+
+## Container corresponding-source bundle
+
+The unprivileged `container-sources` job checks out the validated release SHA
+and reads the two runtime architectures from the exact digest-pinned
+`node:22-alpine` OCI index. It requires the amd64 and arm64 installed Alpine
+package inventories to have identical package, version, license, source-origin,
+and embedded aports-commit identities. It then produces:
+
+- `unkeep-<version>-container-sources.tar.gz`, containing the raw OCI
+  descriptors and installed-package databases, the exact Docker Node recipe,
+  the signed Node source release and pinned release key, the actual
+  amd64 x64-musl input archive, and every installed Alpine origin's recipe,
+  local patches, and checksum-verified upstream distfiles; and
+- `unkeep-<version>-container-sources.json`, binding the archive hash to the
+  release version and SHA, pinned base index and platform digests, Node version,
+  and internal source manifest.
+
+Alpine recipes are resolved from each installed package's embedded `c:` commit,
+not a mutable branch. Split packages are deduplicated by their `o:` source
+origin, and source fetching is evaluated for both `x86_64` and `aarch64` so
+architecture-conditional inputs are included. The archive is deterministic,
+has fixed ownership and timestamps, and rejects non-regular entries, unsafe
+paths, excessive members, and excessive expanded sizes during verification.
+Safe recipe-internal symlinks are copied to regular files and recorded in
+`NORMALIZED-SYMLINKS.json`; absolute, escaping, or otherwise unsafe symlinks
+fail the build.
+`CONTAINER-LICENSES.json` maps every Alpine runtime package and both Node
+architecture inputs to bundled license texts. Canonical SPDX texts are fetched
+from the immutable license-list-data commit recorded in that mapping, and the
+Node source and amd64 binary input must contain the same bundled Node license.
+
+The producer passes the archive and metadata hashes separately as job outputs
+and preserves both files in the independently named, 14-day
+`container-source-assets-<version>-<sha>` artifact. The dry run downloads and
+verifies those exact retained bytes. A
+tag-triggered run verifies them before the first registry login. After pushing
+the untagged platform candidates, `stage_container` re-inspects each exact
+digest-addressed image and requires its full Alpine package source identities,
+Node version, and Node binary hash to match `SOURCE-INVENTORY.json`. It then
+creates
+`unkeep-<version>-container-source-binding.json`, which binds the verified
+source bytes to both exact staged image digests. Every later publication job
+rechecks that binding, the exact-name staging manifest, and the remote draft
+bytes. The final `SHA256SUMS` and immutable GitHub Release attestation cover all
+three source-compliance assets.
+
+To avoid retaining several 233 MB copies against the repository's Actions
+storage quota, the logical release bundle is split across Actions artifacts:
+the source producer retains the archive and metadata once, while staging and
+final diagnostic artifacts retain the other files. Consumers download both
+parts into one exact-name directory before checking the staging manifest.
+The immutable GitHub Release itself contains the complete assembled bundle.
+
+The bundle documents corresponding source and build inputs; it is not a claim
+that the container is bit-for-bit reproducible. In particular, the amd64 Node
+runtime comes from the checksum-pinned unofficial x64-musl binary named in the
+exact Docker Node recipe, while arm64 is built from the signed official Node
+source release. Preserve that distinction when changing the base image.
 
 ## Publish a release candidate
 
@@ -284,16 +350,12 @@ Before tagging:
 - verify all manifests and the CLI report the intended `X.Y.Z-rc.N` version;
 - regenerate `THIRD_PARTY_NOTICES.md` with `pnpm notices` and verify it with
   `pnpm notices:check`;
-- complete the base-image compliance review. The image preserves Node's
-  `/usr/local/LICENSE` as `NODE_RUNTIME_LICENSE`, and its SBOM inventories the
-  Alpine packages, but the pinned Alpine runtime also redistributes
-  GPL/LGPL/MPL components whose required notices and corresponding-source
-  obligations are not satisfied by an SBOM alone. Do not tag until the release
-  includes a reviewed source/notice bundle or another documented compliance
-  path for those exact package versions. Keep
-  `UNKEEP_CONTAINER_COMPLIANCE_GUARD` unset in both protected environments
-  until that review is complete, then set it in both to the exact documented
-  sentinel value above;
+- inspect the `container-source-assets-<version>-<sha>` artifact from the
+  successful dry run. Confirm the two platform inventories, Node provenance
+  distinction, exact aports commits, complete source manifest, and archive
+  hashes. Keep `UNKEEP_CONTAINER_COMPLIANCE_GUARD` unset in both protected
+  environments until that review is complete, then set it in both to the exact
+  digest-bound sentinel above;
 - re-run the administrator REST check and verify release immutability is still
   enabled; verify `UNKEEP_IMMUTABLE_RELEASES_GUARD` and the shared compliance
   guard in both protected environments, `UNKEEP_RELEASE_GUARD` in `release`,
@@ -333,21 +395,27 @@ skip a failed boundary.
 
 The serialized jobs enforce these handoffs:
 
-1. `stage_container` downloads the three packed npm tarballs, requires the
-   exact versioned filenames and SHA-256 values produced by `package`, and runs
-   the package smoke harness again. It inventories all three npm versions and
+1. `stage_container` downloads the three packed npm tarballs and independently
+   hashed source assets, requires their exact versioned filenames and the
+   SHA-256 values produced by their respective `package` and
+   `container-sources` jobs, and runs the package smoke harness again. It
+   inventories all three npm versions and
    both GHCR release tags, revalidates the annotated tag, and only then pushes
    untagged canonical `linux/amd64` and `linux/arm64` digests. It pulls those
    exact digests back, exercises both hardened runtimes, checks their
    architecture and embedded release identity, scans both with Trivy, and
    requires anonymous access. It exports the amd64 SBOM and Node runtime
-   license, records an exact-name SHA-256 manifest for the complete staging
-   bundle, and uploads the bundle and manifest as separate workflow artifacts.
+   license, binds the source archive to both exact staged platform digests,
+   records an exact-name SHA-256 manifest for the complete logical staging
+   bundle, and uploads the non-source portion and manifest as separate workflow
+   artifacts while retaining the source portion in its independently hashed
+   producer artifact.
    Its run-attempt output also authorizes the remaining jobs only for this
    exact attempt.
-2. `draft_release` downloads both staging artifacts, checks the manifest's
-   digest passed through the prior job output, requires exactly the expected
-   versioned assets, and verifies every checksum. After revalidating the tag it
+2. `draft_release` downloads the staged non-source assets, independently
+   retained source assets, and staging manifest; checks the manifest digest
+   passed through the prior job output; requires exactly the expected versioned
+   assets; and verifies every checksum. After revalidating the tag it
    creates, or strictly reuses, a draft prerelease and uploads only that checked
    bundle. The release notes are the curated `CHANGELOG.md` section for the
    exact version; commit titles and pull requests are never synthesized into
@@ -462,7 +530,11 @@ immutability and `gh release verify-asset` authenticate the GitHub assets;
 `SHA256SUMS` remains useful as a portable corruption check but is not a
 signature by itself. Confirm the release bundle includes
 `THIRD_PARTY_NOTICES.md`, `NODE_RUNTIME_LICENSE`, and
-`compose.release.yaml`. GHCR does not provide server-side immutable tags, so
+`compose.release.yaml`, plus
+`unkeep-<version>-container-sources.tar.gz`,
+`unkeep-<version>-container-sources.json`, and
+`unkeep-<version>-container-source-binding.json`. GHCR does not provide
+server-side immutable tags, so
 the release-slot helper refuses to start publication when any exact npm version
 or either release image tag already exists. Deployments should still pin the
 recorded image digest where reproducibility matters.

@@ -381,6 +381,79 @@ jobs:
               --no-progress \
               --skip-version-check
 
+  container-sources:
+    name: Build exact container source bundle
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      base_digest: ${{ steps.sources.outputs.base_digest }}
+      bundle_sha256: ${{ steps.sources.outputs.bundle_sha256 }}
+      metadata_sha256: ${{ steps.sources.outputs.metadata_sha256 }}
+    steps:
+      - name: Check out the validated commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.release_sha }}
+
+      - name: Set up QEMU for arm64 inventory
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          image: ${{ env.QEMU_IMAGE }}
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: |
+            image=${{ env.BUILDKIT_IMAGE }}
+
+      - name: Build and verify corresponding sources
+        id: sources
+        env:
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p container-source-assets
+          node scripts/container-source-bundle.mjs build \
+            --version "$VERSION" \
+            --revision "$RELEASE_SHA" \
+            --output container-source-assets
+          diff -u \
+            <(printf '%s\n' \
+              "unkeep-$VERSION-container-sources.json" \
+              "unkeep-$VERSION-container-sources.tar.gz" | sort) \
+            <(find container-source-assets -maxdepth 1 -type f -printf '%f\n' | sort)
+
+      - name: Revalidate the source producer outputs
+        env:
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          node scripts/container-source-bundle.mjs verify \
+            --version "$VERSION" \
+            --revision "$RELEASE_SHA" \
+            --assets container-source-assets \
+            --bundle-sha "${{ steps.sources.outputs.bundle_sha256 }}" \
+            --metadata-sha "${{ steps.sources.outputs.metadata_sha256 }}"
+
+      - name: Upload exact container source assets
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: container-source-assets-${{ needs.prepare.outputs.version }}-${{ needs.prepare.outputs.release_sha }}
+          path: container-source-assets
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
   package:
     name: Build immutable npm artifacts
     needs:
@@ -519,6 +592,7 @@ jobs:
       - prepare
       - package
       - verify-packed-node-20
+      - container-sources
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -529,6 +603,32 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ needs.prepare.outputs.release_sha }}
+
+      - name: Download and verify exact container sources
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: container-source-assets-${{ needs.prepare.outputs.version }}-${{ needs.prepare.outputs.release_sha }}
+          path: container-source-assets
+
+      - name: Revalidate container source handoff
+        env:
+          BUNDLE_SHA256: ${{ needs.container-sources.outputs.bundle_sha256 }}
+          METADATA_SHA256: ${{ needs.container-sources.outputs.metadata_sha256 }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          diff -u \
+            <(printf '%s\n' \
+              "unkeep-$VERSION-container-sources.json" \
+              "unkeep-$VERSION-container-sources.tar.gz" | sort) \
+            <(find container-source-assets -maxdepth 1 -type f -printf '%f\n' | sort)
+          node scripts/container-source-bundle.mjs verify \
+            --version "$VERSION" \
+            --revision "$RELEASE_SHA" \
+            --assets container-source-assets \
+            --bundle-sha "$BUNDLE_SHA256" \
+            --metadata-sha "$METADATA_SHA256"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -600,6 +700,7 @@ jobs:
       - prepare
       - package
       - verify-packed-node-20
+      - container-sources
     runs-on: ubuntu-latest
     timeout-minutes: 90
     environment: release
@@ -609,10 +710,15 @@ jobs:
     outputs:
       amd64_digest: ${{ steps.image-amd64.outputs.digest }}
       arm64_digest: ${{ steps.image-arm64.outputs.digest }}
+      base_digest: ${{ needs.container-sources.outputs.base_digest }}
       release_attempt: ${{ steps.release_environment.outputs.attempt }}
       release_gate: ${{ steps.release_environment.outputs.validated }}
+      source_binding_sha256: ${{ steps.source_binding.outputs.binding_sha256 }}
+      source_bundle_sha256: ${{ needs.container-sources.outputs.bundle_sha256 }}
+      source_metadata_sha256: ${{ needs.container-sources.outputs.metadata_sha256 }}
       stage_manifest_sha256: ${{ steps.stage_manifest.outputs.sha256 }}
     env:
+      BASE_DIGEST: ${{ needs.container-sources.outputs.base_digest }}
       IMAGE: ${{ needs.prepare.outputs.image }}
       RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -626,6 +732,11 @@ jobs:
           RELEASE_GUARD: ${{ vars.UNKEEP_RELEASE_GUARD }}
         run: |
           set -euo pipefail
+          if [[ ! "$BASE_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::The source producer returned an invalid base-image digest"
+            exit 1
+          fi
+          expected_compliance_guard="BrettKinny/UnKeep:container-compliance:${BASE_DIGEST}:v1"
           if [[ "$RELEASE_GUARD" != "BrettKinny/UnKeep:release:v1" ]]; then
             echo "::error::The protected release environment is missing its UNKEEP_RELEASE_GUARD sentinel"
             exit 1
@@ -635,7 +746,7 @@ jobs:
             echo "::error::Leave UNKEEP_IMMUTABLE_RELEASES_GUARD unset until that review is complete"
             exit 1
           fi
-          if [[ "$CONTAINER_COMPLIANCE_GUARD" != "BrettKinny/UnKeep:container-compliance-reviewed:v1" ]]; then
+          if [[ "$CONTAINER_COMPLIANCE_GUARD" != "$expected_compliance_guard" ]]; then
             echo "::error::GHCR publication is blocked until the exact container source and notice review is complete"
             echo "::error::Leave UNKEEP_CONTAINER_COMPLIANCE_GUARD unset until that review is documented"
             exit 1
@@ -654,6 +765,30 @@ jobs:
         with:
           name: npm-release-assets
           path: npm-artifacts
+
+      - name: Download exact container source assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: container-source-assets-${{ env.VERSION }}-${{ env.RELEASE_SHA }}
+          path: container-source-assets
+
+      - name: Revalidate container sources before the first registry write
+        env:
+          BUNDLE_SHA256: ${{ needs.container-sources.outputs.bundle_sha256 }}
+          METADATA_SHA256: ${{ needs.container-sources.outputs.metadata_sha256 }}
+        run: |
+          set -euo pipefail
+          diff -u \
+            <(printf '%s\n' \
+              "unkeep-$VERSION-container-sources.json" \
+              "unkeep-$VERSION-container-sources.tar.gz" | sort) \
+            <(find container-source-assets -maxdepth 1 -type f -printf '%f\n' | sort)
+          node scripts/container-source-bundle.mjs verify \
+            --version "$VERSION" \
+            --revision "$RELEASE_SHA" \
+            --assets container-source-assets \
+            --bundle-sha "$BUNDLE_SHA256" \
+            --metadata-sha "$METADATA_SHA256"
 
       - name: Revalidate exact npm artifacts before container staging
         env:
@@ -682,6 +817,7 @@ jobs:
             "npm-artifacts/unkeep-client-$VERSION.tgz" \
             "npm-artifacts/unkeep-cli-$VERSION.tgz" \
             release-assets/
+          cp container-source-assets/* release-assets/
 
       - name: Include deployment and licensing files
         run: cp THIRD_PARTY_NOTICES.md compose.release.yaml release-assets/
@@ -972,6 +1108,25 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
 
+      - name: Bind sources to the exact staged platform images
+        id: source_binding
+        env:
+          AMD64_DIGEST: ${{ steps.image-amd64.outputs.digest }}
+          ARM64_DIGEST: ${{ steps.image-arm64.outputs.digest }}
+          BUNDLE_SHA256: ${{ needs.container-sources.outputs.bundle_sha256 }}
+          METADATA_SHA256: ${{ needs.container-sources.outputs.metadata_sha256 }}
+        run: |
+          set -euo pipefail
+          node scripts/container-source-bundle.mjs bind \
+            --version "$VERSION" \
+            --revision "$RELEASE_SHA" \
+            --assets release-assets \
+            --bundle-sha "$BUNDLE_SHA256" \
+            --metadata-sha "$METADATA_SHA256" \
+            --image-repository "$IMAGE" \
+            --amd64-digest "$AMD64_DIGEST" \
+            --arm64-digest "$ARM64_DIGEST"
+
       - name: Record the exact staging bundle
         id: stage_manifest
         run: |
@@ -982,6 +1137,9 @@ jobs:
               "NODE_RUNTIME_LICENSE" \
               "THIRD_PARTY_NOTICES.md" \
               "compose.release.yaml" \
+              "unkeep-$VERSION-container-source-binding.json" \
+              "unkeep-$VERSION-container-sources.json" \
+              "unkeep-$VERSION-container-sources.tar.gz" \
               "unkeep-$VERSION-linux-amd64.spdx.json" \
               "unkeep-cli-$VERSION.tgz" \
               "unkeep-client-$VERSION.tgz" \
@@ -993,6 +1151,9 @@ jobs:
               NODE_RUNTIME_LICENSE \
               THIRD_PARTY_NOTICES.md \
               compose.release.yaml \
+              "unkeep-$VERSION-container-source-binding.json" \
+              "unkeep-$VERSION-container-sources.json" \
+              "unkeep-$VERSION-container-sources.tar.gz" \
               "unkeep-$VERSION-linux-amd64.spdx.json" \
               "unkeep-cli-$VERSION.tgz" \
               "unkeep-client-$VERSION.tgz" \
@@ -1005,7 +1166,10 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: staged-release-assets-${{ env.VERSION }}
-          path: release-assets
+          path: |
+            release-assets
+            !release-assets/unkeep-${{ env.VERSION }}-container-sources.json
+            !release-assets/unkeep-${{ env.VERSION }}-container-sources.tar.gz
           if-no-files-found: error
           retention-days: 90
 
@@ -1035,6 +1199,7 @@ jobs:
     permissions:
       contents: write
     env:
+      BASE_DIGEST: ${{ needs.stage_container.outputs.base_digest }}
       IMAGE: ${{ needs.prepare.outputs.image }}
       RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -1047,9 +1212,11 @@ jobs:
           STAGED_RELEASE_ATTEMPT: ${{ needs.stage_container.outputs.release_attempt }}
         run: |
           set -euo pipefail
+          test "$BASE_DIGEST" != ""
+          expected_compliance_guard="BrettKinny/UnKeep:container-compliance:${BASE_DIGEST}:v1"
           test "$RELEASE_GUARD" = "BrettKinny/UnKeep:release:v1"
           test "$IMMUTABLE_RELEASES_GUARD" = "BrettKinny/UnKeep:immutable-releases-reviewed:v1"
-          test "$CONTAINER_COMPLIANCE_GUARD" = "BrettKinny/UnKeep:container-compliance-reviewed:v1"
+          test "$CONTAINER_COMPLIANCE_GUARD" = "$expected_compliance_guard"
           if [[ "$STAGED_RELEASE_ATTEMPT" != "$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" ]]; then
             echo "::error::Publication jobs cannot resume across workflow attempts"
             echo "::error::Re-run all jobs so the immutable release slot is inventoried again"
@@ -1068,6 +1235,12 @@ jobs:
           name: staged-release-assets-${{ env.VERSION }}
           path: release-assets
 
+      - name: Download the independently hashed source assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: container-source-assets-${{ env.VERSION }}-${{ env.RELEASE_SHA }}
+          path: release-assets
+
       - name: Download the staging bundle manifest
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1076,6 +1249,11 @@ jobs:
 
       - name: Revalidate the staging bundle before drafting
         env:
+          AMD64_DIGEST: ${{ needs.stage_container.outputs.amd64_digest }}
+          ARM64_DIGEST: ${{ needs.stage_container.outputs.arm64_digest }}
+          BINDING_SHA256: ${{ needs.stage_container.outputs.source_binding_sha256 }}
+          BUNDLE_SHA256: ${{ needs.stage_container.outputs.source_bundle_sha256 }}
+          METADATA_SHA256: ${{ needs.stage_container.outputs.source_metadata_sha256 }}
           STAGE_MANIFEST_SHA256: ${{ needs.stage_container.outputs.stage_manifest_sha256 }}
         run: |
           set -euo pipefail
@@ -1087,6 +1265,9 @@ jobs:
               "NODE_RUNTIME_LICENSE" \
               "THIRD_PARTY_NOTICES.md" \
               "compose.release.yaml" \
+              "unkeep-$VERSION-container-source-binding.json" \
+              "unkeep-$VERSION-container-sources.json" \
+              "unkeep-$VERSION-container-sources.tar.gz" \
               "unkeep-$VERSION-linux-amd64.spdx.json" \
               "unkeep-cli-$VERSION.tgz" \
               "unkeep-client-$VERSION.tgz" \
@@ -1096,6 +1277,15 @@ jobs:
             cd release-assets
             sha256sum --check "../$manifest"
           )
+          node scripts/container-source-bundle.mjs verify-binding \
+            --version "$VERSION" \
+            --revision "$RELEASE_SHA" \
+            --assets release-assets \
+            --bundle-sha "$BUNDLE_SHA256" \
+            --metadata-sha "$METADATA_SHA256" \
+            --binding-sha "$BINDING_SHA256" \
+            --amd64-digest "$AMD64_DIGEST" \
+            --arm64-digest "$ARM64_DIGEST"
 
       - name: Revalidate the remote release tag before public writes
         run: |
@@ -1170,6 +1360,7 @@ jobs:
     env:
       AMD64_DIGEST: ${{ needs.stage_container.outputs.amd64_digest }}
       ARM64_DIGEST: ${{ needs.stage_container.outputs.arm64_digest }}
+      BASE_DIGEST: ${{ needs.stage_container.outputs.base_digest }}
       IMAGE: ${{ needs.prepare.outputs.image }}
       RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -1182,9 +1373,11 @@ jobs:
           STAGED_RELEASE_ATTEMPT: ${{ needs.stage_container.outputs.release_attempt }}
         run: |
           set -euo pipefail
+          test "$BASE_DIGEST" != ""
+          expected_compliance_guard="BrettKinny/UnKeep:container-compliance:${BASE_DIGEST}:v1"
           test "$RELEASE_GUARD" = "BrettKinny/UnKeep:release:v1"
           test "$IMMUTABLE_RELEASES_GUARD" = "BrettKinny/UnKeep:immutable-releases-reviewed:v1"
-          test "$CONTAINER_COMPLIANCE_GUARD" = "BrettKinny/UnKeep:container-compliance-reviewed:v1"
+          test "$CONTAINER_COMPLIANCE_GUARD" = "$expected_compliance_guard"
           if [[ "$STAGED_RELEASE_ATTEMPT" != "$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" ]]; then
             echo "::error::Publication jobs cannot resume across workflow attempts"
             echo "::error::Re-run all jobs so the immutable release slot is inventoried again"
@@ -1196,6 +1389,43 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ needs.prepare.outputs.release_sha }}
+
+      - name: Download the verified staging bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: staged-release-assets-${{ env.VERSION }}
+          path: release-assets
+
+      - name: Download the independently hashed source assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: container-source-assets-${{ env.VERSION }}-${{ env.RELEASE_SHA }}
+          path: release-assets
+
+      - name: Download the staging bundle manifest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: staged-release-manifest-${{ env.VERSION }}
+          path: release-verification
+
+      - name: Revalidate source binding before registry login
+        env:
+          AMD64_DIGEST: ${{ needs.stage_container.outputs.amd64_digest }}
+          ARM64_DIGEST: ${{ needs.stage_container.outputs.arm64_digest }}
+          BINDING_SHA256: ${{ needs.stage_container.outputs.source_binding_sha256 }}
+          BUNDLE_SHA256: ${{ needs.stage_container.outputs.source_bundle_sha256 }}
+          METADATA_SHA256: ${{ needs.stage_container.outputs.source_metadata_sha256 }}
+        run: |
+          set -euo pipefail
+          node scripts/container-source-bundle.mjs verify-binding \
+            --version "$VERSION" \
+            --revision "$RELEASE_SHA" \
+            --assets release-assets \
+            --bundle-sha "$BUNDLE_SHA256" \
+            --metadata-sha "$METADATA_SHA256" \
+            --binding-sha "$BINDING_SHA256" \
+            --amd64-digest "$AMD64_DIGEST" \
+            --arm64-digest "$ARM64_DIGEST"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -1210,12 +1440,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Download the staging bundle manifest
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: staged-release-manifest-${{ env.VERSION }}
-          path: release-verification
 
       - name: Revalidate the staged platform digests
         run: |
@@ -1327,6 +1551,9 @@ jobs:
               "NODE_RUNTIME_LICENSE" \
               "THIRD_PARTY_NOTICES.md" \
               "compose.release.yaml" \
+              "unkeep-$VERSION-container-source-binding.json" \
+              "unkeep-$VERSION-container-sources.json" \
+              "unkeep-$VERSION-container-sources.tar.gz" \
               "unkeep-$VERSION-linux-amd64.spdx.json" \
               "unkeep-cli-$VERSION.tgz" \
               "unkeep-client-$VERSION.tgz" \
@@ -1470,6 +1697,7 @@ jobs:
       contents: read
       id-token: write
     env:
+      BASE_DIGEST: ${{ needs.stage_container.outputs.base_digest }}
       IMAGE: ${{ needs.prepare.outputs.image }}
       RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -1482,12 +1710,14 @@ jobs:
           STAGED_RELEASE_ATTEMPT: ${{ needs.stage_container.outputs.release_attempt }}
         run: |
           set -euo pipefail
+          test "$BASE_DIGEST" != ""
+          expected_compliance_guard="BrettKinny/UnKeep:container-compliance:${BASE_DIGEST}:v1"
           if [[ "$NPM_RELEASE_GUARD" != "BrettKinny/UnKeep:release-npm:v1" ]]; then
             echo "::error::The protected release-npm environment is missing its UNKEEP_NPM_RELEASE_GUARD sentinel"
             exit 1
           fi
           test "$IMMUTABLE_RELEASES_GUARD" = "BrettKinny/UnKeep:immutable-releases-reviewed:v1"
-          test "$CONTAINER_COMPLIANCE_GUARD" = "BrettKinny/UnKeep:container-compliance-reviewed:v1"
+          test "$CONTAINER_COMPLIANCE_GUARD" = "$expected_compliance_guard"
           if [[ "$STAGED_RELEASE_ATTEMPT" != "$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" ]]; then
             echo "::error::Publication jobs cannot resume across workflow attempts"
             echo "::error::Re-run all jobs so the immutable release slot is inventoried again"
@@ -1623,8 +1853,13 @@ jobs:
 
       - name: Revalidate tag, draft, and promoted image before npm publication
         env:
+          AMD64_DIGEST: ${{ needs.stage_container.outputs.amd64_digest }}
+          ARM64_DIGEST: ${{ needs.stage_container.outputs.arm64_digest }}
+          BINDING_SHA256: ${{ needs.stage_container.outputs.source_binding_sha256 }}
+          BUNDLE_SHA256: ${{ needs.stage_container.outputs.source_bundle_sha256 }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE_DIGEST: ${{ needs.promote_image.outputs.image_digest }}
+          METADATA_SHA256: ${{ needs.stage_container.outputs.source_metadata_sha256 }}
         run: |
           set -euo pipefail
           remote_release_sha="$(
@@ -1655,6 +1890,9 @@ jobs:
               "NODE_RUNTIME_LICENSE" \
               "THIRD_PARTY_NOTICES.md" \
               "compose.release.yaml" \
+              "unkeep-$VERSION-container-source-binding.json" \
+              "unkeep-$VERSION-container-sources.json" \
+              "unkeep-$VERSION-container-sources.tar.gz" \
               "unkeep-$VERSION-linux-amd64.spdx.json" \
               "unkeep-cli-$VERSION.tgz" \
               "unkeep-client-$VERSION.tgz" \
@@ -1664,6 +1902,15 @@ jobs:
             cd "$draft_assets"
             sha256sum --check "$GITHUB_WORKSPACE/release-verification/staged-release-assets.sha256"
           )
+          node scripts/container-source-bundle.mjs verify-binding \
+            --version "$VERSION" \
+            --revision "$RELEASE_SHA" \
+            --assets "$draft_assets" \
+            --bundle-sha "$BUNDLE_SHA256" \
+            --metadata-sha "$METADATA_SHA256" \
+            --binding-sha "$BINDING_SHA256" \
+            --amd64-digest "$AMD64_DIGEST" \
+            --arm64-digest "$ARM64_DIGEST"
 
           anonymous_config="$RUNNER_TEMP/docker-anonymous"
           install -d -m 0700 "$anonymous_config"
@@ -1761,6 +2008,7 @@ jobs:
     permissions:
       contents: write
     env:
+      BASE_DIGEST: ${{ needs.stage_container.outputs.base_digest }}
       IMAGE: ${{ needs.prepare.outputs.image }}
       RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -1773,9 +2021,11 @@ jobs:
           STAGED_RELEASE_ATTEMPT: ${{ needs.stage_container.outputs.release_attempt }}
         run: |
           set -euo pipefail
+          test "$BASE_DIGEST" != ""
+          expected_compliance_guard="BrettKinny/UnKeep:container-compliance:${BASE_DIGEST}:v1"
           test "$RELEASE_GUARD" = "BrettKinny/UnKeep:release:v1"
           test "$IMMUTABLE_RELEASES_GUARD" = "BrettKinny/UnKeep:immutable-releases-reviewed:v1"
-          test "$CONTAINER_COMPLIANCE_GUARD" = "BrettKinny/UnKeep:container-compliance-reviewed:v1"
+          test "$CONTAINER_COMPLIANCE_GUARD" = "$expected_compliance_guard"
           if [[ "$STAGED_RELEASE_ATTEMPT" != "$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" ]]; then
             echo "::error::Publication jobs cannot resume across workflow attempts"
             echo "::error::Re-run all jobs so the immutable release slot is inventoried again"
@@ -1794,6 +2044,12 @@ jobs:
           name: staged-release-assets-${{ env.VERSION }}
           path: release-assets
 
+      - name: Download the independently hashed source assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: container-source-assets-${{ env.VERSION }}-${{ env.RELEASE_SHA }}
+          path: release-assets
+
       - name: Download the staging bundle manifest
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1808,7 +2064,12 @@ jobs:
 
       - name: Revalidate the final bundle inputs
         env:
+          AMD64_DIGEST: ${{ needs.stage_container.outputs.amd64_digest }}
+          ARM64_DIGEST: ${{ needs.stage_container.outputs.arm64_digest }}
+          BINDING_SHA256: ${{ needs.stage_container.outputs.source_binding_sha256 }}
+          BUNDLE_SHA256: ${{ needs.stage_container.outputs.source_bundle_sha256 }}
           IMAGE_DIGEST: ${{ needs.promote_image.outputs.image_digest }}
+          METADATA_SHA256: ${{ needs.stage_container.outputs.source_metadata_sha256 }}
           STAGE_MANIFEST_SHA256: ${{ needs.stage_container.outputs.stage_manifest_sha256 }}
         run: |
           set -euo pipefail
@@ -1820,6 +2081,9 @@ jobs:
               "NODE_RUNTIME_LICENSE" \
               "THIRD_PARTY_NOTICES.md" \
               "compose.release.yaml" \
+              "unkeep-$VERSION-container-source-binding.json" \
+              "unkeep-$VERSION-container-sources.json" \
+              "unkeep-$VERSION-container-sources.tar.gz" \
               "unkeep-$VERSION-image-digest.txt" \
               "unkeep-$VERSION-linux-amd64.spdx.json" \
               "unkeep-cli-$VERSION.tgz" \
@@ -1836,6 +2100,15 @@ jobs:
           grep -Fx "version_tag=$IMAGE:$VERSION" "$digest_file"
           grep -Fx "sha_tag=$IMAGE:sha-$RELEASE_SHA" "$digest_file"
           grep -Fx "digest=$IMAGE_DIGEST" "$digest_file"
+          node scripts/container-source-bundle.mjs verify-binding \
+            --version "$VERSION" \
+            --revision "$RELEASE_SHA" \
+            --assets release-assets \
+            --bundle-sha "$BUNDLE_SHA256" \
+            --metadata-sha "$METADATA_SHA256" \
+            --binding-sha "$BINDING_SHA256" \
+            --amd64-digest "$AMD64_DIGEST" \
+            --arm64-digest "$ARM64_DIGEST"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -1918,6 +2191,9 @@ jobs:
             cd release-assets
             sha256sum ./*.tgz ./*.spdx.json ./*-image-digest.txt \
               ./NODE_RUNTIME_LICENSE ./THIRD_PARTY_NOTICES.md \
+              "./unkeep-$VERSION-container-source-binding.json" \
+              "./unkeep-$VERSION-container-sources.json" \
+              "./unkeep-$VERSION-container-sources.tar.gz" \
               ./compose.release.yaml > SHA256SUMS
           )
           diff -u \
@@ -1926,6 +2202,9 @@ jobs:
               "SHA256SUMS" \
               "THIRD_PARTY_NOTICES.md" \
               "compose.release.yaml" \
+              "unkeep-$VERSION-container-source-binding.json" \
+              "unkeep-$VERSION-container-sources.json" \
+              "unkeep-$VERSION-container-sources.tar.gz" \
               "unkeep-$VERSION-image-digest.txt" \
               "unkeep-$VERSION-linux-amd64.spdx.json" \
               "unkeep-cli-$VERSION.tgz" \
@@ -1937,7 +2216,10 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-assets-${{ env.VERSION }}
-          path: release-assets
+          path: |
+            release-assets
+            !release-assets/unkeep-${{ env.VERSION }}-container-sources.json
+            !release-assets/unkeep-${{ env.VERSION }}-container-sources.tar.gz
           if-no-files-found: error
           retention-days: 90
 
