@@ -1,0 +1,93 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-surface: #ffffff;
+  --color-surface-dim: #f5f5f5;
+  --color-surface-bright: #fafafa;
+  --color-on-surface: #1a1a1a;
+  --color-on-surface-muted: #666666;
+  --color-primary: #2563eb;
+  --color-primary-dim: #1d4ed8;
+  --color-on-primary: #ffffff;
+  --color-danger: #dc2626;
+  --color-border: #e5e5e5;
+
+  /* Note colors */
+  --color-note-default: #ffffff;
+  --color-note-red: #f28b82;
+  --color-note-orange: #fbbc04;
+  --color-note-yellow: #fff475;
+  --color-note-green: #ccff90;
+  --color-note-teal: #a7ffeb;
+  --color-note-blue: #cbf0f8;
+  --color-note-purple: #d7aefb;
+  --color-note-pink: #fdcfe8;
+  --color-note-brown: #e6c9a8;
+  --color-note-gray: #e8eaed;
+}
+
+/* Dark mode — triggered by either OS preference or manual .dark class */
+@layer theme {
+  @media (prefers-color-scheme: dark) {
+    :root:not(.light) {
+      --color-surface: #1e1e1e;
+      --color-surface-dim: #2d2d2d;
+      --color-surface-bright: #3a3a3a;
+      --color-on-surface: #e0e0e0;
+      --color-on-surface-muted: #999999;
+      --color-primary: #60a5fa;
+      --color-primary-dim: #3b82f6;
+      --color-on-primary: #1a1a1a;
+      --color-danger: #ef4444;
+      --color-border: #404040;
+
+      --color-note-default: #2d2d2d;
+      --color-note-red: #5c2b29;
+      --color-note-orange: #614a19;
+      --color-note-yellow: #635d19;
+      --color-note-green: #345920;
+      --color-note-teal: #16504b;
+      --color-note-blue: #2d555e;
+      --color-note-purple: #42275e;
+      --color-note-pink: #5b2245;
+      --color-note-brown: #442f19;
+      --color-note-gray: #3c3f43;
+    }
+  }
+
+  :root.dark {
+    --color-surface: #1e1e1e;
+    --color-surface-dim: #2d2d2d;
+    --color-surface-bright: #3a3a3a;
+    --color-on-surface: #e0e0e0;
+    --color-on-surface-muted: #999999;
+    --color-primary: #60a5fa;
+    --color-primary-dim: #3b82f6;
+    --color-on-primary: #1a1a1a;
+    --color-danger: #ef4444;
+    --color-border: #404040;
+
+    --color-note-default: #2d2d2d;
+    --color-note-red: #5c2b29;
+    --color-note-orange: #614a19;
+    --color-note-yellow: #635d19;
+    --color-note-green: #345920;
+    --color-note-teal: #16504b;
+    --color-note-blue: #2d555e;
+    --color-note-purple: #42275e;
+    --color-note-pink: #5b2245;
+    --color-note-brown: #442f19;
+    --color-note-gray: #3c3f43;
+  }
+}
+
+html {
+  font-family: system-ui, -apple-system, sans-serif;
+  background-color: var(--color-surface);
+  color: var(--color-on-surface);
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+}

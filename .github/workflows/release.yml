@@ -1,0 +1,2341 @@
+name: Release candidate
+
+on:
+  push:
+    tags:
+      - "v*-rc.*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag, or commit to validate without publishing"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'push' && 'release-publish' || format('release-dry-run-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+env:
+  PNPM_VERSION: 10.33.4
+  BUILDX_VERSION: v0.36.0
+  BUILDKIT_IMAGE: "docker.io/moby/buildkit:v0.32.0@sha256:1f8167fcb0eca5b7126353d35299386945cbb8949cc516c592a49f80cfce4fa2"
+  QEMU_IMAGE: "docker.io/tonistiigi/binfmt:qemu-v10.2.3-68@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0"
+  TRIVY_IMAGE: "docker.io/aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f"
+
+jobs:
+  prepare:
+    name: Validate release identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      image: ${{ steps.release.outputs.image }}
+      publish: ${{ steps.release.outputs.publish }}
+      release_sha: ${{ steps.release.outputs.release_sha }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Check out the candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+
+      - name: Validate tag, version, and source commit
+        id: release
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+        run: |
+          set -euo pipefail
+
+          version="$(node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+
+          const manifests = [
+            { path: "packages/core/package.json", name: "@unkeep/core", publish: true },
+            { path: "packages/client/package.json", name: "@unkeep/client", publish: true },
+            { path: "apps/cli/package.json", name: "@unkeep/cli", publish: true },
+            { path: "apps/web/package.json", name: "@unkeep/web", publish: false },
+            { path: "apps/server/package.json", name: "@unkeep/server", publish: false },
+          ];
+          const packages = manifests.map(manifest => ({
+            ...manifest,
+            value: JSON.parse(readFileSync(manifest.path, "utf8")),
+          }));
+          const version = packages[0].value.version;
+          const rc = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-rc\.(0|[1-9]\d*)$/;
+
+          if (!rc.test(version)) {
+            throw new Error(`Release candidates require an X.Y.Z-rc.N version, received ${version}`);
+          }
+          for (const pkg of packages) {
+            if (pkg.value.name !== pkg.name) {
+              throw new Error(`${pkg.path} is named ${pkg.value.name}; expected ${pkg.name}`);
+            }
+            if (pkg.value.version !== version) {
+              throw new Error(`${pkg.path} has ${pkg.value.version}; expected ${version}`);
+            }
+            if (pkg.publish && (
+              pkg.value.private === true
+              || pkg.value.publishConfig?.access !== "public"
+              || pkg.value.publishConfig?.registry !== "https://registry.npmjs.org/"
+            )) {
+              throw new Error(`${pkg.path} is not configured as a public package`);
+            }
+            if (!pkg.publish && pkg.value.private !== true) {
+              throw new Error(`${pkg.path} must remain private`);
+            }
+          }
+
+          const help = readFileSync("apps/cli/src/help.ts", "utf8");
+          const cliVersion = help.match(/export const VERSION = '([^']+)'/)?.[1];
+          if (cliVersion !== version) {
+            throw new Error(`CLI reports ${cliVersion ?? "no version"}; expected ${version}`);
+          }
+
+          const compose = readFileSync("compose.release.yaml", "utf8");
+          const expectedImage = `ghcr.io/brettkinny/unkeep:${version}`;
+          const composeImages = [...compose.matchAll(
+            /^\s*image:\s*\$\{UNKEEP_IMAGE:-([^}]+)\}\s*$/gm,
+          )].map(match => match[1]);
+          if (composeImages.length !== 2 || composeImages.some(image => image !== expectedImage)) {
+            throw new Error(
+              `compose.release.yaml must contain exactly two ${expectedImage} defaults`,
+            );
+          }
+
+          const localCompose = readFileSync("compose.yaml", "utf8");
+          const localComposeLines = localCompose.split(/\r?\n/);
+          for (const service of ["unkeep", "unkeep-cli"]) {
+            const start = localComposeLines.indexOf(`  ${service}:`);
+            if (start === -1) {
+              throw new Error(`compose.yaml is missing the ${service} service`);
+            }
+            let end = localComposeLines.length;
+            for (let index = start + 1; index < localComposeLines.length; index += 1) {
+              if (/^(?:  )?[A-Za-z0-9_.-]+:\s*$/.test(localComposeLines[index])) {
+                end = index;
+                break;
+              }
+            }
+            const serviceLines = localComposeLines.slice(start, end);
+            const buildVersions = serviceLines.filter(line =>
+              /^\s+UNKEEP_VERSION:\s*\$\{UNKEEP_BUILD_VERSION:-dev\}\s*$/.test(line)
+            );
+            const buildRevisions = serviceLines.filter(line =>
+              /^\s+UNKEEP_REVISION:\s*\$\{UNKEEP_BUILD_REVISION:-unknown\}\s*$/.test(line)
+            );
+            if (buildVersions.length !== 1 || buildRevisions.length !== 1) {
+              throw new Error(
+                `compose.yaml must wire version and revision build arguments for ${service}`,
+              );
+            }
+          }
+
+          process.stdout.write(version);
+          NODE
+          )"
+          release_sha="$(git rev-parse HEAD)"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          publish=false
+
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            if [[ "$REF_PROTECTED" != "true" ]]; then
+              echo "::error::Release tags must match an active GitHub tag-protection rule"
+              exit 1
+            fi
+            if [[ "$REPOSITORY_VISIBILITY" != "public" ]]; then
+              echo "::error::npm provenance requires a public source repository"
+              exit 1
+            fi
+            if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
+              echo "::error::Release tag must have the form vX.Y.Z-rc.N"
+              exit 1
+            fi
+            if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match package version $version"
+              exit 1
+            fi
+            if [[ "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" != "tag" ]]; then
+              echo "::error::Release tags must be annotated (prefer a signed tag)"
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "$release_sha" origin/main; then
+              echo "::error::Release commit is not contained in origin/main"
+              exit 1
+            fi
+            publish=true
+          fi
+
+          {
+            echo "image=$image"
+            echo "publish=$publish"
+            echo "release_sha=$release_sha"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Candidate: $version at $release_sha"
+          echo "Image: $image"
+          echo "Publishing enabled: $publish"
+
+      - name: Validate curated changelog release notes
+        run: node scripts/extract-release-notes.mjs "${{ steps.release.outputs.version }}" > /dev/null
+
+  verify:
+    name: Full release gates
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out the validated commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.release_sha }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Audit the complete dependency graph
+        run: |
+          # Deliberately omit --ignore-registry-errors: releases fail closed.
+          pnpm audit --audit-level high
+
+      - name: Verify generated third-party notices
+        run: pnpm notices:check
+
+      - name: Type-check
+        run: pnpm check
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Test
+        run: pnpm test
+
+      - name: Smoke-test package artifacts
+        run: pnpm smoke:packages
+
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run browser release gates
+        run: pnpm test:e2e
+
+      - name: Preserve Playwright diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-playwright-${{ needs.prepare.outputs.release_sha }}
+          path: test-results/playwright
+          retention-days: 14
+
+  verify-node-20:
+    name: Node 20 package compatibility
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the validated commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.release_sha }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build public packages
+        run: pnpm build:packages
+
+      - name: Smoke-test installed packages
+        run: pnpm smoke:packages
+
+  verify-container:
+    name: Container gate (${{ matrix.platform }})
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
+    steps:
+      - name: Check out the validated commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.release_sha }}
+
+      - name: Set up QEMU for arm64 validation
+        if: matrix.platform == 'linux/arm64'
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          image: ${{ env.QEMU_IMAGE }}
+          platforms: arm64
+
+      - name: Build the exact candidate image
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          docker build \
+            --platform "$PLATFORM" \
+            --build-arg "UNKEEP_VERSION=${{ needs.prepare.outputs.version }}" \
+            --build-arg "UNKEEP_REVISION=${{ needs.prepare.outputs.release_sha }}" \
+            --tag unkeep:release-scan \
+            .
+
+      - name: Verify image notices, identity, and minimal runtime toolchain
+        env:
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect unkeep:release-scan --format '{{.Config.User}}')" = "node"
+          test "$(docker image inspect unkeep:release-scan --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$VERSION"
+          test "$(docker image inspect unkeep:release-scan --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$RELEASE_SHA"
+          docker run --rm --entrypoint grep unkeep:release-scan \
+            -Fq "$VERSION-$RELEASE_SHA" /app/web/service-worker.js
+          docker run --rm --entrypoint sh unkeep:release-scan -c \
+            'test "$(id -u)" = 1000 &&
+             test "$(stat -c %a:%u:%g /data)" = 700:1000:1000 &&
+             test "$(stat -c %a:%u:%g /home/node/.config)" = 700:1000:1000 &&
+             test "$(stat -c %a:%u:%g /home/node/.config/unkeep)" = 700:1000:1000 &&
+             test -s /app/THIRD_PARTY_NOTICES.md &&
+             test -s /app/web/THIRD_PARTY_NOTICES.md &&
+             test -s /usr/local/LICENSE &&
+             ! command -v npm &&
+             ! command -v npx &&
+             ! command -v pnpm &&
+             ! command -v pnpx &&
+             ! command -v yarn &&
+             ! command -v corepack'
+
+      - name: Exercise isolated CLI key-storage volume
+        run: |
+          docker run --rm \
+            --read-only \
+            --tmpfs /tmp:size=16m,mode=1777 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --mount type=volume,destination=/home/node/.config/unkeep \
+            --entrypoint node \
+            unkeep:release-scan \
+            --input-type=module \
+            --eval '
+              import { stat } from "node:fs/promises";
+              import { JsonFileClientStorage } from "/app/cli/dist/storage.js";
+              const path = "/home/node/.config/unkeep/config.json";
+              const storage = new JsonFileClientStorage(path);
+              await storage.set("volumeProbe", "ok");
+              if (await storage.get("volumeProbe") !== "ok") throw new Error("config volume round trip failed");
+              const directoryMode = (await stat("/home/node/.config/unkeep")).mode & 0o777;
+              const fileMode = (await stat(path)).mode & 0o777;
+              if (directoryMode !== 0o700 || fileMode !== 0o600) throw new Error("unsafe CLI config permissions");
+            '
+
+      - name: Fail closed on high or critical vulnerabilities
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/trivy-cache"
+          docker save --output "$RUNNER_TEMP/unkeep-image.tar" unkeep:release-scan
+          docker run --rm \
+            --mount "type=bind,src=$RUNNER_TEMP/unkeep-image.tar,dst=/scan/unkeep.tar,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/trivy-cache,dst=/root/.cache/trivy" \
+            "$TRIVY_IMAGE" image \
+              --input /scan/unkeep.tar \
+              --exit-code 1 \
+              --severity HIGH,CRITICAL \
+              --scanners vuln \
+              --no-progress \
+              --skip-version-check
+
+  container-sources:
+    name: Build exact container source bundle
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      base_digest: ${{ steps.sources.outputs.base_digest }}
+      bundle_sha256: ${{ steps.sources.outputs.bundle_sha256 }}
+      metadata_sha256: ${{ steps.sources.outputs.metadata_sha256 }}
+    steps:
+      - name: Check out the validated commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.release_sha }}
+
+      - name: Set up QEMU for arm64 inventory
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          image: ${{ env.QEMU_IMAGE }}
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: |
+            image=${{ env.BUILDKIT_IMAGE }}
+
+      - name: Build and verify corresponding sources
+        id: sources
+        env:
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p container-source-assets
+          node scripts/container-source-bundle.mjs build \
+            --version "$VERSION" \
+            --revision "$RELEASE_SHA" \
+            --output container-source-assets
+          diff -u \
+            <(printf '%s\n' \
+              "unkeep-$VERSION-container-sources.json" \
+              "unkeep-$VERSION-container-sources.tar.gz" | sort) \
+            <(find container-source-assets -maxdepth 1 -type f -printf '%f\n' | sort)
+
+      - name: Revalidate the source producer outputs
+        env:
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          node scripts/container-source-bundle.mjs verify \
+            --version "$VERSION" \
+            --revision "$RELEASE_SHA" \
+            --assets container-source-assets \
+            --bundle-sha "${{ steps.sources.outputs.bundle_sha256 }}" \
+            --metadata-sha "${{ steps.sources.outputs.metadata_sha256 }}"
+
+      - name: Upload exact container source assets
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: container-source-assets-${{ needs.prepare.outputs.version }}-${{ needs.prepare.outputs.release_sha }}
+          path: container-source-assets
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+  package:
+    name: Build immutable npm artifacts
+    needs:
+      - prepare
+      - verify
+      - verify-node-20
+      - verify-container
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      cli_sha256: ${{ steps.npm_hashes.outputs.cli_sha256 }}
+      client_sha256: ${{ steps.npm_hashes.outputs.client_sha256 }}
+      core_sha256: ${{ steps.npm_hashes.outputs.core_sha256 }}
+    steps:
+      - name: Check out the validated commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.release_sha }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Pack public packages in dependency order
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          pnpm --filter @unkeep/core pack --pack-destination "$GITHUB_WORKSPACE/release-assets"
+          pnpm --filter @unkeep/client pack --pack-destination "$GITHUB_WORKSPACE/release-assets"
+          pnpm --filter @unkeep/cli pack --pack-destination "$GITHUB_WORKSPACE/release-assets"
+          test -f "release-assets/unkeep-core-$VERSION.tgz"
+          test -f "release-assets/unkeep-client-$VERSION.tgz"
+          test -f "release-assets/unkeep-cli-$VERSION.tgz"
+
+      - name: Smoke-test the exact publication tarballs
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          node scripts/package-smoke.mjs \
+            "release-assets/unkeep-core-$VERSION.tgz" \
+            "release-assets/unkeep-client-$VERSION.tgz" \
+            "release-assets/unkeep-cli-$VERSION.tgz"
+
+      - name: Require the public npm registry
+        run: |
+          set -euo pipefail
+          test "$(npm config get registry)" = "https://registry.npmjs.org/"
+          scoped_registry="$(npm config get @unkeep:registry)"
+          test "$scoped_registry" = "undefined" \
+            || test "$scoped_registry" = "https://registry.npmjs.org/"
+
+      - name: Exercise npm publication without registry writes
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          npm publish --registry=https://registry.npmjs.org/ --dry-run --access public --tag next "./release-assets/unkeep-core-$VERSION.tgz"
+          npm publish --registry=https://registry.npmjs.org/ --dry-run --access public --tag next "./release-assets/unkeep-client-$VERSION.tgz"
+          npm publish --registry=https://registry.npmjs.org/ --dry-run --access public --tag next "./release-assets/unkeep-cli-$VERSION.tgz"
+
+      - name: Record exact npm artifact digests
+        id: npm_hashes
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          core_sha256="$(sha256sum "release-assets/unkeep-core-$VERSION.tgz" | awk '{ print $1 }')"
+          client_sha256="$(sha256sum "release-assets/unkeep-client-$VERSION.tgz" | awk '{ print $1 }')"
+          cli_sha256="$(sha256sum "release-assets/unkeep-cli-$VERSION.tgz" | awk '{ print $1 }')"
+          {
+            echo "core_sha256=$core_sha256"
+            echo "client_sha256=$client_sha256"
+            echo "cli_sha256=$cli_sha256"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload exact npm artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-release-assets
+          path: release-assets/*.tgz
+          if-no-files-found: error
+          retention-days: 30
+
+  verify-packed-node-20:
+    name: Exact npm artifacts on Node 20
+    needs:
+      - prepare
+      - package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the validated smoke harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.release_sha }}
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+          package-manager-cache: false
+
+      - name: Download exact npm artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-release-assets
+          path: release-assets
+
+      - name: Smoke-test the publication tarballs
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          node scripts/package-smoke.mjs \
+            "release-assets/unkeep-core-$VERSION.tgz" \
+            "release-assets/unkeep-client-$VERSION.tgz" \
+            "release-assets/unkeep-cli-$VERSION.tgz"
+
+  dry-run-container:
+    name: Dry-run container and SBOM
+    if: needs.prepare.outputs.publish != 'true'
+    needs:
+      - prepare
+      - package
+      - verify-packed-node-20
+      - container-sources
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the validated commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.release_sha }}
+
+      - name: Download and verify exact container sources
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: container-source-assets-${{ needs.prepare.outputs.version }}-${{ needs.prepare.outputs.release_sha }}
+          path: container-source-assets
+
+      - name: Revalidate container source handoff
+        env:
+          BUNDLE_SHA256: ${{ needs.container-sources.outputs.bundle_sha256 }}
+          METADATA_SHA256: ${{ needs.container-sources.outputs.metadata_sha256 }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          diff -u \
+            <(printf '%s\n' \
+              "unkeep-$VERSION-container-sources.json" \
+              "unkeep-$VERSION-container-sources.tar.gz" | sort) \
+            <(find container-source-assets -maxdepth 1 -type f -printf '%f\n' | sort)
+          node scripts/container-source-bundle.mjs verify \
+            --version "$VERSION" \
+            --revision "$RELEASE_SHA" \
+            --assets container-source-assets \
+            --bundle-sha "$BUNDLE_SHA256" \
+            --metadata-sha "$METADATA_SHA256"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: |
+            image=${{ env.BUILDKIT_IMAGE }}
+
+      - name: Build a local amd64 image without pushing
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          load: true
+          platforms: linux/amd64
+          push: false
+          tags: unkeep:release-dry-run
+          build-args: |
+            UNKEEP_VERSION=${{ needs.prepare.outputs.version }}
+            UNKEEP_REVISION=${{ needs.prepare.outputs.release_sha }}
+
+      - name: Verify dry-run image identity
+        shell: bash
+        env:
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect unkeep:release-dry-run --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$VERSION"
+          test "$(docker image inspect unkeep:release-dry-run --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$RELEASE_SHA"
+          docker image inspect unkeep:release-dry-run --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx "UNKEEP_VERSION=$VERSION"
+          docker image inspect unkeep:release-dry-run --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx "UNKEEP_REVISION=$RELEASE_SHA"
+          docker run --rm --entrypoint sh unkeep:release-dry-run -c \
+            'test -s /app/THIRD_PARTY_NOTICES.md &&
+             test -s /app/web/THIRD_PARTY_NOTICES.md &&
+             test -s /usr/local/LICENSE'
+
+      - name: Prepare dry-run assets
+        run: |
+          mkdir -p release-assets
+          cp THIRD_PARTY_NOTICES.md compose.release.yaml release-assets/
+          docker run --rm --entrypoint cat unkeep:release-dry-run \
+            /usr/local/LICENSE > release-assets/NODE_RUNTIME_LICENSE
+
+      - name: Generate dry-run image SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: unkeep:release-dry-run
+          format: spdx-json
+          output-file: release-assets/unkeep-${{ needs.prepare.outputs.version }}-linux-amd64.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Upload dry-run compliance assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-dry-run-${{ needs.prepare.outputs.release_sha }}
+          path: |
+            release-assets/*.spdx.json
+            release-assets/THIRD_PARTY_NOTICES.md
+            release-assets/NODE_RUNTIME_LICENSE
+            release-assets/compose.release.yaml
+          if-no-files-found: error
+          retention-days: 14
+
+  stage_container:
+    name: Stage and verify untagged container
+    if: needs.prepare.outputs.publish == 'true'
+    needs:
+      - prepare
+      - package
+      - verify-packed-node-20
+      - container-sources
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      amd64_digest: ${{ steps.image-amd64.outputs.digest }}
+      arm64_digest: ${{ steps.image-arm64.outputs.digest }}
+      base_digest: ${{ needs.container-sources.outputs.base_digest }}
+      release_attempt: ${{ steps.release_environment.outputs.attempt }}
+      release_gate: ${{ steps.release_environment.outputs.validated }}
+      source_binding_sha256: ${{ steps.source_binding.outputs.binding_sha256 }}
+      source_bundle_sha256: ${{ needs.container-sources.outputs.bundle_sha256 }}
+      source_metadata_sha256: ${{ needs.container-sources.outputs.metadata_sha256 }}
+      stage_manifest_sha256: ${{ steps.stage_manifest.outputs.sha256 }}
+    env:
+      BASE_DIGEST: ${{ needs.container-sources.outputs.base_digest }}
+      IMAGE: ${{ needs.prepare.outputs.image }}
+      RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Verify protected release environment configuration
+        id: release_environment
+        shell: bash
+        env:
+          CONTAINER_COMPLIANCE_GUARD: ${{ vars.UNKEEP_CONTAINER_COMPLIANCE_GUARD }}
+          IMMUTABLE_RELEASES_GUARD: ${{ vars.UNKEEP_IMMUTABLE_RELEASES_GUARD }}
+          RELEASE_GUARD: ${{ vars.UNKEEP_RELEASE_GUARD }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$BASE_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::The source producer returned an invalid base-image digest"
+            exit 1
+          fi
+          expected_compliance_guard="BrettKinny/UnKeep:container-compliance:${BASE_DIGEST}:v1"
+          if [[ "$RELEASE_GUARD" != "BrettKinny/UnKeep:release:v1" ]]; then
+            echo "::error::The protected release environment is missing its UNKEEP_RELEASE_GUARD sentinel"
+            exit 1
+          fi
+          if [[ "$IMMUTABLE_RELEASES_GUARD" != "BrettKinny/UnKeep:immutable-releases-reviewed:v1" ]]; then
+            echo "::error::Release immutability must be verified by an administrator before publication"
+            echo "::error::Leave UNKEEP_IMMUTABLE_RELEASES_GUARD unset until that review is complete"
+            exit 1
+          fi
+          if [[ "$CONTAINER_COMPLIANCE_GUARD" != "$expected_compliance_guard" ]]; then
+            echo "::error::GHCR publication is blocked until the exact container source and notice review is complete"
+            echo "::error::Leave UNKEEP_CONTAINER_COMPLIANCE_GUARD unset until that review is documented"
+            exit 1
+          fi
+          echo "attempt=$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          echo "validated=release-environment-v1" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the validated commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.release_sha }}
+
+      - name: Download exact npm artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-release-assets
+          path: npm-artifacts
+
+      - name: Download exact container source assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: container-source-assets-${{ env.VERSION }}-${{ env.RELEASE_SHA }}
+          path: container-source-assets
+
+      - name: Revalidate container sources before the first registry write
+        env:
+          BUNDLE_SHA256: ${{ needs.container-sources.outputs.bundle_sha256 }}
+          METADATA_SHA256: ${{ needs.container-sources.outputs.metadata_sha256 }}
+        run: |
+          set -euo pipefail
+          diff -u \
+            <(printf '%s\n' \
+              "unkeep-$VERSION-container-sources.json" \
+              "unkeep-$VERSION-container-sources.tar.gz" | sort) \
+            <(find container-source-assets -maxdepth 1 -type f -printf '%f\n' | sort)
+          node scripts/container-source-bundle.mjs verify \
+            --version "$VERSION" \
+            --revision "$RELEASE_SHA" \
+            --assets container-source-assets \
+            --bundle-sha "$BUNDLE_SHA256" \
+            --metadata-sha "$METADATA_SHA256"
+
+      - name: Revalidate exact npm artifacts before container staging
+        env:
+          CLI_SHA256: ${{ needs.package.outputs.cli_sha256 }}
+          CLIENT_SHA256: ${{ needs.package.outputs.client_sha256 }}
+          CORE_SHA256: ${{ needs.package.outputs.core_sha256 }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          diff -u \
+            <(printf '%s\n' \
+              "unkeep-cli-$VERSION.tgz" \
+              "unkeep-client-$VERSION.tgz" \
+              "unkeep-core-$VERSION.tgz" | sort) \
+            <(find npm-artifacts -maxdepth 1 -type f -printf '%f\n' | sort)
+          test "$(sha256sum "npm-artifacts/unkeep-core-$VERSION.tgz" | awk '{ print $1 }')" = "$CORE_SHA256"
+          test "$(sha256sum "npm-artifacts/unkeep-client-$VERSION.tgz" | awk '{ print $1 }')" = "$CLIENT_SHA256"
+          test "$(sha256sum "npm-artifacts/unkeep-cli-$VERSION.tgz" | awk '{ print $1 }')" = "$CLI_SHA256"
+          node scripts/package-smoke.mjs \
+            "npm-artifacts/unkeep-core-$VERSION.tgz" \
+            "npm-artifacts/unkeep-client-$VERSION.tgz" \
+            "npm-artifacts/unkeep-cli-$VERSION.tgz"
+          mkdir -p release-assets
+          cp \
+            "npm-artifacts/unkeep-core-$VERSION.tgz" \
+            "npm-artifacts/unkeep-client-$VERSION.tgz" \
+            "npm-artifacts/unkeep-cli-$VERSION.tgz" \
+            release-assets/
+          cp container-source-assets/* release-assets/
+
+      - name: Include deployment and licensing files
+        run: cp THIRD_PARTY_NOTICES.md compose.release.yaml release-assets/
+
+      - name: Set up Node.js for npm trusted publishing
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.15.0
+          package-manager-cache: false
+          registry-url: https://registry.npmjs.org
+
+      - name: Verify the bundled npm CLI supports trusted publishing
+        run: |
+          set -euo pipefail
+          npm_version="$(npm --version)"
+          node --input-type=module --eval '
+            const version = process.argv[1];
+            const match = /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(version);
+            if (!match) throw new Error(`Cannot parse bundled npm version: ${version}`);
+            const [, major, minor, patch] = match.map(Number);
+            const supported = major > 11
+              || (major === 11 && (minor > 5 || (minor === 5 && patch >= 1)));
+            if (!supported) {
+              throw new Error(`npm ${version} cannot use trusted publishing; require >=11.5.1`);
+            }
+          ' "$npm_version"
+          echo "Using bundled npm $npm_version"
+
+      - name: Require the public npm registry
+        run: |
+          set -euo pipefail
+          test "$(npm config get registry)" = "https://registry.npmjs.org/"
+          scoped_registry="$(npm config get @unkeep:registry)"
+          test "$scoped_registry" = "undefined" \
+            || test "$scoped_registry" = "https://registry.npmjs.org/"
+
+      - name: Inventory npm release state
+        run: |
+          set -euo pipefail
+          inventory="$RUNNER_TEMP/npm-release-state.jsonl"
+          : > "$inventory"
+
+          for package in @unkeep/core @unkeep/client @unkeep/cli; do
+            package_stdout="$RUNNER_TEMP/npm-package-${package##*/}.out"
+            package_stderr="$RUNNER_TEMP/npm-package-${package##*/}.err"
+            if ! npm view --registry=https://registry.npmjs.org/ "$package" name >"$package_stdout" 2>"$package_stderr"; then
+              echo "::error::$package does not exist or could not be queried; bootstrap it before releasing"
+              cat "$package_stdout" "$package_stderr"
+              exit 1
+            fi
+            actual_name="$(cat "$package_stdout")"
+            if [[ "$actual_name" != "$package" ]]; then
+              echo "::error::npm returned unexpected package name '$actual_name' for '$package'"
+              cat "$package_stderr"
+              exit 1
+            fi
+
+            version_stdout="$RUNNER_TEMP/npm-version-${package##*/}.out"
+            version_stderr="$RUNNER_TEMP/npm-version-${package##*/}.err"
+            if npm view --registry=https://registry.npmjs.org/ "$package@$VERSION" version --json >"$version_stdout" 2>"$version_stderr"; then
+              actual_version="$(jq -er 'select(type == "string")' "$version_stdout")"
+              jq -cn \
+                --arg package "$package" \
+                --arg version "$actual_version" \
+                '{package: $package, exists: true, version: $version}' \
+                >> "$inventory"
+            elif grep -Eqi 'E404|404 Not Found' "$version_stdout" "$version_stderr"; then
+              jq -cn \
+                --arg package "$package" \
+                '{package: $package, exists: false}' \
+                >> "$inventory"
+            else
+              echo "::error::Could not prove that $package@$VERSION is absent"
+              cat "$version_stdout" "$version_stderr"
+              exit 1
+            fi
+          done
+
+      - name: Inventory GHCR release state
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          package_name="${GITHUB_REPOSITORY#*/}"
+          package_name="${package_name,,}"
+          node scripts/inventory-ghcr.mjs \
+            "$GITHUB_REPOSITORY_OWNER" \
+            "$package_name" \
+            "$RUNNER_TEMP/ghcr-versions.jsonl"
+
+      - name: Require a completely unused release slot
+        run: |
+          node scripts/check-release-slot.mjs \
+            "$VERSION" \
+            "$RELEASE_SHA" \
+            "$IMAGE" \
+            "$RUNNER_TEMP/npm-release-state.jsonl" \
+            "$RUNNER_TEMP/ghcr-versions.jsonl"
+
+      - name: Revalidate the remote release tag before staging
+        run: |
+          set -euo pipefail
+          remote_release_sha="$(
+            git ls-remote --tags origin "refs/tags/$GITHUB_REF_NAME^{}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          if [[ "$remote_release_sha" != "$RELEASE_SHA" ]]; then
+            echo "::error::Release tag no longer resolves to the validated commit"
+            exit 1
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          image: ${{ env.QEMU_IMAGE }}
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: |
+            image=${{ env.BUILDKIT_IMAGE }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Revalidate the release tag before amd64 staging
+        run: |
+          set -euo pipefail
+          remote_release_sha="$(
+            git ls-remote --tags origin "refs/tags/$GITHUB_REF_NAME^{}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          test "$remote_release_sha" = "$RELEASE_SHA"
+
+      - name: Build and push the untagged amd64 release candidate
+        id: image-amd64
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.RELEASE_SHA }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+          build-args: |
+            UNKEEP_VERSION=${{ env.VERSION }}
+            UNKEEP_REVISION=${{ env.RELEASE_SHA }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Revalidate the release tag before arm64 staging
+        run: |
+          set -euo pipefail
+          remote_release_sha="$(
+            git ls-remote --tags origin "refs/tags/$GITHUB_REF_NAME^{}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          test "$remote_release_sha" = "$RELEASE_SHA"
+
+      - name: Build and push the untagged arm64 release candidate
+        id: image-arm64
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/arm64
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.RELEASE_SHA }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+          build-args: |
+            UNKEEP_VERSION=${{ env.VERSION }}
+            UNKEEP_REVISION=${{ env.RELEASE_SHA }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Verify and scan the exact pushed platform digests
+        env:
+          AMD64_DIGEST: ${{ steps.image-amd64.outputs.digest }}
+          ARM64_DIGEST: ${{ steps.image-arm64.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/trivy-cache"
+          cleanup() {
+            docker rm --force unkeep-published-amd64 unkeep-published-arm64 >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          verify_platform() {
+            platform="$1"
+            architecture="$2"
+            digest="$3"
+            image="unkeep:published-$architecture"
+            container="unkeep-published-$architecture"
+            archive="$RUNNER_TEMP/unkeep-published-$architecture.tar"
+
+            docker pull --platform "$platform" "$IMAGE@$digest"
+            docker tag "$IMAGE@$digest" "$image"
+            test "$(docker image inspect "$image" --format '{{.Architecture}}')" = "$architecture"
+            test "$(docker image inspect "$image" --format '{{.Config.User}}')" = "node"
+            test "$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$VERSION"
+            test "$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$RELEASE_SHA"
+            docker run --rm --platform "$platform" --entrypoint grep "$image" \
+              -Fq "$VERSION-$RELEASE_SHA" /app/web/service-worker.js
+            docker run --rm --platform "$platform" --entrypoint sh "$image" -c \
+              'test "$(id -u)" = 1000 &&
+               test "$(stat -c %a:%u:%g /data)" = 700:1000:1000 &&
+               test "$(stat -c %a:%u:%g /home/node/.config)" = 700:1000:1000 &&
+               test "$(stat -c %a:%u:%g /home/node/.config/unkeep)" = 700:1000:1000 &&
+               test -s /app/THIRD_PARTY_NOTICES.md &&
+               test -s /app/web/THIRD_PARTY_NOTICES.md &&
+               test -s /usr/local/LICENSE &&
+               ! command -v npm &&
+               ! command -v npx &&
+               ! command -v pnpm &&
+               ! command -v pnpx &&
+               ! command -v yarn &&
+               ! command -v corepack'
+
+            docker run --name "$container" --detach \
+              --platform "$platform" \
+              --read-only \
+              --tmpfs /tmp:size=16m,mode=1777 \
+              --cap-drop ALL \
+              --security-opt no-new-privileges \
+              --env UNKEEP_SETUP_TOKEN=published-image-smoke-setup-000001 \
+              --env UNKEEP_RECOVERY_TOKEN=published-image-smoke-recovery-0001 \
+              "$image"
+            ready=false
+            for _ in $(seq 1 40); do
+              if docker exec "$container" wget -qO- http://127.0.0.1:3000/api/v1/status; then
+                ready=true
+                break
+              fi
+              sleep 1
+            done
+            if [[ "$ready" != "true" ]]; then
+              docker logs "$container"
+              exit 1
+            fi
+            docker stop --time 30 "$container"
+            docker rm "$container"
+
+            docker save --output "$archive" "$image"
+            docker run --rm \
+              --mount "type=bind,src=$archive,dst=/scan/unkeep.tar,readonly" \
+              --mount "type=bind,src=$RUNNER_TEMP/trivy-cache,dst=/root/.cache/trivy" \
+              "$TRIVY_IMAGE" image \
+                --input /scan/unkeep.tar \
+                --exit-code 1 \
+                --severity HIGH,CRITICAL \
+                --scanners vuln \
+                --no-progress \
+                --skip-version-check
+          }
+
+          verify_platform linux/amd64 amd64 "$AMD64_DIGEST"
+          verify_platform linux/arm64 arm64 "$ARM64_DIGEST"
+          docker run --rm --entrypoint cat unkeep:published-amd64 \
+            /usr/local/LICENSE > release-assets/NODE_RUNTIME_LICENSE
+          docker run --rm --platform linux/arm64 --entrypoint cat unkeep:published-arm64 \
+            /usr/local/LICENSE > "$RUNNER_TEMP/NODE_RUNTIME_LICENSE.arm64"
+          cmp release-assets/NODE_RUNTIME_LICENSE "$RUNNER_TEMP/NODE_RUNTIME_LICENSE.arm64"
+
+      - name: Require anonymous access to the pushed image
+        env:
+          AMD64_DIGEST: ${{ steps.image-amd64.outputs.digest }}
+        run: |
+          set -euo pipefail
+          anonymous_config="$RUNNER_TEMP/docker-anonymous"
+          install -d -m 0700 "$anonymous_config"
+          DOCKER_CONFIG="$anonymous_config" \
+            docker pull --platform linux/amd64 "$IMAGE@$AMD64_DIGEST"
+
+      - name: Export an amd64 image SBOM for the GitHub release
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: unkeep:published-amd64
+          format: spdx-json
+          output-file: release-assets/unkeep-${{ env.VERSION }}-linux-amd64.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Bind sources to the exact staged platform images
+        id: source_binding
+        env:
+          AMD64_DIGEST: ${{ steps.image-amd64.outputs.digest }}
+          ARM64_DIGEST: ${{ steps.image-arm64.outputs.digest }}
+          BUNDLE_SHA256: ${{ needs.container-sources.outputs.bundle_sha256 }}
+          METADATA_SHA256: ${{ needs.container-sources.outputs.metadata_sha256 }}
+        run: |
+          set -euo pipefail
+          node scripts/container-source-bundle.mjs bind \
+            --version "$VERSION" \
+            --revision "$RELEASE_SHA" \
+            --assets release-assets \
+            --bundle-sha "$BUNDLE_SHA256" \
+            --metadata-sha "$METADATA_SHA256" \
+            --image-repository "$IMAGE" \
+            --amd64-digest "$AMD64_DIGEST" \
+            --arm64-digest "$ARM64_DIGEST"
+
+      - name: Record the exact staging bundle
+        id: stage_manifest
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          diff -u \
+            <(printf '%s\n' \
+              "NODE_RUNTIME_LICENSE" \
+              "THIRD_PARTY_NOTICES.md" \
+              "compose.release.yaml" \
+              "unkeep-$VERSION-container-source-binding.json" \
+              "unkeep-$VERSION-container-sources.json" \
+              "unkeep-$VERSION-container-sources.tar.gz" \
+              "unkeep-$VERSION-linux-amd64.spdx.json" \
+              "unkeep-cli-$VERSION.tgz" \
+              "unkeep-client-$VERSION.tgz" \
+              "unkeep-core-$VERSION.tgz" | sort) \
+            <(find release-assets -maxdepth 1 -type f -printf '%f\n' | sort)
+          (
+            cd release-assets
+            sha256sum \
+              NODE_RUNTIME_LICENSE \
+              THIRD_PARTY_NOTICES.md \
+              compose.release.yaml \
+              "unkeep-$VERSION-container-source-binding.json" \
+              "unkeep-$VERSION-container-sources.json" \
+              "unkeep-$VERSION-container-sources.tar.gz" \
+              "unkeep-$VERSION-linux-amd64.spdx.json" \
+              "unkeep-cli-$VERSION.tgz" \
+              "unkeep-client-$VERSION.tgz" \
+              "unkeep-core-$VERSION.tgz" \
+              > "$RUNNER_TEMP/staged-release-assets.sha256"
+          )
+          echo "sha256=$(sha256sum "$RUNNER_TEMP/staged-release-assets.sha256" | awk '{ print $1 }')" >> "$GITHUB_OUTPUT"
+
+      - name: Preserve the verified staging bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: staged-release-assets-${{ env.VERSION }}
+          path: |
+            release-assets
+            !release-assets/unkeep-${{ env.VERSION }}-container-sources.json
+            !release-assets/unkeep-${{ env.VERSION }}-container-sources.tar.gz
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Preserve the staging bundle manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: staged-release-manifest-${{ env.VERSION }}
+          path: ${{ runner.temp }}/staged-release-assets.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Remove the GHCR login from the staging runner
+        if: always()
+        run: docker logout ghcr.io
+
+  draft_release:
+    name: Create draft GitHub prerelease
+    if: >-
+      needs.prepare.outputs.publish == 'true' &&
+      needs.stage_container.outputs.release_gate == 'release-environment-v1'
+    needs:
+      - prepare
+      - stage_container
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: write
+    env:
+      BASE_DIGEST: ${{ needs.stage_container.outputs.base_digest }}
+      IMAGE: ${{ needs.prepare.outputs.image }}
+      RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Verify protected release environment configuration
+        env:
+          CONTAINER_COMPLIANCE_GUARD: ${{ vars.UNKEEP_CONTAINER_COMPLIANCE_GUARD }}
+          IMMUTABLE_RELEASES_GUARD: ${{ vars.UNKEEP_IMMUTABLE_RELEASES_GUARD }}
+          RELEASE_GUARD: ${{ vars.UNKEEP_RELEASE_GUARD }}
+          STAGED_RELEASE_ATTEMPT: ${{ needs.stage_container.outputs.release_attempt }}
+        run: |
+          set -euo pipefail
+          test "$BASE_DIGEST" != ""
+          expected_compliance_guard="BrettKinny/UnKeep:container-compliance:${BASE_DIGEST}:v1"
+          test "$RELEASE_GUARD" = "BrettKinny/UnKeep:release:v1"
+          test "$IMMUTABLE_RELEASES_GUARD" = "BrettKinny/UnKeep:immutable-releases-reviewed:v1"
+          test "$CONTAINER_COMPLIANCE_GUARD" = "$expected_compliance_guard"
+          if [[ "$STAGED_RELEASE_ATTEMPT" != "$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" ]]; then
+            echo "::error::Publication jobs cannot resume across workflow attempts"
+            echo "::error::Re-run all jobs so the immutable release slot is inventoried again"
+            exit 1
+          fi
+
+      - name: Check out the validated commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.release_sha }}
+
+      - name: Download the verified staging bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: staged-release-assets-${{ env.VERSION }}
+          path: release-assets
+
+      - name: Download the independently hashed source assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: container-source-assets-${{ env.VERSION }}-${{ env.RELEASE_SHA }}
+          path: release-assets
+
+      - name: Download the staging bundle manifest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: staged-release-manifest-${{ env.VERSION }}
+          path: release-verification
+
+      - name: Revalidate the staging bundle before drafting
+        env:
+          AMD64_DIGEST: ${{ needs.stage_container.outputs.amd64_digest }}
+          ARM64_DIGEST: ${{ needs.stage_container.outputs.arm64_digest }}
+          BINDING_SHA256: ${{ needs.stage_container.outputs.source_binding_sha256 }}
+          BUNDLE_SHA256: ${{ needs.stage_container.outputs.source_bundle_sha256 }}
+          METADATA_SHA256: ${{ needs.stage_container.outputs.source_metadata_sha256 }}
+          STAGE_MANIFEST_SHA256: ${{ needs.stage_container.outputs.stage_manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          manifest="release-verification/staged-release-assets.sha256"
+          test "$(sha256sum "$manifest" | awk '{ print $1 }')" = "$STAGE_MANIFEST_SHA256"
+          diff -u \
+            <(printf '%s\n' \
+              "NODE_RUNTIME_LICENSE" \
+              "THIRD_PARTY_NOTICES.md" \
+              "compose.release.yaml" \
+              "unkeep-$VERSION-container-source-binding.json" \
+              "unkeep-$VERSION-container-sources.json" \
+              "unkeep-$VERSION-container-sources.tar.gz" \
+              "unkeep-$VERSION-linux-amd64.spdx.json" \
+              "unkeep-cli-$VERSION.tgz" \
+              "unkeep-client-$VERSION.tgz" \
+              "unkeep-core-$VERSION.tgz" | sort) \
+            <(find release-assets -maxdepth 1 -type f -printf '%f\n' | sort)
+          (
+            cd release-assets
+            sha256sum --check "../$manifest"
+          )
+          node scripts/container-source-bundle.mjs verify-binding \
+            --version "$VERSION" \
+            --revision "$RELEASE_SHA" \
+            --assets release-assets \
+            --bundle-sha "$BUNDLE_SHA256" \
+            --metadata-sha "$METADATA_SHA256" \
+            --binding-sha "$BINDING_SHA256" \
+            --amd64-digest "$AMD64_DIGEST" \
+            --arm64-digest "$ARM64_DIGEST"
+
+      - name: Revalidate the remote release tag before public writes
+        run: |
+          set -euo pipefail
+          remote_release_sha="$(
+            git ls-remote --tags origin "refs/tags/$GITHUB_REF_NAME^{}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          if [[ "$remote_release_sha" != "$RELEASE_SHA" ]]; then
+            echo "::error::Release tag no longer resolves to the validated commit"
+            exit 1
+          fi
+
+      - name: Create or verify the draft prerelease before public release tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          node scripts/extract-release-notes.mjs "$VERSION" > "$RUNNER_TEMP/release-notes.md"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = "true"
+            test "$(gh release view "$GITHUB_REF_NAME" --json isPrerelease --jq .isPrerelease)" = "true"
+            gh release edit "$GITHUB_REF_NAME" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              --title "UnKeep $VERSION"
+            gh release upload "$GITHUB_REF_NAME" --clobber release-assets/*
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --draft \
+              --prerelease \
+              --latest=false \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              --title "UnKeep $VERSION" \
+              release-assets/*
+          fi
+          gh release view "$GITHUB_REF_NAME" \
+            --json body,isDraft,isPrerelease,name \
+            > "$RUNNER_TEMP/draft-release-metadata.json"
+          test "$(
+            jq -r '.isDraft' "$RUNNER_TEMP/draft-release-metadata.json"
+          )" = "true"
+          test "$(
+            jq -r '.isPrerelease' "$RUNNER_TEMP/draft-release-metadata.json"
+          )" = "true"
+          test "$(
+            jq -r '.name' "$RUNNER_TEMP/draft-release-metadata.json"
+          )" = "UnKeep $VERSION"
+          jq -j '.body' "$RUNNER_TEMP/draft-release-metadata.json" \
+            > "$RUNNER_TEMP/remote-release-notes.md"
+          cmp "$RUNNER_TEMP/release-notes.md" "$RUNNER_TEMP/remote-release-notes.md"
+
+  promote_image:
+    name: Promote and attest container image
+    if: >-
+      needs.prepare.outputs.publish == 'true' &&
+      needs.stage_container.outputs.release_gate == 'release-environment-v1'
+    needs:
+      - prepare
+      - stage_container
+      - draft_release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+    outputs:
+      image_digest: ${{ steps.image.outputs.digest }}
+    env:
+      AMD64_DIGEST: ${{ needs.stage_container.outputs.amd64_digest }}
+      ARM64_DIGEST: ${{ needs.stage_container.outputs.arm64_digest }}
+      BASE_DIGEST: ${{ needs.stage_container.outputs.base_digest }}
+      IMAGE: ${{ needs.prepare.outputs.image }}
+      RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Verify protected release environment configuration
+        env:
+          CONTAINER_COMPLIANCE_GUARD: ${{ vars.UNKEEP_CONTAINER_COMPLIANCE_GUARD }}
+          IMMUTABLE_RELEASES_GUARD: ${{ vars.UNKEEP_IMMUTABLE_RELEASES_GUARD }}
+          RELEASE_GUARD: ${{ vars.UNKEEP_RELEASE_GUARD }}
+          STAGED_RELEASE_ATTEMPT: ${{ needs.stage_container.outputs.release_attempt }}
+        run: |
+          set -euo pipefail
+          test "$BASE_DIGEST" != ""
+          expected_compliance_guard="BrettKinny/UnKeep:container-compliance:${BASE_DIGEST}:v1"
+          test "$RELEASE_GUARD" = "BrettKinny/UnKeep:release:v1"
+          test "$IMMUTABLE_RELEASES_GUARD" = "BrettKinny/UnKeep:immutable-releases-reviewed:v1"
+          test "$CONTAINER_COMPLIANCE_GUARD" = "$expected_compliance_guard"
+          if [[ "$STAGED_RELEASE_ATTEMPT" != "$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" ]]; then
+            echo "::error::Publication jobs cannot resume across workflow attempts"
+            echo "::error::Re-run all jobs so the immutable release slot is inventoried again"
+            exit 1
+          fi
+
+      - name: Check out the validated commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.release_sha }}
+
+      - name: Download the verified staging bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: staged-release-assets-${{ env.VERSION }}
+          path: release-assets
+
+      - name: Download the independently hashed source assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: container-source-assets-${{ env.VERSION }}-${{ env.RELEASE_SHA }}
+          path: release-assets
+
+      - name: Download the staging bundle manifest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: staged-release-manifest-${{ env.VERSION }}
+          path: release-verification
+
+      - name: Revalidate source binding before registry login
+        env:
+          AMD64_DIGEST: ${{ needs.stage_container.outputs.amd64_digest }}
+          ARM64_DIGEST: ${{ needs.stage_container.outputs.arm64_digest }}
+          BINDING_SHA256: ${{ needs.stage_container.outputs.source_binding_sha256 }}
+          BUNDLE_SHA256: ${{ needs.stage_container.outputs.source_bundle_sha256 }}
+          METADATA_SHA256: ${{ needs.stage_container.outputs.source_metadata_sha256 }}
+        run: |
+          set -euo pipefail
+          node scripts/container-source-bundle.mjs verify-binding \
+            --version "$VERSION" \
+            --revision "$RELEASE_SHA" \
+            --assets release-assets \
+            --bundle-sha "$BUNDLE_SHA256" \
+            --metadata-sha "$METADATA_SHA256" \
+            --binding-sha "$BINDING_SHA256" \
+            --amd64-digest "$AMD64_DIGEST" \
+            --arm64-digest "$ARM64_DIGEST"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: |
+            image=${{ env.BUILDKIT_IMAGE }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Revalidate the staged platform digests
+        run: |
+          set -euo pipefail
+          [[ "$AMD64_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$ARM64_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$AMD64_DIGEST" != "$ARM64_DIGEST"
+
+          verify_descriptor() {
+            architecture="$1"
+            digest="$2"
+            reference="$IMAGE@$digest"
+            docker pull --platform "linux/$architecture" "$reference"
+            test "$(docker image inspect "$reference" --format '{{.Architecture}}')" = "$architecture"
+            test "$(docker image inspect "$reference" --format '{{.Config.User}}')" = "node"
+            test "$(docker image inspect "$reference" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$VERSION"
+            test "$(docker image inspect "$reference" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$RELEASE_SHA"
+          }
+
+          verify_descriptor amd64 "$AMD64_DIGEST"
+          verify_descriptor arm64 "$ARM64_DIGEST"
+
+      - name: Inventory npm release state before promotion
+        run: |
+          set -euo pipefail
+          inventory="$RUNNER_TEMP/npm-release-state.jsonl"
+          : > "$inventory"
+
+          for package in @unkeep/core @unkeep/client @unkeep/cli; do
+            package_stdout="$RUNNER_TEMP/npm-package-${package##*/}.out"
+            package_stderr="$RUNNER_TEMP/npm-package-${package##*/}.err"
+            if ! npm view --registry=https://registry.npmjs.org/ "$package" name >"$package_stdout" 2>"$package_stderr"; then
+              echo "::error::$package does not exist or could not be queried; bootstrap it before releasing"
+              cat "$package_stdout" "$package_stderr"
+              exit 1
+            fi
+            actual_name="$(cat "$package_stdout")"
+            if [[ "$actual_name" != "$package" ]]; then
+              echo "::error::npm returned unexpected package name '$actual_name' for '$package'"
+              cat "$package_stderr"
+              exit 1
+            fi
+
+            version_stdout="$RUNNER_TEMP/npm-version-${package##*/}.out"
+            version_stderr="$RUNNER_TEMP/npm-version-${package##*/}.err"
+            if npm view --registry=https://registry.npmjs.org/ "$package@$VERSION" version --json >"$version_stdout" 2>"$version_stderr"; then
+              actual_version="$(jq -er 'select(type == "string")' "$version_stdout")"
+              jq -cn \
+                --arg package "$package" \
+                --arg version "$actual_version" \
+                '{package: $package, exists: true, version: $version}' \
+                >> "$inventory"
+            elif grep -Eqi 'E404|404 Not Found' "$version_stdout" "$version_stderr"; then
+              jq -cn \
+                --arg package "$package" \
+                '{package: $package, exists: false}' \
+                >> "$inventory"
+            else
+              echo "::error::Could not prove that $package@$VERSION is absent"
+              cat "$version_stdout" "$version_stderr"
+              exit 1
+            fi
+          done
+
+      - name: Revalidate the remote release tag before promotion
+        run: |
+          set -euo pipefail
+          remote_release_sha="$(
+            git ls-remote --tags origin "refs/tags/$GITHUB_REF_NAME^{}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          if [[ "$remote_release_sha" != "$RELEASE_SHA" ]]; then
+            echo "::error::Release tag no longer resolves to the validated commit"
+            exit 1
+          fi
+
+      - name: Require the draft prerelease before image promotion
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STAGE_MANIFEST_SHA256: ${{ needs.stage_container.outputs.stage_manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          node scripts/extract-release-notes.mjs "$VERSION" \
+            > "$RUNNER_TEMP/release-notes.md"
+          gh release view "$GITHUB_REF_NAME" \
+            --json body,isDraft,isPrerelease,name \
+            > "$RUNNER_TEMP/prepromotion-release-metadata.json"
+          test "$(
+            jq -r '.isDraft' "$RUNNER_TEMP/prepromotion-release-metadata.json"
+          )" = "true"
+          test "$(
+            jq -r '.isPrerelease' "$RUNNER_TEMP/prepromotion-release-metadata.json"
+          )" = "true"
+          test "$(
+            jq -r '.name' "$RUNNER_TEMP/prepromotion-release-metadata.json"
+          )" = "UnKeep $VERSION"
+          jq -j '.body' "$RUNNER_TEMP/prepromotion-release-metadata.json" \
+            > "$RUNNER_TEMP/prepromotion-release-notes.md"
+          cmp \
+            "$RUNNER_TEMP/release-notes.md" \
+            "$RUNNER_TEMP/prepromotion-release-notes.md"
+          manifest="$GITHUB_WORKSPACE/release-verification/staged-release-assets.sha256"
+          test "$(sha256sum "$manifest" | awk '{ print $1 }')" = "$STAGE_MANIFEST_SHA256"
+          draft_assets="$RUNNER_TEMP/draft-release-assets"
+          install -d -m 0700 "$draft_assets"
+          gh release download "$GITHUB_REF_NAME" --dir "$draft_assets"
+          diff -u \
+            <(printf '%s\n' \
+              "NODE_RUNTIME_LICENSE" \
+              "THIRD_PARTY_NOTICES.md" \
+              "compose.release.yaml" \
+              "unkeep-$VERSION-container-source-binding.json" \
+              "unkeep-$VERSION-container-sources.json" \
+              "unkeep-$VERSION-container-sources.tar.gz" \
+              "unkeep-$VERSION-linux-amd64.spdx.json" \
+              "unkeep-cli-$VERSION.tgz" \
+              "unkeep-client-$VERSION.tgz" \
+              "unkeep-core-$VERSION.tgz" | sort) \
+            <(find "$draft_assets" -maxdepth 1 -type f -printf '%f\n' | sort)
+          (
+            cd "$draft_assets"
+            sha256sum --check "$manifest"
+          )
+
+      - name: Promote only the verified platform digests
+        id: image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          package_name="${GITHUB_REPOSITORY#*/}"
+          package_name="${package_name,,}"
+          node scripts/inventory-ghcr.mjs \
+            "$GITHUB_REPOSITORY_OWNER" \
+            "$package_name" \
+            "$RUNNER_TEMP/ghcr-prepromotion.jsonl"
+          node scripts/check-release-slot.mjs \
+            "$VERSION" \
+            "$RELEASE_SHA" \
+            "$IMAGE" \
+            "$RUNNER_TEMP/npm-release-state.jsonl" \
+            "$RUNNER_TEMP/ghcr-prepromotion.jsonl"
+
+          remote_release_sha="$(
+            git ls-remote --tags origin "refs/tags/$GITHUB_REF_NAME^{}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          test "$remote_release_sha" = "$RELEASE_SHA"
+          gh release view "$GITHUB_REF_NAME" \
+            --json body,isDraft,isPrerelease,name \
+            > "$RUNNER_TEMP/immediate-prepromotion-release-metadata.json"
+          test "$(
+            jq -r '.isDraft' "$RUNNER_TEMP/immediate-prepromotion-release-metadata.json"
+          )" = "true"
+          test "$(
+            jq -r '.isPrerelease' "$RUNNER_TEMP/immediate-prepromotion-release-metadata.json"
+          )" = "true"
+          test "$(
+            jq -r '.name' "$RUNNER_TEMP/immediate-prepromotion-release-metadata.json"
+          )" = "UnKeep $VERSION"
+          jq -j '.body' "$RUNNER_TEMP/immediate-prepromotion-release-metadata.json" \
+            > "$RUNNER_TEMP/immediate-prepromotion-release-notes.md"
+          cmp \
+            "$RUNNER_TEMP/release-notes.md" \
+            "$RUNNER_TEMP/immediate-prepromotion-release-notes.md"
+
+          metadata="$RUNNER_TEMP/release-image-metadata.json"
+          docker buildx imagetools create \
+            --metadata-file "$metadata" \
+            --tag "$IMAGE:$VERSION" \
+            --tag "$IMAGE:sha-$RELEASE_SHA" \
+            "$IMAGE@$AMD64_DIGEST" \
+            "$IMAGE@$ARM64_DIGEST"
+          digest="$(jq -er '."containerimage.descriptor".digest' "$metadata")"
+          for reference in "$IMAGE:$VERSION" "$IMAGE:sha-$RELEASE_SHA"; do
+            actual="$(
+              docker buildx imagetools inspect "$reference" \
+                --format '{{json .Manifest}}' | jq -er '.digest'
+            )"
+            test "$actual" = "$digest"
+          done
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Require anonymous access to the promoted version tag
+        run: |
+          set -euo pipefail
+          anonymous_config="$RUNNER_TEMP/docker-anonymous"
+          install -d -m 0700 "$anonymous_config"
+          DOCKER_CONFIG="$anonymous_config" \
+            docker pull --platform linux/amd64 "$IMAGE:$VERSION"
+
+      - name: Revalidate tag and image before attestation
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          remote_release_sha="$(
+            git ls-remote --tags origin "refs/tags/$GITHUB_REF_NAME^{}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          test "$remote_release_sha" = "$RELEASE_SHA"
+          for reference in "$IMAGE:$VERSION" "$IMAGE:sha-$RELEASE_SHA"; do
+            actual="$(
+              docker buildx imagetools inspect "$reference" \
+                --format '{{json .Manifest}}' | jq -er '.digest'
+            )"
+            test "$actual" = "$IMAGE_DIGEST"
+          done
+
+      - name: Attest the published multi-architecture image
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+
+      - name: Record the promoted image identity
+        run: |
+          set -euo pipefail
+          mkdir -p promotion-assets
+          {
+            echo "image=$IMAGE"
+            echo "version_tag=$IMAGE:$VERSION"
+            echo "sha_tag=$IMAGE:sha-$RELEASE_SHA"
+            echo "digest=${{ steps.image.outputs.digest }}"
+          } > "promotion-assets/unkeep-$VERSION-image-digest.txt"
+
+      - name: Preserve the promoted image identity
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: promoted-image-${{ env.VERSION }}
+          path: promotion-assets
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Remove the GHCR login from the runner
+        if: always()
+        run: docker logout ghcr.io
+
+  publish_npm:
+    name: Publish npm packages
+    if: >-
+      needs.prepare.outputs.publish == 'true' &&
+      needs.stage_container.outputs.release_gate == 'release-environment-v1'
+    needs:
+      - prepare
+      - package
+      - stage_container
+      - draft_release
+      - promote_image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release-npm
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      BASE_DIGEST: ${{ needs.stage_container.outputs.base_digest }}
+      IMAGE: ${{ needs.prepare.outputs.image }}
+      RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Verify protected npm release environment configuration
+        env:
+          CONTAINER_COMPLIANCE_GUARD: ${{ vars.UNKEEP_CONTAINER_COMPLIANCE_GUARD }}
+          IMMUTABLE_RELEASES_GUARD: ${{ vars.UNKEEP_IMMUTABLE_RELEASES_GUARD }}
+          NPM_RELEASE_GUARD: ${{ vars.UNKEEP_NPM_RELEASE_GUARD }}
+          STAGED_RELEASE_ATTEMPT: ${{ needs.stage_container.outputs.release_attempt }}
+        run: |
+          set -euo pipefail
+          test "$BASE_DIGEST" != ""
+          expected_compliance_guard="BrettKinny/UnKeep:container-compliance:${BASE_DIGEST}:v1"
+          if [[ "$NPM_RELEASE_GUARD" != "BrettKinny/UnKeep:release-npm:v1" ]]; then
+            echo "::error::The protected release-npm environment is missing its UNKEEP_NPM_RELEASE_GUARD sentinel"
+            exit 1
+          fi
+          test "$IMMUTABLE_RELEASES_GUARD" = "BrettKinny/UnKeep:immutable-releases-reviewed:v1"
+          test "$CONTAINER_COMPLIANCE_GUARD" = "$expected_compliance_guard"
+          if [[ "$STAGED_RELEASE_ATTEMPT" != "$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" ]]; then
+            echo "::error::Publication jobs cannot resume across workflow attempts"
+            echo "::error::Re-run all jobs so the immutable release slot is inventoried again"
+            exit 1
+          fi
+
+      - name: Check out the validated commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.release_sha }}
+
+      - name: Download exact npm artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-release-assets
+          path: npm-artifacts
+
+      - name: Download the staging bundle manifest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: staged-release-manifest-${{ env.VERSION }}
+          path: release-verification
+
+      - name: Download the promoted image identity
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: promoted-image-${{ env.VERSION }}
+          path: promotion-verification
+
+      - name: Set up Node.js for npm trusted publishing
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.15.0
+          package-manager-cache: false
+          registry-url: https://registry.npmjs.org
+
+      - name: Verify the bundled npm CLI supports trusted publishing
+        run: |
+          set -euo pipefail
+          npm_version="$(npm --version)"
+          node --input-type=module --eval '
+            const version = process.argv[1];
+            const match = /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(version);
+            if (!match) throw new Error(`Cannot parse bundled npm version: ${version}`);
+            const [, major, minor, patch] = match.map(Number);
+            const supported = major > 11
+              || (major === 11 && (minor > 5 || (minor === 5 && patch >= 1)));
+            if (!supported) {
+              throw new Error(`npm ${version} cannot use trusted publishing; require >=11.5.1`);
+            }
+          ' "$npm_version"
+          echo "Using bundled npm $npm_version"
+
+      - name: Require the public npm registry
+        run: |
+          set -euo pipefail
+          test "$(npm config get registry)" = "https://registry.npmjs.org/"
+          scoped_registry="$(npm config get @unkeep:registry)"
+          test "$scoped_registry" = "undefined" \
+            || test "$scoped_registry" = "https://registry.npmjs.org/"
+
+      - name: Revalidate exact npm and promotion artifacts
+        env:
+          CLI_SHA256: ${{ needs.package.outputs.cli_sha256 }}
+          CLIENT_SHA256: ${{ needs.package.outputs.client_sha256 }}
+          CORE_SHA256: ${{ needs.package.outputs.core_sha256 }}
+          IMAGE_DIGEST: ${{ needs.promote_image.outputs.image_digest }}
+          STAGE_MANIFEST_SHA256: ${{ needs.stage_container.outputs.stage_manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          diff -u \
+            <(printf '%s\n' \
+              "unkeep-cli-$VERSION.tgz" \
+              "unkeep-client-$VERSION.tgz" \
+              "unkeep-core-$VERSION.tgz" | sort) \
+            <(find npm-artifacts -maxdepth 1 -type f -printf '%f\n' | sort)
+          test "$(sha256sum "npm-artifacts/unkeep-core-$VERSION.tgz" | awk '{ print $1 }')" = "$CORE_SHA256"
+          test "$(sha256sum "npm-artifacts/unkeep-client-$VERSION.tgz" | awk '{ print $1 }')" = "$CLIENT_SHA256"
+          test "$(sha256sum "npm-artifacts/unkeep-cli-$VERSION.tgz" | awk '{ print $1 }')" = "$CLI_SHA256"
+          node scripts/package-smoke.mjs \
+            "npm-artifacts/unkeep-core-$VERSION.tgz" \
+            "npm-artifacts/unkeep-client-$VERSION.tgz" \
+            "npm-artifacts/unkeep-cli-$VERSION.tgz"
+
+          manifest="release-verification/staged-release-assets.sha256"
+          test "$(sha256sum "$manifest" | awk '{ print $1 }')" = "$STAGE_MANIFEST_SHA256"
+
+          digest_file="promotion-verification/unkeep-$VERSION-image-digest.txt"
+          diff -u \
+            <(printf '%s\n' "unkeep-$VERSION-image-digest.txt") \
+            <(find promotion-verification -maxdepth 1 -type f -printf '%f\n')
+          test "$(wc -l < "$digest_file")" -eq 4
+          grep -Fx "image=$IMAGE" "$digest_file"
+          grep -Fx "version_tag=$IMAGE:$VERSION" "$digest_file"
+          grep -Fx "sha_tag=$IMAGE:sha-$RELEASE_SHA" "$digest_file"
+          grep -Fx "digest=$IMAGE_DIGEST" "$digest_file"
+
+      - name: Require unused npm versions immediately before publication
+        run: |
+          set -euo pipefail
+          for package in @unkeep/core @unkeep/client @unkeep/cli; do
+            package_stdout="$RUNNER_TEMP/npm-package-${package##*/}.out"
+            package_stderr="$RUNNER_TEMP/npm-package-${package##*/}.err"
+            if ! npm view --registry=https://registry.npmjs.org/ "$package" name >"$package_stdout" 2>"$package_stderr"; then
+              echo "::error::$package does not exist or could not be queried; bootstrap it before releasing"
+              cat "$package_stdout" "$package_stderr"
+              exit 1
+            fi
+            test "$(cat "$package_stdout")" = "$package"
+
+            version_stdout="$RUNNER_TEMP/npm-version-${package##*/}.out"
+            version_stderr="$RUNNER_TEMP/npm-version-${package##*/}.err"
+            if npm view --registry=https://registry.npmjs.org/ "$package@$VERSION" version --json >"$version_stdout" 2>"$version_stderr"; then
+              echo "::error::$package@$VERSION already exists; release versions are immutable"
+              cat "$version_stdout" "$version_stderr"
+              exit 1
+            fi
+            if ! grep -Eqi 'E404|404 Not Found' "$version_stdout" "$version_stderr"; then
+              echo "::error::Could not prove that $package@$VERSION is absent"
+              cat "$version_stdout" "$version_stderr"
+              exit 1
+            fi
+          done
+
+      - name: Set up Docker Buildx for anonymous image verification
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: |
+            image=${{ env.BUILDKIT_IMAGE }}
+
+      - name: Revalidate tag, draft, and promoted image before npm publication
+        env:
+          AMD64_DIGEST: ${{ needs.stage_container.outputs.amd64_digest }}
+          ARM64_DIGEST: ${{ needs.stage_container.outputs.arm64_digest }}
+          BINDING_SHA256: ${{ needs.stage_container.outputs.source_binding_sha256 }}
+          BUNDLE_SHA256: ${{ needs.stage_container.outputs.source_bundle_sha256 }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_DIGEST: ${{ needs.promote_image.outputs.image_digest }}
+          METADATA_SHA256: ${{ needs.stage_container.outputs.source_metadata_sha256 }}
+        run: |
+          set -euo pipefail
+          remote_release_sha="$(
+            git ls-remote --tags origin "refs/tags/$GITHUB_REF_NAME^{}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          if [[ "$remote_release_sha" != "$RELEASE_SHA" ]]; then
+            echo "::error::Release tag no longer resolves to the validated commit"
+            exit 1
+          fi
+          node scripts/extract-release-notes.mjs "$VERSION" \
+            > "$RUNNER_TEMP/release-notes.md"
+          gh release view "$GITHUB_REF_NAME" \
+            --json body,isDraft,isPrerelease,name \
+            > "$RUNNER_TEMP/prenpm-release-metadata.json"
+          test "$(jq -r '.isDraft' "$RUNNER_TEMP/prenpm-release-metadata.json")" = "true"
+          test "$(jq -r '.isPrerelease' "$RUNNER_TEMP/prenpm-release-metadata.json")" = "true"
+          test "$(jq -r '.name' "$RUNNER_TEMP/prenpm-release-metadata.json")" = "UnKeep $VERSION"
+          jq -j '.body' "$RUNNER_TEMP/prenpm-release-metadata.json" \
+            > "$RUNNER_TEMP/prenpm-release-notes.md"
+          cmp "$RUNNER_TEMP/release-notes.md" "$RUNNER_TEMP/prenpm-release-notes.md"
+
+          draft_assets="$RUNNER_TEMP/draft-release-assets"
+          install -d -m 0700 "$draft_assets"
+          gh release download "$GITHUB_REF_NAME" --dir "$draft_assets"
+          diff -u \
+            <(printf '%s\n' \
+              "NODE_RUNTIME_LICENSE" \
+              "THIRD_PARTY_NOTICES.md" \
+              "compose.release.yaml" \
+              "unkeep-$VERSION-container-source-binding.json" \
+              "unkeep-$VERSION-container-sources.json" \
+              "unkeep-$VERSION-container-sources.tar.gz" \
+              "unkeep-$VERSION-linux-amd64.spdx.json" \
+              "unkeep-cli-$VERSION.tgz" \
+              "unkeep-client-$VERSION.tgz" \
+              "unkeep-core-$VERSION.tgz" | sort) \
+            <(find "$draft_assets" -maxdepth 1 -type f -printf '%f\n' | sort)
+          (
+            cd "$draft_assets"
+            sha256sum --check "$GITHUB_WORKSPACE/release-verification/staged-release-assets.sha256"
+          )
+          node scripts/container-source-bundle.mjs verify-binding \
+            --version "$VERSION" \
+            --revision "$RELEASE_SHA" \
+            --assets "$draft_assets" \
+            --bundle-sha "$BUNDLE_SHA256" \
+            --metadata-sha "$METADATA_SHA256" \
+            --binding-sha "$BINDING_SHA256" \
+            --amd64-digest "$AMD64_DIGEST" \
+            --arm64-digest "$ARM64_DIGEST"
+
+          anonymous_config="$RUNNER_TEMP/docker-anonymous"
+          install -d -m 0700 "$anonymous_config"
+          for reference in "$IMAGE:$VERSION" "$IMAGE:sha-$RELEASE_SHA"; do
+            actual="$(
+              DOCKER_CONFIG="$anonymous_config" \
+                docker buildx imagetools inspect "$reference" \
+                  --format '{{json .Manifest}}' | jq -er '.digest'
+            )"
+            test "$actual" = "$IMAGE_DIGEST"
+          done
+
+      - name: Publish npm packages with OIDC provenance
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          publish_package() {
+            package="$1"
+            tarball="$2"
+            remote_release_sha="$(
+              git ls-remote --tags origin "refs/tags/$GITHUB_REF_NAME^{}" |
+                awk 'NR == 1 { print $1 }'
+            )"
+            test "$remote_release_sha" = "$RELEASE_SHA"
+            gh release view "$GITHUB_REF_NAME" \
+              --json body,isDraft,isPrerelease,name \
+              > "$RUNNER_TEMP/immediate-prenpm-release-metadata.json"
+            test "$(
+              jq -r '.isDraft' "$RUNNER_TEMP/immediate-prenpm-release-metadata.json"
+            )" = "true"
+            test "$(
+              jq -r '.isPrerelease' "$RUNNER_TEMP/immediate-prenpm-release-metadata.json"
+            )" = "true"
+            test "$(
+              jq -r '.name' "$RUNNER_TEMP/immediate-prenpm-release-metadata.json"
+            )" = "UnKeep $VERSION"
+            jq -j '.body' "$RUNNER_TEMP/immediate-prenpm-release-metadata.json" \
+              > "$RUNNER_TEMP/immediate-prenpm-release-notes.md"
+            cmp \
+              "$RUNNER_TEMP/release-notes.md" \
+              "$RUNNER_TEMP/immediate-prenpm-release-notes.md"
+
+            version_stdout="$RUNNER_TEMP/npm-publish-${package##*/}.out"
+            version_stderr="$RUNNER_TEMP/npm-publish-${package##*/}.err"
+            if npm view --registry=https://registry.npmjs.org/ "$package@$VERSION" version --json >"$version_stdout" 2>"$version_stderr"; then
+              echo "::error::$package@$VERSION appeared before publication"
+              cat "$version_stdout" "$version_stderr"
+              exit 1
+            fi
+            if ! grep -Eqi 'E404|404 Not Found' "$version_stdout" "$version_stderr"; then
+              echo "::error::Could not prove that $package@$VERSION remains absent"
+              cat "$version_stdout" "$version_stderr"
+              exit 1
+            fi
+
+            npm publish \
+              --registry=https://registry.npmjs.org/ \
+              --access public \
+              --tag next \
+              --provenance \
+              "$tarball"
+          }
+
+          publish_package @unkeep/core "./npm-artifacts/unkeep-core-$VERSION.tgz"
+          publish_package @unkeep/client "./npm-artifacts/unkeep-client-$VERSION.tgz"
+          publish_package @unkeep/cli "./npm-artifacts/unkeep-cli-$VERSION.tgz"
+
+      - name: Verify the npm preview tags are coherent
+        run: |
+          set -euo pipefail
+          for package in @unkeep/core @unkeep/client @unkeep/cli; do
+            actual="$(
+              npm view --registry=https://registry.npmjs.org/ \
+                "$package" dist-tags.next
+            )"
+            test "$actual" = "$VERSION"
+          done
+
+  finalize_release:
+    name: Verify and publish GitHub prerelease
+    if: >-
+      needs.prepare.outputs.publish == 'true' &&
+      needs.stage_container.outputs.release_gate == 'release-environment-v1'
+    needs:
+      - prepare
+      - stage_container
+      - draft_release
+      - promote_image
+      - publish_npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      contents: write
+    env:
+      BASE_DIGEST: ${{ needs.stage_container.outputs.base_digest }}
+      IMAGE: ${{ needs.prepare.outputs.image }}
+      RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Verify protected release environment configuration
+        env:
+          CONTAINER_COMPLIANCE_GUARD: ${{ vars.UNKEEP_CONTAINER_COMPLIANCE_GUARD }}
+          IMMUTABLE_RELEASES_GUARD: ${{ vars.UNKEEP_IMMUTABLE_RELEASES_GUARD }}
+          RELEASE_GUARD: ${{ vars.UNKEEP_RELEASE_GUARD }}
+          STAGED_RELEASE_ATTEMPT: ${{ needs.stage_container.outputs.release_attempt }}
+        run: |
+          set -euo pipefail
+          test "$BASE_DIGEST" != ""
+          expected_compliance_guard="BrettKinny/UnKeep:container-compliance:${BASE_DIGEST}:v1"
+          test "$RELEASE_GUARD" = "BrettKinny/UnKeep:release:v1"
+          test "$IMMUTABLE_RELEASES_GUARD" = "BrettKinny/UnKeep:immutable-releases-reviewed:v1"
+          test "$CONTAINER_COMPLIANCE_GUARD" = "$expected_compliance_guard"
+          if [[ "$STAGED_RELEASE_ATTEMPT" != "$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" ]]; then
+            echo "::error::Publication jobs cannot resume across workflow attempts"
+            echo "::error::Re-run all jobs so the immutable release slot is inventoried again"
+            exit 1
+          fi
+
+      - name: Check out the validated commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.release_sha }}
+
+      - name: Download the verified staging bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: staged-release-assets-${{ env.VERSION }}
+          path: release-assets
+
+      - name: Download the independently hashed source assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: container-source-assets-${{ env.VERSION }}-${{ env.RELEASE_SHA }}
+          path: release-assets
+
+      - name: Download the staging bundle manifest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: staged-release-manifest-${{ env.VERSION }}
+          path: release-verification
+
+      - name: Download the promoted image identity
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: promoted-image-${{ env.VERSION }}
+          path: release-assets
+
+      - name: Revalidate the final bundle inputs
+        env:
+          AMD64_DIGEST: ${{ needs.stage_container.outputs.amd64_digest }}
+          ARM64_DIGEST: ${{ needs.stage_container.outputs.arm64_digest }}
+          BINDING_SHA256: ${{ needs.stage_container.outputs.source_binding_sha256 }}
+          BUNDLE_SHA256: ${{ needs.stage_container.outputs.source_bundle_sha256 }}
+          IMAGE_DIGEST: ${{ needs.promote_image.outputs.image_digest }}
+          METADATA_SHA256: ${{ needs.stage_container.outputs.source_metadata_sha256 }}
+          STAGE_MANIFEST_SHA256: ${{ needs.stage_container.outputs.stage_manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          manifest="release-verification/staged-release-assets.sha256"
+          test "$(sha256sum "$manifest" | awk '{ print $1 }')" = "$STAGE_MANIFEST_SHA256"
+          diff -u \
+            <(printf '%s\n' \
+              "NODE_RUNTIME_LICENSE" \
+              "THIRD_PARTY_NOTICES.md" \
+              "compose.release.yaml" \
+              "unkeep-$VERSION-container-source-binding.json" \
+              "unkeep-$VERSION-container-sources.json" \
+              "unkeep-$VERSION-container-sources.tar.gz" \
+              "unkeep-$VERSION-image-digest.txt" \
+              "unkeep-$VERSION-linux-amd64.spdx.json" \
+              "unkeep-cli-$VERSION.tgz" \
+              "unkeep-client-$VERSION.tgz" \
+              "unkeep-core-$VERSION.tgz" | sort) \
+            <(find release-assets -maxdepth 1 -type f -printf '%f\n' | sort)
+          (
+            cd release-assets
+            sha256sum --check "../$manifest"
+          )
+          digest_file="release-assets/unkeep-$VERSION-image-digest.txt"
+          test "$(wc -l < "$digest_file")" -eq 4
+          grep -Fx "image=$IMAGE" "$digest_file"
+          grep -Fx "version_tag=$IMAGE:$VERSION" "$digest_file"
+          grep -Fx "sha_tag=$IMAGE:sha-$RELEASE_SHA" "$digest_file"
+          grep -Fx "digest=$IMAGE_DIGEST" "$digest_file"
+          node scripts/container-source-bundle.mjs verify-binding \
+            --version "$VERSION" \
+            --revision "$RELEASE_SHA" \
+            --assets release-assets \
+            --bundle-sha "$BUNDLE_SHA256" \
+            --metadata-sha "$METADATA_SHA256" \
+            --binding-sha "$BINDING_SHA256" \
+            --amd64-digest "$AMD64_DIGEST" \
+            --arm64-digest "$ARM64_DIGEST"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: |
+            image=${{ env.BUILDKIT_IMAGE }}
+
+      - name: Revalidate all public release state
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_DIGEST: ${{ needs.promote_image.outputs.image_digest }}
+        run: |
+          set -euo pipefail
+          remote_release_sha="$(
+            git ls-remote --tags origin "refs/tags/$GITHUB_REF_NAME^{}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          if [[ "$remote_release_sha" != "$RELEASE_SHA" ]]; then
+            echo "::error::Release tag no longer resolves to the validated commit"
+            exit 1
+          fi
+          node scripts/extract-release-notes.mjs "$VERSION" \
+            > "$RUNNER_TEMP/release-notes.md"
+          gh release view "$GITHUB_REF_NAME" \
+            --json body,isDraft,isPrerelease,name \
+            > "$RUNNER_TEMP/prefinalize-release-metadata.json"
+          test "$(
+            jq -r '.isDraft' "$RUNNER_TEMP/prefinalize-release-metadata.json"
+          )" = "true"
+          test "$(
+            jq -r '.isPrerelease' "$RUNNER_TEMP/prefinalize-release-metadata.json"
+          )" = "true"
+          test "$(
+            jq -r '.name' "$RUNNER_TEMP/prefinalize-release-metadata.json"
+          )" = "UnKeep $VERSION"
+          jq -j '.body' "$RUNNER_TEMP/prefinalize-release-metadata.json" \
+            > "$RUNNER_TEMP/prefinalize-release-notes.md"
+          cmp \
+            "$RUNNER_TEMP/release-notes.md" \
+            "$RUNNER_TEMP/prefinalize-release-notes.md"
+
+          for package in @unkeep/core @unkeep/client @unkeep/cli; do
+            actual="$(
+              npm view --registry=https://registry.npmjs.org/ \
+                "$package" dist-tags.next
+            )"
+            test "$actual" = "$VERSION"
+            test "$(
+              npm view --registry=https://registry.npmjs.org/ \
+                "$package@$VERSION" version
+            )" = "$VERSION"
+          done
+
+          anonymous_config="$RUNNER_TEMP/docker-anonymous"
+          install -d -m 0700 "$anonymous_config"
+          for reference in "$IMAGE:$VERSION" "$IMAGE:sha-$RELEASE_SHA"; do
+            actual="$(
+              DOCKER_CONFIG="$anonymous_config" \
+                docker buildx imagetools inspect "$reference" \
+                  --format '{{json .Manifest}}' | jq -er '.digest'
+            )"
+            test "$actual" = "$IMAGE_DIGEST"
+          done
+
+      - name: Record image digest and checksums
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ needs.promote_image.outputs.image_digest }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          digest_file="release-assets/unkeep-$VERSION-image-digest.txt"
+          test "$(wc -l < "$digest_file")" -eq 4
+          grep -Fx "image=$IMAGE" "$digest_file"
+          grep -Fx "version_tag=$IMAGE:$VERSION" "$digest_file"
+          grep -Fx "sha_tag=$IMAGE:sha-$RELEASE_SHA" "$digest_file"
+          grep -Fx "digest=$IMAGE_DIGEST" "$digest_file"
+          (
+            cd release-assets
+            sha256sum ./*.tgz ./*.spdx.json ./*-image-digest.txt \
+              ./NODE_RUNTIME_LICENSE ./THIRD_PARTY_NOTICES.md \
+              "./unkeep-$VERSION-container-source-binding.json" \
+              "./unkeep-$VERSION-container-sources.json" \
+              "./unkeep-$VERSION-container-sources.tar.gz" \
+              ./compose.release.yaml > SHA256SUMS
+          )
+          diff -u \
+            <(printf '%s\n' \
+              "NODE_RUNTIME_LICENSE" \
+              "SHA256SUMS" \
+              "THIRD_PARTY_NOTICES.md" \
+              "compose.release.yaml" \
+              "unkeep-$VERSION-container-source-binding.json" \
+              "unkeep-$VERSION-container-sources.json" \
+              "unkeep-$VERSION-container-sources.tar.gz" \
+              "unkeep-$VERSION-image-digest.txt" \
+              "unkeep-$VERSION-linux-amd64.spdx.json" \
+              "unkeep-cli-$VERSION.tgz" \
+              "unkeep-client-$VERSION.tgz" \
+              "unkeep-core-$VERSION.tgz" | sort) \
+            <(find release-assets -maxdepth 1 -type f -printf '%f\n' | sort)
+
+      - name: Preserve the final release bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets-${{ env.VERSION }}
+          path: |
+            release-assets
+            !release-assets/unkeep-${{ env.VERSION }}-container-sources.json
+            !release-assets/unkeep-${{ env.VERSION }}-container-sources.tar.gz
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Stage, verify, and publish the prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_DIGEST: ${{ needs.promote_image.outputs.image_digest }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          node scripts/extract-release-notes.mjs "$VERSION" \
+            > "$RUNNER_TEMP/release-notes.md"
+
+          verify_draft_metadata() {
+            metadata_path="$1"
+            remote_notes_path="$2"
+            gh release view "$GITHUB_REF_NAME" \
+              --json body,isDraft,isPrerelease,name \
+              > "$metadata_path"
+            test "$(jq -r '.isDraft' "$metadata_path")" = "true"
+            test "$(jq -r '.isPrerelease' "$metadata_path")" = "true"
+            test "$(jq -r '.name' "$metadata_path")" = "UnKeep $VERSION"
+            jq -j '.body' "$metadata_path" > "$remote_notes_path"
+            cmp "$RUNNER_TEMP/release-notes.md" "$remote_notes_path"
+          }
+
+          remote_release_sha="$(
+            git ls-remote --tags origin "refs/tags/$GITHUB_REF_NAME^{}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          if [[ "$remote_release_sha" != "$RELEASE_SHA" ]]; then
+            echo "::error::Release tag no longer resolves to the validated commit"
+            exit 1
+          fi
+          verify_draft_metadata \
+            "$RUNNER_TEMP/preupload-release-metadata.json" \
+            "$RUNNER_TEMP/preupload-release-notes.md"
+          gh release upload "$GITHUB_REF_NAME" --clobber release-assets/*
+          verify_draft_metadata \
+            "$RUNNER_TEMP/postupload-release-metadata.json" \
+            "$RUNNER_TEMP/postupload-release-notes.md"
+          diff -u \
+            <(find release-assets -maxdepth 1 -type f -printf '%f\n' | sort) \
+            <(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' | sort)
+          downloaded="$RUNNER_TEMP/downloaded-release-assets"
+          install -d -m 0700 "$downloaded"
+          gh release download "$GITHUB_REF_NAME" --dir "$downloaded"
+          for local_asset in release-assets/*; do
+            cmp "$local_asset" "$downloaded/${local_asset##*/}"
+          done
+          (
+            cd "$downloaded"
+            sha256sum --check SHA256SUMS
+          )
+
+          remote_release_sha="$(
+            git ls-remote --tags origin "refs/tags/$GITHUB_REF_NAME^{}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          test "$remote_release_sha" = "$RELEASE_SHA"
+          verify_draft_metadata \
+            "$RUNNER_TEMP/immediate-prepublish-release-metadata.json" \
+            "$RUNNER_TEMP/immediate-prepublish-release-notes.md"
+          for package in @unkeep/core @unkeep/client @unkeep/cli; do
+            test "$(
+              npm view --registry=https://registry.npmjs.org/ \
+                "$package" dist-tags.next
+            )" = "$VERSION"
+          done
+          anonymous_config="$RUNNER_TEMP/docker-anonymous"
+          install -d -m 0700 "$anonymous_config"
+          for reference in "$IMAGE:$VERSION" "$IMAGE:sha-$RELEASE_SHA"; do
+            actual="$(
+              DOCKER_CONFIG="$anonymous_config" \
+                docker buildx imagetools inspect "$reference" \
+                  --format '{{json .Manifest}}' | jq -er '.digest'
+            )"
+            test "$actual" = "$IMAGE_DIGEST"
+          done
+
+          gh release edit "$GITHUB_REF_NAME" \
+            --title "UnKeep $VERSION" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --draft=false \
+            --prerelease \
+            --latest=false
+          gh release view "$GITHUB_REF_NAME" \
+            --json body,isDraft,isImmutable,isPrerelease,name \
+            > "$RUNNER_TEMP/published-release-metadata.json"
+          test "$(
+            jq -r '.isDraft' "$RUNNER_TEMP/published-release-metadata.json"
+          )" = "false"
+          test "$(
+            jq -r '.isImmutable' "$RUNNER_TEMP/published-release-metadata.json"
+          )" = "true"
+          test "$(
+            jq -r '.isPrerelease' "$RUNNER_TEMP/published-release-metadata.json"
+          )" = "true"
+          test "$(
+            jq -r '.name' "$RUNNER_TEMP/published-release-metadata.json"
+          )" = "UnKeep $VERSION"
+          jq -j '.body' "$RUNNER_TEMP/published-release-metadata.json" \
+            > "$RUNNER_TEMP/published-release-notes.md"
+          cmp "$RUNNER_TEMP/release-notes.md" "$RUNNER_TEMP/published-release-notes.md"
+          verified=false
+          for attempt in $(seq 1 20); do
+            if gh release verify "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+              verified=true
+              break
+            fi
+            sleep 3
+          done
+          if [[ "$verified" != "true" ]]; then
+            echo "::error::The published immutable release attestation could not be verified"
+            exit 1
+          fi
+          for local_asset in release-assets/*; do
+            gh release verify-asset "$GITHUB_REF_NAME" "$local_asset"
+          done

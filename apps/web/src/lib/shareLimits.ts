@@ -1,0 +1,2 @@
+export const MAX_SHARE_PAYLOAD_CHARACTERS = 256_000;
+export const MAX_SHARE_POST_BYTES = 512 * 1024;

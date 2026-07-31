@@ -1,0 +1,59 @@
+{
+  "name": "@unkeep/client",
+  "version": "0.2.0-rc.1",
+  "description": "Framework-independent encrypted sync client for an UnKeep relay",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BrettKinny/UnKeep.git",
+    "directory": "packages/client"
+  },
+  "homepage": "https://github.com/BrettKinny/UnKeep#readme",
+  "bugs": {
+    "url": "https://github.com/BrettKinny/UnKeep/issues"
+  },
+  "keywords": [
+    "notes",
+    "encrypted-sync",
+    "unkeep"
+  ],
+  "type": "module",
+  "files": [
+    "README.md",
+    "LICENSE",
+    "dist",
+    "!dist/**/*.test.*",
+    "!dist/**/*.integration.test.*"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc --noEmit",
+    "dev": "tsc -p tsconfig.build.json --watch",
+    "prepack": "pnpm build",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "@unkeep/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@unkeep/server": "workspace:*",
+    "typescript": "^5.9.3"
+  }
+}

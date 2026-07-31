@@ -1,0 +1,37 @@
+{
+  "name": "unkeep",
+  "private": true,
+  "description": "Privacy-first, self-hosted notes with end-to-end encrypted sync",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BrettKinny/UnKeep.git"
+  },
+  "homepage": "https://github.com/BrettKinny/UnKeep#readme",
+  "bugs": {
+    "url": "https://github.com/BrettKinny/UnKeep/issues"
+  },
+  "type": "module",
+  "packageManager": "pnpm@10.33.4",
+  "scripts": {
+    "dev": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/client build && pnpm --filter @unkeep/web dev",
+    "start": "pnpm --filter @unkeep/server start",
+    "build:packages": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/client build && pnpm --filter @unkeep/cli build",
+    "build": "pnpm build:packages && pnpm --filter @unkeep/web build",
+    "preview": "pnpm --filter @unkeep/web preview",
+    "check": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/client build && pnpm --filter @unkeep/core check && pnpm --filter @unkeep/client check && pnpm --filter @unkeep/cli check && pnpm --filter @unkeep/web check",
+    "lint": "pnpm --filter @unkeep/web lint",
+    "notices": "node scripts/generate-third-party-notices.mjs",
+    "notices:check": "node scripts/generate-third-party-notices.mjs --check",
+    "test": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/client build && pnpm --filter @unkeep/core test && pnpm --filter @unkeep/client test && pnpm --filter @unkeep/cli test && pnpm --filter @unkeep/web test && pnpm --filter @unkeep/server test && node --test scripts/check-release-slot.test.mjs scripts/container-source-bundle.test.mjs scripts/inventory-ghcr.test.mjs scripts/release-workflow-security.test.mjs",
+    "test:e2e": "pnpm build && playwright test",
+    "smoke:packages": "node scripts/package-smoke.mjs"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.60.0",
+    "vitest": "^4.1.10"
+  }
+}
