@@ -1,3 +1,6 @@
+ARG NODE_LICENSE_PLATFORM=linux/amd64
+FROM --platform=${NODE_LICENSE_PLATFORM} node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS node-license
+
 FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS build
 ARG UNKEEP_VERSION=dev
 ARG UNKEEP_REVISION=unknown
@@ -34,6 +37,9 @@ COPY --from=build /app/apps/server/src ./server
 COPY --from=build /app/apps/web/build ./web
 COPY --from=build /app/LICENSE ./LICENSE
 COPY --from=build /app/THIRD_PARTY_NOTICES.md ./THIRD_PARTY_NOTICES.md
+# The upstream arm64 source build omits this file, while its amd64 archive
+# contains the exact Node license text already verified by the source bundle.
+COPY --from=node-license /usr/local/LICENSE /usr/local/LICENSE
 # Bundle the CLI (runtime deps are workspace-only, so a hand-laid node_modules suffices)
 COPY --from=build /app/apps/cli/package.json ./cli/package.json
 COPY --from=build /app/apps/cli/dist ./cli/dist

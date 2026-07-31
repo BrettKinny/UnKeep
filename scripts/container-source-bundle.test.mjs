@@ -133,6 +133,7 @@ function createVerifiedFixture({ extraFile = false, symlink = false } = {}) {
       version: '22.23.2',
       amd64RuntimeSha256: '3'.repeat(64),
       arm64RuntimeSha256: '4'.repeat(64),
+      licenseSha256: sha256(join(root, 'licenses', 'node', 'LICENSE')),
     },
   };
   writeFileSync(
@@ -243,20 +244,40 @@ test('requires identical package source identities across architectures', () => 
   );
 });
 
-test('requires every Dockerfile stage to use the same pinned base', () => {
+test('requires controlled license, build, and runtime stages with one base', () => {
   const base = `node:22-alpine@sha256:${'a'.repeat(64)}`;
+  const valid = [
+    'ARG NODE_LICENSE_PLATFORM=linux/amd64',
+    `FROM --platform=\${NODE_LICENSE_PLATFORM} ${base} AS node-license`,
+    `FROM ${base} AS build`,
+    `FROM ${base}`,
+    'COPY --from=node-license /usr/local/LICENSE /usr/local/LICENSE',
+  ].join('\n');
   assert.equal(
-    parseDockerfileBase(`FROM ${base} AS build\nFROM ${base}\n`),
+    parseDockerfileBase(valid),
     base,
   );
   for (const dockerfile of [
     `FROM ${base} AS build\nFROM node:22-alpine\n`,
     `FROM ${base} AS build\nFROM ${base}\nFROM scratch\n`,
-    `FROM --platform=linux/amd64 ${base}\nFROM ${base}\n`,
+    valid.replace(
+      'NODE_LICENSE_PLATFORM=linux/amd64',
+      'NODE_LICENSE_PLATFORM=linux/arm64',
+    ),
+    valid.replace(
+      '--platform=${NODE_LICENSE_PLATFORM}',
+      '--platform=linux/amd64',
+    ),
+    valid.replace(' AS node-license', ''),
+    valid.replace(
+      'COPY --from=node-license /usr/local/LICENSE /usr/local/LICENSE',
+      'COPY --from=node-license /usr/local/LICENSE /tmp/LICENSE',
+    ),
+    valid.replace(`FROM ${base} AS build`, 'FROM node:22-alpine AS build'),
   ]) {
     assert.throws(
       () => parseDockerfileBase(dockerfile),
-      /exactly two stages using one identical digest-pinned/,
+      /controlled Node license, build, and runtime stages/,
     );
   }
 });
@@ -321,19 +342,21 @@ test('hashes exact raw OCI descriptor bytes against their claimed digest', () =>
   );
 });
 
-test('requires staged runtime packages and Node bytes to match sources', () => {
+test('requires staged runtime packages, Node, and its license to match sources', () => {
   const packages = parseInstalledDatabase(installed);
   const source = {
     architectures: { amd64: packages },
     node: {
       version: '22.23.2',
       amd64RuntimeSha256: 'a'.repeat(64),
+      licenseSha256: 'c'.repeat(64),
     },
   };
   const runtime = {
     packages: structuredClone(packages),
     nodeVersion: 'v22.23.2',
     nodeSha256: 'a'.repeat(64),
+    nodeLicenseSha256: 'c'.repeat(64),
   };
   assert.doesNotThrow(() =>
     compareRuntimeCorrespondence(source, runtime, 'amd64'));
@@ -341,6 +364,7 @@ test('requires staged runtime packages and Node bytes to match sources', () => {
     value => { value.packages[0].version = '9.9.9-r0'; },
     value => { value.nodeVersion = 'v22.23.3'; },
     value => { value.nodeSha256 = 'b'.repeat(64); },
+    value => { value.nodeLicenseSha256 = 'd'.repeat(64); },
   ]) {
     const changed = structuredClone(runtime);
     mutate(changed);
