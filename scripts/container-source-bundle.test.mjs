@@ -17,6 +17,7 @@ import {
   bindBundle,
   compareRuntimeCorrespondence,
   compareAlpineInventories,
+  fetchCommits,
   normalizeSourceSymlinks,
   parseDockerfileBase,
   parseInstalledDatabase,
@@ -51,6 +52,12 @@ const fixtureVersion = '0.2.0-rc.1';
 const fixtureRevision = 'a'.repeat(40);
 function sha256(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+function git(cwd, args) {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
 }
 
 function createVerifiedFixture({ extraFile = false, symlink = false } = {}) {
@@ -265,6 +272,41 @@ test('addresses each platform manifest directly instead of reusing an index tag'
     () => platformImageReference('node:22-alpine', platform),
     /Invalid digest-pinned image index/,
   );
+});
+
+test('fetches multiple immutable source commits in one shallow transaction', () => {
+  const root = mkdtempSync(join(tmpdir(), 'unkeep-source-git-fetch-test-'));
+  const remote = join(root, 'remote');
+  const checkout = join(root, 'checkout');
+  try {
+    mkdirSync(remote);
+    git(remote, ['init', '--quiet']);
+    git(remote, ['config', 'user.email', 'fixture@example.invalid']);
+    git(remote, ['config', 'user.name', 'Fixture']);
+    const commits = [];
+    for (const value of ['one', 'two', 'three']) {
+      writeFileSync(join(remote, 'value'), `${value}\n`);
+      git(remote, ['add', 'value']);
+      git(remote, ['commit', '--quiet', '-m', value]);
+      commits.push(git(remote, ['rev-parse', 'HEAD']));
+    }
+    mkdirSync(checkout);
+    git(checkout, ['init', '--quiet']);
+    git(checkout, ['remote', 'add', 'origin', remote]);
+    assert.doesNotThrow(() =>
+      fetchCommits(checkout, [commits[0], commits[2], commits[0]]));
+    for (const commit of [commits[0], commits[2]]) {
+      assert.equal(
+        git(checkout, [
+          'rev-parse',
+          `refs/unkeep-sources/${commit}^{commit}`,
+        ]),
+        commit,
+      );
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('hashes exact raw OCI descriptor bytes against their claimed digest', () => {
