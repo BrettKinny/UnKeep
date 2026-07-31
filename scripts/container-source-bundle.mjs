@@ -198,6 +198,17 @@ export function parseDockerfileBase(
   return bases[0];
 }
 
+export function platformImageReference(indexReference, platformDigest) {
+  const match = /^([^@\s]+)@sha256:[0-9a-f]{64}$/.exec(indexReference);
+  if (!match) fail(`Invalid digest-pinned image index: ${indexReference}`);
+  const digest = validateToken(
+    platformDigest,
+    /^sha256:[0-9a-f]{64}$/,
+    'platform image digest',
+  );
+  return `${match[1]}@${digest}`;
+}
+
 function inspectPlatform(baseImage, platform) {
   const installed = run('docker', [
     'run',
@@ -747,9 +758,15 @@ async function buildBundle(options) {
   const baseImage = parseDockerfileBase();
   const baseDigest = baseImage.slice(baseImage.indexOf('sha256:') + 7);
   validateSha256(baseDigest, 'base-image digest');
-  const amd64 = inspectPlatform(baseImage, 'linux/amd64');
-  const arm64 = inspectPlatform(baseImage, 'linux/arm64');
   const oci = inspectOciBase(baseImage);
+  const amd64 = inspectPlatform(
+    platformImageReference(baseImage, oci.platforms.amd64.digest),
+    'linux/amd64',
+  );
+  const arm64 = inspectPlatform(
+    platformImageReference(baseImage, oci.platforms.arm64.digest),
+    'linux/arm64',
+  );
   compareAlpineInventories(amd64.packages, arm64.packages);
   if (amd64.nodeVersion !== arm64.nodeVersion) {
     fail('The amd64 and arm64 Node runtime versions do not match');

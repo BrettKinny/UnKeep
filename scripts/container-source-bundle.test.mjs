@@ -20,6 +20,7 @@ import {
   normalizeSourceSymlinks,
   parseDockerfileBase,
   parseInstalledDatabase,
+  platformImageReference,
   requireDescriptorDigest,
   validateArchiveListings,
   verifyBinding,
@@ -251,6 +252,19 @@ test('requires every Dockerfile stage to use the same pinned base', () => {
       /exactly two stages using one identical digest-pinned/,
     );
   }
+});
+
+test('addresses each platform manifest directly instead of reusing an index tag', () => {
+  const index = `node:22-alpine@sha256:${'a'.repeat(64)}`;
+  const platform = `sha256:${'b'.repeat(64)}`;
+  assert.equal(
+    platformImageReference(index, platform),
+    `node:22-alpine@${platform}`,
+  );
+  assert.throws(
+    () => platformImageReference('node:22-alpine', platform),
+    /Invalid digest-pinned image index/,
+  );
 });
 
 test('hashes exact raw OCI descriptor bytes against their claimed digest', () => {
