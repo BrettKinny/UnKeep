@@ -15,6 +15,8 @@ import type {
 } from '@unkeep/core/experimental';
 import {
   MemoryClientStorage,
+  PendingMutationCredentialMismatchError,
+  PendingMutationRebaseRequiresPullError,
   RecordConflictError,
   type ClientStorage,
   type RelaySession,
@@ -49,6 +51,7 @@ let NoteStore: new (readVaultResources?: () => TestVaultResources) => {
     content: string;
     attachments?: Array<{ name: string; mimeType: string; size: number; bytes: Uint8Array<ArrayBuffer> }>;
   }, options?: { idempotencyKey?: string; createdAt?: number }): Promise<Note>;
+  updateNote(id: string, updates: Partial<Omit<Note, 'id' | 'createdAt'>>): void;
   addAttachment(noteId: string, file: File): Promise<void>;
   removeAttachment(noteId: string, attachmentId: string): Promise<void>;
   deleteNote(noteId: string): Promise<unknown | null>;
@@ -336,10 +339,877 @@ function useTestSync(store: object, sync: object): void {
   if (!Reflect.has(sync, 'getQuarantinedRecords')) {
     Reflect.set(sync, 'getQuarantinedRecords', async () => []);
   }
+  if (!Reflect.has(sync, 'pendingCompoundCommits')) {
+    Reflect.set(sync, 'pendingCompoundCommits', async () => []);
+  }
+  if (!Reflect.has(sync, 'pendingCompoundCommit')) {
+    Reflect.set(sync, 'pendingCompoundCommit', async () => null);
+  }
+  if (!Reflect.has(sync, 'completeCompoundCommit')) {
+    Reflect.set(sync, 'completeCompoundCommit', async () => true);
+  }
+  if (!Reflect.has(sync, 'resumePendingCompoundCommit')) {
+    Reflect.set(sync, 'resumePendingCompoundCommit', async () => null);
+  }
+  if (!Reflect.has(sync, 'cancelPendingCompoundCommit')) {
+    Reflect.set(sync, 'cancelPendingCompoundCommit', async () => true);
+  }
+  if (!Reflect.has(sync, 'commitNoteWithAttachments')) {
+    Reflect.set(sync, 'commitNoteWithAttachments', async (
+      value: Note,
+      uploads: Array<{
+        attachment: NoteAttachment;
+        loadBytes: () => Promise<Uint8Array<ArrayBuffer>>;
+      }>,
+    ) => {
+      const attachmentRevisions = [];
+      const push = Reflect.get(sync, 'push') as (note: Note) => Promise<number>;
+      const revision = await push.call(sync, value);
+      for (const upload of uploads) {
+        const bytes = await upload.loadBytes();
+        const uploadAttachment = Reflect.get(sync, 'uploadAttachment') as
+          | ((noteId: string, attachment: NoteAttachment, bytes: Uint8Array<ArrayBuffer>) => Promise<void>)
+          | undefined;
+        await uploadAttachment?.call(sync, value.id, upload.attachment, bytes);
+        const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+        attachmentRevisions.push({
+          id: upload.attachment.id,
+          revision: 3,
+          contentHash: [...digest]
+            .map(byte => byte.toString(16).padStart(2, '0')).join(''),
+        });
+      }
+      return {
+        noteId: value.id,
+        mutationId: crypto.randomUUID(),
+        fingerprint: 'test-fingerprint',
+        revision,
+        attachmentRevisions,
+      };
+    });
+  }
   Reflect.set(store, 'encryptedSync', sync);
 }
 
 describe('NoteStore vault lifecycle', () => {
+  it('authenticates and replays an ordinary pending note after credential replacement', async () => {
+    const local = note('credential-handoff', 'durable local edit');
+    const adapter = new TestAdapter();
+    await adapter.saveNoteWithPendingSync(local);
+    const store = new NoteStore(() => resources('credential-handoff'));
+    await store.initWithAdapter(adapter, {});
+    const events: string[] = [];
+    let firstPush = true;
+    const sync = {
+      async push(value: Note) {
+        events.push(`push:${value.id}`);
+        if (firstPush) {
+          firstPush = false;
+          throw new PendingMutationCredentialMismatchError();
+        }
+        return 3;
+      },
+      async resumePendingMutationAfterCredentialChange(kind: string, id: string) {
+        events.push(`handoff:${kind}:${id}`);
+        return 2;
+      },
+      async pull() {
+        return {
+          notes: [],
+          deletedIds: [],
+          attachments: [],
+          deletedAttachments: [],
+          quarantined: [],
+          cursor: 3,
+          revisions: [],
+        };
+      },
+      async acknowledge() {},
+    };
+    useTestSync(store, sync);
+
+    await store.sync();
+
+    expect(events).toEqual([
+      `push:${local.id}`,
+      `handoff:note:${local.id}`,
+      `push:${local.id}`,
+    ]);
+    await expect(adapter.listPendingNoteSync()).resolves.toEqual([]);
+    expect(store.syncStatus).toBe('synced');
+  });
+
+  it('retires only a proven stale foreign note retry before the desired push', async () => {
+    const local = note('credential-rebase', 'durable rebased edit');
+    const adapter = new TestAdapter();
+    await adapter.saveNoteWithPendingSync(local);
+    const store = new NoteStore(() => resources('credential-rebase'));
+    await store.initWithAdapter(adapter, {});
+    const events: string[] = [];
+    let firstPush = true;
+    const sync = {
+      async push(value: Note) {
+        events.push(`push:${value.id}`);
+        if (firstPush) {
+          firstPush = false;
+          throw new PendingMutationCredentialMismatchError();
+        }
+        return 5;
+      },
+      async resumePendingMutationAfterCredentialChange() {
+        events.push('foreign-retry');
+        throw new RecordConflictError(4);
+      },
+      async rebasePendingNoteAfterCredentialChange() {
+        events.push('atomic-credential-rebase');
+        return 5;
+      },
+      async pull() {
+        return {
+          notes: [],
+          deletedIds: [],
+          attachments: [],
+          deletedAttachments: [],
+          quarantined: [],
+          cursor: 5,
+          revisions: [],
+        };
+      },
+      async acknowledge() {},
+    };
+    useTestSync(store, sync);
+
+    await store.sync();
+
+    expect(events).toEqual([
+      `push:${local.id}`,
+      'foreign-retry',
+      'atomic-credential-rebase',
+    ]);
+    await expect(adapter.listPendingNoteSync()).resolves.toEqual([]);
+    expect(store.syncStatus).toBe('synced');
+  });
+
+  it('preserves a stale full note as a copy before pulling unseen remote fields', async () => {
+    const local = {
+      ...note('credential-unseen-remote', 'durable local edit'),
+      title: 'Local title',
+      labels: ['local'],
+    };
+    const winner = {
+      ...note(local.id, 'unseen remote edit'),
+      title: 'Remote title',
+      labels: ['remote'],
+      updatedAt: 4,
+    };
+    const adapter = new TestAdapter();
+    await adapter.saveNoteWithPendingSync(local);
+    const store = new NoteStore(() => resources('credential-unseen-remote'));
+    await store.initWithAdapter(adapter, {});
+    const events: string[] = [];
+    let originalAttempt = true;
+    const sync = {
+      async push(value: Note) {
+        events.push(`push:${value.id}`);
+        if (value.id === local.id && originalAttempt) {
+          originalAttempt = false;
+          throw new PendingMutationCredentialMismatchError();
+        }
+        return 5;
+      },
+      async resumePendingMutationAfterCredentialChange() {
+        events.push('foreign-conflict');
+        throw new RecordConflictError(4);
+      },
+      async rebasePendingNoteAfterCredentialChange() {
+        events.push('reject-blind-rebase');
+        throw new PendingMutationRebaseRequiresPullError(4);
+      },
+      async abandonPendingMutationAfterCredentialChange() {
+        events.push('retire-proven-stale-root');
+        return true;
+      },
+      async pull() {
+        events.push('pull-remote-winner');
+        return {
+          notes: [winner],
+          deletedIds: [],
+          attachments: [],
+          deletedAttachments: [],
+          quarantined: [],
+          cursor: 5,
+          revisions: [{ kind: 'note' as const, id: winner.id, revision: 4 }],
+        };
+      },
+      async acknowledge() {},
+    };
+    useTestSync(store, sync);
+
+    await store.sync();
+    await vi.waitFor(() => {
+      expect(events).toContain('pull-remote-winner');
+      expect(store.syncStatus).toBe('synced');
+    });
+    const preserved = store.notes.find(value => value.id !== local.id);
+    expect(preserved).toMatchObject({
+      content: local.content,
+      title: 'Local title (conflict copy)',
+      labels: local.labels,
+    });
+
+    expect(events).toEqual([
+      `push:${local.id}`,
+      'foreign-conflict',
+      'reject-blind-rebase',
+      'retire-proven-stale-root',
+      `push:${preserved!.id}`,
+      'pull-remote-winner',
+    ]);
+    expect(store.notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: winner.id,
+        content: winner.content,
+        title: winner.title,
+        labels: winner.labels,
+      }),
+      expect.objectContaining({
+        id: preserved!.id,
+        content: local.content,
+        title: 'Local title (conflict copy)',
+        labels: local.labels,
+      }),
+    ]));
+    await expect(adapter.listPendingNoteSync()).resolves.toEqual([]);
+    expect(store.syncStatus).toBe('synced');
+  });
+
+  it('publishes only new bytes through a compound note commit', async () => {
+    const existing = { id: 'existing', name: 'existing.png', mimeType: 'image/png', size: 2 };
+    const fresh = { id: 'fresh', name: 'fresh.png', mimeType: 'image/png', size: 3 };
+    const freshBytes = new Uint8Array([4, 5, 6]);
+    const local = { ...note('mixed-attachments', 'mixed'), images: [existing, fresh] };
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'mixed-compound');
+    await attachments.save(local.id, existing, new Uint8Array([1, 2]));
+    await attachments.save(local.id, fresh, freshBytes, { pendingUpload: true });
+    const adapter = new TestAdapter();
+    await adapter.saveNoteWithPendingSync(local);
+    const store = new NoteStore(() => resources('mixed-compound', attachments));
+    await store.initWithAdapter(adapter, {});
+    const committedUploads: string[][] = [];
+    const completed: string[] = [];
+    const sync = {
+      async pendingCompoundCommits() { return []; },
+      async commitNoteWithAttachments(value: Note, uploads: Array<{
+        attachment: NoteAttachment;
+        loadBytes: () => Promise<Uint8Array<ArrayBuffer>>;
+      }>) {
+        committedUploads.push(uploads.map(upload => upload.attachment.id));
+        const bytes = await uploads[0].loadBytes();
+        expect(bytes).toEqual(freshBytes);
+        const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+        return {
+          noteId: value.id,
+          mutationId: 'mixed-mutation',
+          fingerprint: 'mixed-fingerprint',
+          revision: 2,
+          attachmentRevisions: [{
+            id: fresh.id,
+            revision: 2,
+            contentHash: [...digest].map(byte => byte.toString(16).padStart(2, '0')).join(''),
+          }],
+        };
+      },
+      async completeCompoundCommit(handle: { mutationId: string }) {
+        completed.push(handle.mutationId);
+        return true;
+      },
+      async push() { throw new Error('ordinary note push must not publish a new attachment'); },
+      async uploadAttachment() { throw new Error('direct attachment upload is forbidden'); },
+      async deleteAttachment() {},
+      async pull() {
+        return { notes: [], deletedIds: [], attachments: [], deletedAttachments: [], cursor: 0, revisions: [] };
+      },
+      async acknowledge() {},
+    };
+    useTestSync(store, sync);
+
+    await store.sync();
+
+    expect(committedUploads).toEqual([[fresh.id]]);
+    expect(completed).toEqual(['mixed-mutation']);
+    await expect(adapter.listPendingNoteSync()).resolves.toEqual([]);
+    await expect(attachments.pendingUploads()).resolves.toEqual([]);
+  });
+
+  it('preserves an attachment-ID collision as a fresh conflict copy and resumes pulling', async () => {
+    const colliding = {
+      id: 'shared-attachment-id',
+      name: 'local.bin',
+      mimeType: 'application/octet-stream',
+      size: 3,
+    };
+    const bytes = new Uint8Array([1, 2, 3]);
+    const local = { ...note('collision-note', 'local edit'), images: [colliding] };
+    const winner = { ...note(local.id, 'remote winner'), updatedAt: 2 };
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'attachment-collision');
+    await attachments.save(local.id, colliding, bytes, { pendingUpload: true });
+    const adapter = new TestAdapter();
+    await adapter.saveNoteWithPendingSync(local);
+    const store = new NoteStore(() => resources('attachment-collision', attachments));
+    await store.initWithAdapter(adapter, {});
+    let pullCalls = 0;
+    const committedCopies: Note[] = [];
+    const sync = {
+      async pendingCompoundCommits() { return []; },
+      async commitNoteWithAttachments(value: Note, uploads: Array<{
+        attachment: NoteAttachment;
+        loadBytes: () => Promise<Uint8Array<ArrayBuffer>>;
+      }>) {
+        if (value.id === local.id) {
+          throw Object.assign(new Error('attachment_id_unavailable'), {
+            status: 409,
+            code: 'attachment_id_unavailable',
+          });
+        }
+        committedCopies.push(value);
+        const attachmentRevisions = [];
+        for (const upload of uploads) {
+          const valueBytes = await upload.loadBytes();
+          const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', valueBytes));
+          attachmentRevisions.push({
+            id: upload.attachment.id,
+            revision: 2,
+            contentHash: [...digest]
+              .map(byte => byte.toString(16).padStart(2, '0')).join(''),
+          });
+        }
+        return {
+          noteId: value.id,
+          mutationId: `copy-${value.id}`,
+          fingerprint: 'copy-fingerprint',
+          revision: 3,
+          attachmentRevisions,
+        };
+      },
+      async completeCompoundCommit() { return true; },
+      async push() { return 3; },
+      async deleteAttachment() {},
+      async pull() {
+        pullCalls++;
+        return {
+          notes: [winner],
+          deletedIds: [],
+          attachments: [],
+          deletedAttachments: [],
+          quarantined: [],
+          cursor: 3,
+          revisions: [{ kind: 'note' as const, id: winner.id, revision: 3 }],
+        };
+      },
+      async acknowledge() {},
+    };
+    useTestSync(store, sync);
+
+    await store.sync();
+
+    expect(committedCopies).toHaveLength(1);
+    expect(committedCopies[0].id).not.toBe(local.id);
+    expect(committedCopies[0].images?.[0].id).not.toBe(colliding.id);
+    expect(pullCalls).toBeGreaterThan(0);
+    await expect(adapter.listPendingNoteSync()).resolves.toEqual([]);
+    await expect(attachments.compoundUploadIntent(local.id)).resolves.toBeNull();
+    await expect(attachments.get(local.id, colliding.id)).resolves.toBeNull();
+    expect(store.notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: winner.id, content: winner.content }),
+      expect.objectContaining({ id: committedCopies[0].id }),
+    ]));
+  });
+
+  it('rebuilds a foreign compound retry only after a write-capable handoff', async () => {
+    const reserved = {
+      id: 'credential-reserved-attachment',
+      name: 'local.bin',
+      mimeType: 'application/octet-stream',
+      size: 3,
+    };
+    const bytes = new Uint8Array([1, 2, 3]);
+    const local = { ...note('credential-compound', 'local edit'), images: [reserved] };
+    const winner = { ...note(local.id, 'remote winner'), updatedAt: 2 };
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'credential-compound');
+    await attachments.save(local.id, reserved, bytes, { pendingUpload: true });
+    const adapter = new TestAdapter();
+    const pending = await adapter.saveNoteWithPendingSync(local);
+    await attachments.prepareUploads(local.id, local.images);
+    const exactSources = await attachments.pendingUploadSources(
+      local.id,
+      [reserved.id],
+    );
+    await attachments.beginCompoundUploadIntent(
+      local.id,
+      pending.token,
+      exactSources.map(value => value.handle),
+    );
+    const store = new NoteStore(() => resources('credential-compound', attachments));
+    await store.initWithAdapter(adapter, {});
+    const events: string[] = [];
+    const committedCopies: Note[] = [];
+    let foreignRoot = true;
+    const sync = {
+      async resumePendingCompoundCommit() {
+        events.push('defer-startup-foreign-root');
+        if (foreignRoot) throw new PendingMutationCredentialMismatchError();
+        return null;
+      },
+      async commitNoteWithAttachments(value: Note, uploads: Array<{
+        attachment: NoteAttachment;
+        loadBytes: () => Promise<Uint8Array<ArrayBuffer>>;
+      }>) {
+        if (value.id === local.id) {
+          events.push('reserved-id-collision');
+          throw Object.assign(new Error('attachment_id_unavailable'), {
+            status: 409,
+            code: 'attachment_id_unavailable',
+          });
+        }
+        events.push('commit-copy');
+        committedCopies.push(value);
+        const valueBytes = await uploads[0].loadBytes();
+        const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', valueBytes));
+        return {
+          noteId: value.id,
+          mutationId: 'replacement-copy',
+          fingerprint: 'replacement-copy',
+          revision: 3,
+          attachmentRevisions: [{
+            id: uploads[0].attachment.id,
+            revision: 3,
+            contentHash: [...digest]
+              .map(byte => byte.toString(16).padStart(2, '0')).join(''),
+          }],
+        };
+      },
+      async resumePendingCompoundCommitAfterCredentialChange() {
+        events.push('authenticated-handoff');
+        throw Object.assign(new Error('attachment_stage_missing'), {
+          status: 409,
+          code: 'attachment_stage_missing',
+        });
+      },
+      async abandonPendingCompoundAfterCredentialChange() {
+        events.push('abandon-foreign-root');
+        foreignRoot = false;
+        return true;
+      },
+      async completeCompoundCommit() { return true; },
+      async push() { return 3; },
+      async deleteAttachment() {},
+      async pull() {
+        return {
+          notes: [winner],
+          deletedIds: [],
+          attachments: [],
+          deletedAttachments: [],
+          quarantined: [],
+          cursor: 3,
+          revisions: [{ kind: 'note' as const, id: winner.id, revision: 3 }],
+        };
+      },
+      async acknowledge() {},
+    };
+    useTestSync(store, sync);
+
+    await store.sync();
+
+    expect(events).toEqual([
+      'defer-startup-foreign-root',
+      'authenticated-handoff',
+      'abandon-foreign-root',
+      'reserved-id-collision',
+      'commit-copy',
+    ]);
+    expect(committedCopies).toHaveLength(1);
+    expect(committedCopies[0].id).not.toBe(local.id);
+    expect(committedCopies[0].images?.[0].id).not.toBe(reserved.id);
+    await expect(adapter.listPendingNoteSync()).resolves.toEqual([]);
+    expect(store.syncStatus).toBe('synced');
+  });
+
+  it('recovers an accepted compound without clearing a newer local generation', async () => {
+    const value = { id: 'replaceable', name: 'value.bin', mimeType: 'application/octet-stream', size: 3 };
+    const oldBytes = new Uint8Array([1, 2, 3]);
+    const newBytes = new Uint8Array([7, 8, 9]);
+    const oldNote = { ...note('compound-recovery', 'old'), images: [value] };
+    const newNote = { ...oldNote, content: 'newer', updatedAt: 2 };
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'compound-recovery');
+    await attachments.save(oldNote.id, value, oldBytes, { pendingUpload: true });
+    await attachments.prepareUploads(oldNote.id, [value]);
+    const [oldSource] = await attachments.pendingUploadSources(oldNote.id, [value.id]);
+    const adapter = new TestAdapter();
+    const oldPending = await adapter.saveNoteWithPendingSync(oldNote);
+    await attachments.beginCompoundUploadIntent(oldNote.id, oldPending.token, [oldSource.handle]);
+    const oldHash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', oldBytes))]
+      .map(byte => byte.toString(16).padStart(2, '0')).join('');
+    const oldHandle = {
+      noteId: oldNote.id,
+      mutationId: 'old-mutation',
+      fingerprint: 'old-fingerprint',
+      revision: 2,
+      attachmentRevisions: [{ id: value.id, revision: 2, contentHash: oldHash }],
+    };
+    await attachments.stageUpload(oldNote.id, value, newBytes);
+    await adapter.saveNoteWithPendingSync(newNote);
+    const store = new NoteStore(() => resources('compound-recovery', attachments));
+    await store.initWithAdapter(adapter, {});
+    let acceptedPending = true;
+    let newerGenerationSurvivedOldCompletion = false;
+    const completed: string[] = [];
+    const sync = {
+      async pendingCompoundCommits() { return acceptedPending ? [oldHandle] : []; },
+      async completeCompoundCommit(handle: { mutationId: string }) {
+        completed.push(handle.mutationId);
+        if (handle.mutationId === 'old-mutation') {
+          newerGenerationSurvivedOldCompletion = (await attachments.stagedUploads()).length === 1;
+          acceptedPending = false;
+        }
+        return true;
+      },
+      async commitNoteWithAttachments(noteValue: Note, uploads: Array<{
+        attachment: NoteAttachment;
+        loadBytes: () => Promise<Uint8Array<ArrayBuffer>>;
+      }>) {
+        const bytes = await uploads[0].loadBytes();
+        expect(bytes).toEqual(newBytes);
+        const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
+          .map(byte => byte.toString(16).padStart(2, '0')).join('');
+        return {
+          noteId: noteValue.id,
+          mutationId: 'new-mutation',
+          fingerprint: 'new-fingerprint',
+          revision: 3,
+          attachmentRevisions: [{ id: value.id, revision: 3, contentHash: hash }],
+        };
+      },
+      async push() { throw new Error('replacement must remain a compound commit'); },
+      async deleteAttachment() {},
+      async pull() {
+        return { notes: [], deletedIds: [], attachments: [], deletedAttachments: [], cursor: 0, revisions: [] };
+      },
+      async acknowledge() {},
+    };
+    useTestSync(store, sync);
+
+    await store.sync();
+
+    expect(newerGenerationSurvivedOldCompletion).toBe(true);
+    expect(completed).toEqual(['old-mutation', 'new-mutation']);
+    await expect(adapter.listPendingNoteSync()).resolves.toEqual([]);
+    await expect(attachments.pendingUploads()).resolves.toEqual([]);
+    await expect(attachments.get(oldNote.id, value.id)).resolves.toEqual({ attachment: value, bytes: newBytes });
+  });
+
+  it('finishes a reconciled SDK root without reconfirming local attachment state', async () => {
+    const value = { id: 'reconciled-value', name: 'value.bin', mimeType: 'application/octet-stream', size: 1 };
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'reconciled-root');
+    await attachments.save('reconciled-note', value, new Uint8Array([1]), { pendingUpload: true });
+    const [source] = await attachments.pendingUploadSources('reconciled-note', [value.id]);
+    await attachments.beginCompoundUploadIntent('reconciled-note', 'old-token', [source.handle]);
+    await attachments.markCompoundUploadIntentReconciled('reconciled-note', 'old-token');
+    // Simulate local confirmation having already retired the exact generation.
+    const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array([1])))]
+      .map(byte => byte.toString(16).padStart(2, '0')).join('');
+    await attachments.confirmCompoundUpload(source.handle, hash);
+    const handle = {
+      noteId: 'reconciled-note', mutationId: 'reconciled-mutation', fingerprint: 'fingerprint', revision: 2,
+      attachmentRevisions: [{ id: value.id, revision: 2, contentHash: hash }],
+    };
+    const adapter = new TestAdapter();
+    const store = new NoteStore(() => resources('reconciled-root', attachments));
+    await store.initWithAdapter(adapter, {});
+    let completed = false;
+    useTestSync(store, {
+      async pendingCompoundCommits() { return [handle]; },
+      async completeCompoundCommit() { completed = true; return true; },
+      async resumePendingCompoundCommit() { throw new Error('reconciled roots are not resumed'); },
+      async cancelPendingCompoundCommit() { return false; },
+      async pull() { return { notes: [], deletedIds: [], attachments: [], deletedAttachments: [], cursor: 0, revisions: [] }; },
+      async acknowledge() {},
+    });
+
+    await store.sync();
+
+    expect(completed).toBe(true);
+    await expect(attachments.compoundUploadIntent(handle.noteId)).resolves.toBeNull();
+  });
+
+  it('removes a reconciled stale intent before publishing a newer edit', async () => {
+    const value = { id: 'stale-value', name: 'value.bin', mimeType: 'application/octet-stream', size: 1 };
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'stale-reconciled');
+    await attachments.save('stale-note', value, new Uint8Array([1]), { pendingUpload: true });
+    const [oldSource] = await attachments.pendingUploadSources('stale-note', [value.id]);
+    await attachments.beginCompoundUploadIntent('stale-note', 'old-token', [oldSource.handle]);
+    await attachments.markCompoundUploadIntentReconciled('stale-note', 'old-token');
+    const newerBytes = new Uint8Array([2]);
+    await attachments.stageUpload('stale-note', value, newerBytes);
+    const adapter = new TestAdapter();
+    await adapter.saveNoteWithPendingSync({ ...note('stale-note', 'newer'), images: [value] });
+    const store = new NoteStore(() => resources('stale-reconciled', attachments));
+    await store.initWithAdapter(adapter, {});
+    let committed = 0;
+    const sync = {
+      async pendingCompoundCommits() { return []; },
+      async resumePendingCompoundCommit() { throw new Error('stale reconciled intent must be removed'); },
+      async cancelPendingCompoundCommit() { return false; },
+      async commitNoteWithAttachments(noteValue: Note, uploads: Array<{ attachment: NoteAttachment; loadBytes: () => Promise<Uint8Array<ArrayBuffer>> }>) {
+        committed += 1;
+        const bytes = await uploads[0].loadBytes();
+        expect(bytes).toEqual(newerBytes);
+        const contentHash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
+          .map(byte => byte.toString(16).padStart(2, '0')).join('');
+        return { noteId: noteValue.id, mutationId: 'new', fingerprint: 'new', revision: 3, attachmentRevisions: [{ id: value.id, revision: 3, contentHash }] };
+      },
+      async completeCompoundCommit() { return true; },
+      async pull() { return { notes: [], deletedIds: [], attachments: [], deletedAttachments: [], cursor: 0, revisions: [] }; },
+      async acknowledge() {},
+    };
+    useTestSync(store, sync);
+
+    await store.sync();
+
+    expect(committed).toBe(1);
+    await expect(adapter.listPendingNoteSync()).resolves.toEqual([]);
+    await expect(attachments.compoundUploadIntent('stale-note')).resolves.toBeNull();
+  });
+
+  it('progresses after crashing between SDK completion and intent deletion', async () => {
+    class CrashAfterSdkCompletionStore extends AttachmentStore {
+      failCleanup = true;
+
+      override async completeCompoundUploadIntent(noteId: string, noteToken: string) {
+        const intent = await this.compoundUploadIntent(noteId);
+        if (this.failCleanup && intent?.phase === 'reconciled') {
+          this.failCleanup = false;
+          throw new Error('browser stopped after SDK completion');
+        }
+        return super.completeCompoundUploadIntent(noteId, noteToken);
+      }
+    }
+    const value = { id: 'crash-value', name: 'value.bin', mimeType: 'application/octet-stream', size: 1 };
+    const attachments = new CrashAfterSdkCompletionStore(
+      new MemoryClientStorage(),
+      'post-sdk-crash',
+    );
+    await attachments.save('crash-note', value, new Uint8Array([1]), { pendingUpload: true });
+    const adapter = new TestAdapter();
+    await adapter.saveNoteWithPendingSync({ ...note('crash-note', 'first'), images: [value] });
+    const store = new NoteStore(() => resources('post-sdk-crash', attachments));
+    await store.initWithAdapter(adapter, {});
+    let commits = 0;
+    const sync = {
+      async pendingCompoundCommits() { return []; },
+      async pendingCompoundCommit() { return null; },
+      async resumePendingCompoundCommit() { return null; },
+      async cancelPendingCompoundCommit() { return true; },
+      async commitNoteWithAttachments(noteValue: Note, uploads: Array<{ attachment: NoteAttachment; loadBytes: () => Promise<Uint8Array<ArrayBuffer>> }>) {
+        commits += 1;
+        const bytes = await uploads[0].loadBytes();
+        const contentHash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
+          .map(byte => byte.toString(16).padStart(2, '0')).join('');
+        return { noteId: noteValue.id, mutationId: `mutation-${commits}`, fingerprint: `fingerprint-${commits}`, revision: commits, attachmentRevisions: [{ id: value.id, revision: commits, contentHash }] };
+      },
+      async completeCompoundCommit() { return true; },
+      async pull() { return { notes: [], deletedIds: [], attachments: [], deletedAttachments: [], cursor: 0, revisions: [] }; },
+      async acknowledge() {},
+    };
+    useTestSync(store, sync);
+
+    await store.sync();
+    await expect(attachments.compoundUploadIntent('crash-note'))
+      .resolves.toMatchObject({ phase: 'reconciled' });
+    await attachments.stageUpload('crash-note', value, new Uint8Array([2]));
+    await adapter.saveNoteWithPendingSync({
+      ...note('crash-note', 'second'),
+      images: [value],
+      updatedAt: 2,
+    });
+
+    await store.sync();
+
+    expect(commits).toBe(2);
+    await expect(adapter.listPendingNoteSync()).resolves.toEqual([]);
+    await expect(attachments.compoundUploadIntent('crash-note')).resolves.toBeNull();
+  });
+
+  it('cancels an irrecoverable partial old root before starting a newer generation', async () => {
+    const value = { id: 'partial-value', name: 'value.bin', mimeType: 'application/octet-stream', size: 1 };
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'partial-root');
+    await attachments.save('partial-note', value, new Uint8Array([1]), { pendingUpload: true });
+    const [oldSource] = await attachments.pendingUploadSources('partial-note', [value.id]);
+    const adapter = new TestAdapter();
+    const oldPending = await adapter.saveNoteWithPendingSync({ ...note('partial-note', 'old'), images: [value] });
+    await attachments.beginCompoundUploadIntent('partial-note', oldPending.token, [oldSource.handle]);
+    const newerBytes = new Uint8Array([3]);
+    await attachments.stageUpload('partial-note', value, newerBytes);
+    await adapter.saveNoteWithPendingSync({ ...note('partial-note', 'newer'), images: [value], updatedAt: 2 });
+    const store = new NoteStore(() => resources('partial-root', attachments));
+    await store.initWithAdapter(adapter, {});
+    const events: string[] = [];
+    const sync = {
+      async pendingCompoundCommits() { return []; },
+      async resumePendingCompoundCommit(_noteId: string, uploads: unknown[]) {
+        events.push(`resume:${uploads.length}`);
+        throw new Error('old source generation is unavailable');
+      },
+      async cancelPendingCompoundCommit() { events.push('cancel'); return true; },
+      async commitNoteWithAttachments(noteValue: Note, uploads: Array<{ attachment: NoteAttachment; loadBytes: () => Promise<Uint8Array<ArrayBuffer>> }>) {
+        events.push('commit-new');
+        const bytes = await uploads[0].loadBytes();
+        const contentHash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
+          .map(byte => byte.toString(16).padStart(2, '0')).join('');
+        return { noteId: noteValue.id, mutationId: 'new', fingerprint: 'new', revision: 3, attachmentRevisions: [{ id: value.id, revision: 3, contentHash }] };
+      },
+      async completeCompoundCommit() { events.push('complete-new'); return true; },
+      async pull() { return { notes: [], deletedIds: [], attachments: [], deletedAttachments: [], cursor: 0, revisions: [] }; },
+      async acknowledge() {},
+    };
+    useTestSync(store, sync);
+
+    await store.sync();
+
+    expect(events).toEqual(['resume:0', 'cancel', 'commit-new', 'complete-new']);
+    await expect(adapter.listPendingNoteSync()).resolves.toEqual([]);
+    await expect(attachments.compoundUploadIntent('partial-note')).resolves.toBeNull();
+  });
+
+  it('cancels a foreign pre-stage root after a newer token removes its source', async () => {
+    const value = {
+      id: 'foreign-partial-value',
+      name: 'value.bin',
+      mimeType: 'application/octet-stream',
+      size: 1,
+    };
+    const attachments = new AttachmentStore(
+      new MemoryClientStorage(),
+      'foreign-partial-root',
+    );
+    await attachments.save(
+      'foreign-partial-note',
+      value,
+      new Uint8Array([1]),
+      { pendingUpload: true },
+    );
+    const [oldSource] = await attachments.pendingUploadSources(
+      'foreign-partial-note',
+      [value.id],
+    );
+    const adapter = new TestAdapter();
+    const oldPending = await adapter.saveNoteWithPendingSync({
+      ...note('foreign-partial-note', 'old upload'),
+      images: [value],
+    });
+    await attachments.beginCompoundUploadIntent(
+      'foreign-partial-note',
+      oldPending.token,
+      [oldSource.handle],
+    );
+    await attachments.queueDelete(
+      'foreign-partial-note',
+      value,
+      { retainBytes: true, purgeRetainedBytesOnComplete: true },
+    );
+    await adapter.saveNoteWithPendingSync({
+      ...note('foreign-partial-note', 'newer removal'),
+      updatedAt: 2,
+    });
+    const store = new NoteStore(() =>
+      resources('foreign-partial-root', attachments));
+    await store.initWithAdapter(adapter, {});
+    const events: string[] = [];
+    const sync = {
+      async pendingCompoundCommits() { return []; },
+      async resumePendingCompoundCommit() {
+        events.push('foreign-mismatch');
+        throw new PendingMutationCredentialMismatchError();
+      },
+      async resumePendingCompoundCommitAfterCredentialChange() {
+        events.push('authenticated-handoff');
+        throw new Error('Attachment bytes are required to resume foreign-partial-value');
+      },
+      async cancelPendingCompoundCommit() {
+        events.push('cancel-pre-stage-root');
+        return true;
+      },
+      async push() {
+        events.push('push-newer-removal');
+        return 2;
+      },
+      async deleteAttachment() {
+        events.push('delete-retired-attachment');
+      },
+      async pull() {
+        return {
+          notes: [],
+          deletedIds: [],
+          attachments: [],
+          deletedAttachments: [],
+          quarantined: [],
+          cursor: 2,
+          revisions: [],
+        };
+      },
+      async acknowledge() {},
+    };
+    useTestSync(store, sync);
+
+    await store.sync();
+
+    expect(events).toEqual([
+      'foreign-mismatch',
+      'authenticated-handoff',
+      'cancel-pre-stage-root',
+      'push-newer-removal',
+      'delete-retired-attachment',
+    ]);
+    await expect(adapter.listPendingNoteSync()).resolves.toEqual([]);
+    await expect(attachments.compoundUploadIntent('foreign-partial-note'))
+      .resolves.toBeNull();
+    await expect(attachments.pendingDeletes()).resolves.toEqual([]);
+    expect(store.syncStatus).toBe('synced');
+  });
+
+  it('fails closed when the current outbox still owns missing exact attachment bytes', async () => {
+    const value = { id: 'missing-value', name: 'value.bin', mimeType: 'application/octet-stream', size: 1 };
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'missing-current-root');
+    await attachments.save('missing-note', value, new Uint8Array([1]), { pendingUpload: true });
+    const [oldSource] = await attachments.pendingUploadSources('missing-note', [value.id]);
+    const adapter = new TestAdapter();
+    const pending = await adapter.saveNoteWithPendingSync({ ...note('missing-note', 'same outbox'), images: [value] });
+    await attachments.beginCompoundUploadIntent('missing-note', pending.token, [oldSource.handle]);
+    // Lose the exact generation without creating a newer note token.
+    await attachments.stageUpload('missing-note', value, new Uint8Array([2]));
+    const store = new NoteStore(() => resources('missing-current-root', attachments));
+    await store.initWithAdapter(adapter, {});
+    let cancellations = 0;
+    let ordinaryPushes = 0;
+    const sync = {
+      async pendingCompoundCommits() { return []; },
+      async pendingCompoundCommit() { return null; },
+      async resumePendingCompoundCommit() { throw new Error('exact source required'); },
+      async cancelPendingCompoundCommit() { cancellations += 1; return true; },
+      async push() { ordinaryPushes += 1; return 2; },
+      async pull() { return { notes: [], deletedIds: [], attachments: [], deletedAttachments: [], cursor: 0, revisions: [] }; },
+      async acknowledge() {},
+    };
+    useTestSync(store, sync);
+
+    await store.sync();
+
+    expect(cancellations).toBe(0);
+    expect(ordinaryPushes).toBe(0);
+    await expect(adapter.listPendingNoteSync()).resolves.toHaveLength(1);
+    await expect(attachments.compoundUploadIntent('missing-note'))
+      .resolves.toMatchObject({ noteToken: pending.token, phase: 'pending' });
+  });
+
   it('keeps the newer vault active when an older adapter initialization finishes last', async () => {
     const oldStarted = deferred<void>();
     const releaseOld = deferred<void>();
@@ -1151,7 +2021,6 @@ describe('NoteStore vault lifecycle', () => {
       `delete:${attachment.id}`,
       `push:${original.id}`,
       `upload:${fresh.id}`,
-      `push:${original.id}`,
     ]);
     await expect(attachments.get(original.id, attachment.id)).resolves.toBeNull();
     await expect(attachments.get(original.id, fresh.id)).resolves.toEqual({
@@ -1161,7 +2030,7 @@ describe('NoteStore vault lifecycle', () => {
     await expect(adapter.listPendingNoteSync()).resolves.toEqual([]);
   });
 
-  it('survives ambiguous tombstone and Undo predecessor failures across restart', async () => {
+  it('atomically reopens a tombstoned note with its Undo attachment', async () => {
     const oldAttachment = {
       id: 'ambiguous-old-id',
       name: 'proof.bin',
@@ -1228,27 +2097,25 @@ describe('NoteStore vault lifecycle', () => {
     const undoToken = await firstRun.deleteNote(original.id);
     expect(undoToken).not.toBeNull();
     await firstRun.undoDelete(undoToken!);
-    expect(events).toEqual(['push:tombstone', 'push:predecessor']);
-    await expect(adapter.listPendingNoteSync()).resolves.toEqual([
-      expect.objectContaining({
-        id: original.id,
-        beforeAttachments: expect.objectContaining({ images: undefined }),
-      }),
+    const restoredBeforeRestart = await adapter.getNote(original.id);
+    const fresh = restoredBeforeRestart.images![0];
+    expect(events).toEqual([
+      'push:tombstone',
+      'push:final',
+      `upload:${fresh.id}`,
+      `delete:${oldAttachment.id}`,
     ]);
+    await expect(adapter.listPendingNoteSync()).resolves.toEqual([]);
 
     const restarted = new NoteStore(() => activeResources);
     await restarted.initWithAdapter(adapter, {});
     useTestSync(restarted, sync);
     await restarted.sync();
 
-    const restored = await adapter.getNote(original.id);
-    const fresh = restored.images![0];
     expect(events).toEqual([
       'push:tombstone',
-      'push:predecessor',
-      'push:predecessor',
-      `upload:${fresh.id}`,
       'push:final',
+      `upload:${fresh.id}`,
       `delete:${oldAttachment.id}`,
     ]);
     expect(remoteNote).toMatchObject({
@@ -1279,7 +2146,7 @@ describe('NoteStore vault lifecycle', () => {
     const sync = {
       async push(value: Note) {
         events.push(`push:${value.id}:${value.deleted ? 'deleted' : value.images?.length ? 'images' : 'plain'}`);
-        if (value.id === original.id && !value.deleted && !value.images?.length) {
+        if (value.id === original.id && !value.deleted && value.images?.length) {
           throw new RecordConflictError(5);
         }
         return 5;
@@ -1315,6 +2182,7 @@ describe('NoteStore vault lifecycle', () => {
     await expect(attachments.get(original.id, rejectedFreshId)).resolves.toBeNull();
     await expect(attachments.pendingUploads()).resolves.toEqual([]);
     await expect(attachments.stagedUploads()).resolves.toEqual([]);
+    await expect(attachments.compoundUploadIntent(original.id)).resolves.toBeNull();
 
     await store.sync();
 
@@ -1507,6 +2375,51 @@ describe('NoteStore vault lifecycle', () => {
     await expect(adapter.listPendingNoteSync()).resolves.toEqual([
       expect.objectContaining({ id: local.id }),
     ]);
+  });
+
+  it('preserves an edit made while a remote pull is in flight', async () => {
+    vi.useFakeTimers();
+    try {
+      const original = note('pull-race-note', 'before');
+      const remote = { ...original, content: 'remote edit', updatedAt: 2 };
+      const adapter = new TestAdapter([original]);
+      const store = new NoteStore(() => resources('pull-race'));
+      await store.initWithAdapter(adapter, {});
+      const pullStarted = deferred<void>();
+      const releasePull = deferred<void>();
+      useTestSync(store, {
+        async pull() {
+          pullStarted.resolve();
+          await releasePull.promise;
+          return {
+            notes: [remote],
+            deletedIds: [],
+            attachments: [],
+            deletedAttachments: [],
+            quarantined: [],
+            cursor: 2,
+            revisions: [{ kind: 'note', id: remote.id, revision: 2 }],
+          };
+        },
+        async acknowledge() {},
+      });
+
+      const syncing = store.sync();
+      await pullStarted.promise;
+      store.updateNote(original.id, { content: 'typed during pull' });
+      releasePull.resolve();
+      await syncing;
+
+      expect(store.notes).toEqual([
+        expect.objectContaining({ id: original.id, content: 'typed during pull' }),
+      ]);
+      await vi.advanceTimersByTimeAsync(500);
+      await expect(adapter.getNote(original.id)).resolves.toMatchObject({
+        content: 'typed during pull',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('surfaces durable quarantines after a successful sync without reporting a sync error', async () => {

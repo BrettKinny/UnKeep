@@ -35,6 +35,8 @@ import {
   type CliOutput,
 } from './cli.js';
 import { encodeVaultKey } from './config.js';
+import { stageClipFile } from './clipStaging.js';
+import { JsonFileClientStorage } from './storage.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -498,8 +500,7 @@ test('applies an attachment-only tombstone on a later page before acknowledging 
     mimeType: 'text/plain',
     size: 4,
   };
-  await remote.uploadAttachment('attachment-owner', attachment, new TextEncoder().encode('data'));
-  await remote.push({
+  const handle = await remote.commitNoteWithAttachments({
     id: 'attachment-owner',
     content: 'attachment metadata must follow its tombstone',
     createdAt: 1,
@@ -507,7 +508,8 @@ test('applies an attachment-only tombstone on a later page before acknowledging 
     pinned: false,
     archived: false,
     images: [attachment],
-  });
+  }, [{ attachment, bytes: new TextEncoder().encode('data') }]);
+  await remote.completeCompoundCommit(handle);
 
   let result = await invoke(['sync', '--json'], context.environment);
   expect(result.code).toBe(0);
@@ -768,6 +770,184 @@ test('provisions env-only agents, lists credentials, and revokes access on the n
   expect(revoked?.revokedAt).toEqual(expect.any(String));
 });
 
+test('replays an exact ordinary note mutation after its original device is revoked', async () => {
+  const context = await testContext();
+  const replacement = await new RelayClient(context.relay.endpoint).reclaimSetup(
+    'test-distinct-recovery-token-00000001',
+    context.session.instanceId,
+    'replacement-cli-device',
+    'Replacement CLI device',
+  );
+  const replacementClient = new RelayClient(
+    context.relay.endpoint,
+    replacement.deviceCredential,
+  );
+  const originalFetch = globalThis.fetch;
+  let responseDropped = false;
+
+  vi.stubGlobal('fetch', async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    const url = typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.href
+        : input.url;
+    const response = await originalFetch(input, init);
+    if (
+      !responseDropped
+      && init?.method === 'PUT'
+      && new URL(url).pathname.endsWith('/notes/credential-rotation-note')
+    ) {
+      responseDropped = true;
+      throw new TypeError('simulated lost ordinary mutation response');
+    }
+    return response;
+  });
+
+  const interrupted = await invoke([
+    'put',
+    '--id',
+    'credential-rotation-note',
+    '--content',
+    'exact ciphertext survives device revocation',
+    '--json',
+  ], context.environment, { now: () => 700 });
+  expect(interrupted.code).toBe(1);
+  expect(responseDropped).toBe(true);
+
+  await replacementClient.revokeDevice(context.session.deviceId);
+  const recovered = await invoke([
+    'put',
+    '--id',
+    'credential-rotation-note',
+    '--content',
+    'exact ciphertext survives device revocation',
+    '--json',
+  ], {
+    ...context.environment,
+    UNKEEP_CREDENTIAL: replacement.deviceCredential,
+  }, { now: () => 800 });
+  expect(recovered.code, recovered.stderr).toBe(0);
+  expect(JSON.parse(recovered.stdout)).toMatchObject({
+    id: 'credential-rotation-note',
+    content: 'exact ciphertext survives device revocation',
+  });
+
+  const reader = new EncryptedSync(
+    {
+      ...context.session,
+      credential: replacement.deviceCredential,
+    },
+    context.masterKey,
+    new MemoryClientStorage(),
+  );
+  const pulled = await reader.pull();
+  expect(pulled.notes).toEqual([
+    expect.objectContaining({
+      id: 'credential-rotation-note',
+      content: 'exact ciphertext survives device revocation',
+    }),
+  ]);
+});
+
+test('atomically rebases a stale ordinary retry after device replacement', async () => {
+  const context = await testContext();
+  const replacement = await new RelayClient(context.relay.endpoint).reclaimSetup(
+    'test-distinct-recovery-token-00000001',
+    context.session.instanceId,
+    'replacement-rebase-device',
+    'Replacement rebase device',
+  );
+  const replacementSession: RelaySession = {
+    ...context.session,
+    deviceId: 'replacement-rebase-device',
+    credential: replacement.deviceCredential,
+  };
+  const replacementClient = new RelayClient(
+    context.relay.endpoint,
+    replacement.deviceCredential,
+  );
+  const originalFetch = globalThis.fetch;
+  let requestBlocked = false;
+
+  vi.stubGlobal('fetch', async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    const url = typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.href
+        : input.url;
+    if (
+      !requestBlocked
+      && init?.method === 'PUT'
+      && new URL(url).pathname.endsWith('/notes/credential-rebase-note')
+    ) {
+      requestBlocked = true;
+      throw new TypeError('simulated failure before ordinary mutation request');
+    }
+    return originalFetch(input, init);
+  });
+
+  const interrupted = await invoke([
+    'put',
+    '--id',
+    'credential-rebase-note',
+    '--content',
+    'local edit must be atomically rebased',
+    '--json',
+  ], context.environment, { now: () => 700 });
+  expect(interrupted.code).toBe(1);
+  expect(requestBlocked).toBe(true);
+
+  await new EncryptedSync(
+    replacementSession,
+    context.masterKey,
+    new MemoryClientStorage(),
+  ).push({
+    id: 'credential-rebase-note',
+    content: 'concurrent remote edit',
+    createdAt: 600,
+    updatedAt: 600,
+    pinned: false,
+    archived: false,
+  });
+  await replacementClient.revokeDevice(context.session.deviceId);
+
+  const recovered = await invoke([
+    'put',
+    '--id',
+    'credential-rebase-note',
+    '--content',
+    'local edit must be atomically rebased',
+    '--json',
+  ], {
+    ...context.environment,
+    UNKEEP_CREDENTIAL: replacement.deviceCredential,
+  }, { now: () => 800 });
+  expect(recovered.code, recovered.stderr).toBe(0);
+  expect(JSON.parse(recovered.stdout)).toMatchObject({
+    id: 'credential-rebase-note',
+    content: 'local edit must be atomically rebased',
+  });
+
+  const reader = new EncryptedSync(
+    replacementSession,
+    context.masterKey,
+    new MemoryClientStorage(),
+  );
+  const pulled = await reader.pull();
+  expect(pulled.notes).toEqual([
+    expect.objectContaining({
+      id: 'credential-rebase-note',
+      content: 'local edit must be atomically rebased',
+    }),
+  ]);
+});
+
 test('clips binary files and pastes the latest or a selected clip on a second client', async () => {
   const context = await testContext();
   const destination = await mkdtemp(join(tmpdir(), 'unkeep-cli-paste-'));
@@ -843,8 +1023,8 @@ test('clips binary files and pastes the latest or a selected clip on a second cl
 });
 
 test.each([
-  ['attachment acknowledgement', '/api/v1/attachments/'],
-  ['Clipboard note acknowledgement', '/api/v1/notes/unkeep-clipboard'],
+  ['attachment stage acknowledgement', '/api/v1/note-mutations/'],
+  ['atomic Clipboard bundle acknowledgement', '/api/v1/notes/unkeep-clipboard/compound'],
 ])('recovers a clip after losing the %s response', async (_description, targetPath) => {
   const context = await testContext();
   const source = join(context.directory, 'interrupted.bin');
@@ -909,14 +1089,20 @@ test.each([
   expect(
     await readdir(join(context.directory, 'unkeep', 'clip-staging')),
   ).toEqual([]);
+
+  const nextSource = join(context.directory, 'next-after-recovery.txt');
+  await writeFile(nextSource, 'a later clip must not be blocked by the replay root');
+  const next = await invoke(['clip', nextSource, '--json'], context.environment);
+  expect(next.code).toBe(0);
+  expect(next.stderr).toBe('');
 });
 
-test('a missing private stage flushes a pending note before tombstoning its attachment', async () => {
+test('an invalid replacement credential cannot erase an exact pending clip retry', async () => {
   const context = await testContext();
-  const source = join(context.directory, 'missing-stage.txt');
-  await writeFile(source, 'bytes that cannot be recovered');
+  const source = join(context.directory, 'credential-bound.txt');
+  await writeFile(source, 'the encrypted retry survives without this private file');
   const originalFetch = globalThis.fetch;
-  let noteRequestBlocked = false;
+  let finalRequestBlocked = false;
 
   vi.stubGlobal('fetch', async (
     input: string | URL | Request,
@@ -928,37 +1114,328 @@ test('a missing private stage flushes a pending note before tombstoning its atta
         ? input.href
         : input.url;
     if (
-      !noteRequestBlocked
+      !finalRequestBlocked
       && init?.method === 'PUT'
-      && new URL(url).pathname === '/api/v1/notes/unkeep-clipboard'
+      && new URL(url).pathname.endsWith('/notes/unkeep-clipboard/compound')
     ) {
-      noteRequestBlocked = true;
-      throw new TypeError('simulated crash before note upload');
+      finalRequestBlocked = true;
+      throw new TypeError('simulated crash before final request');
     }
     return originalFetch(input, init);
   });
 
-  const interrupted = await invoke(['clip', source], context.environment);
+  const interrupted = await invoke(['clip', source, '--json'], context.environment);
   expect(interrupted.code).toBe(1);
-  expect(noteRequestBlocked).toBe(true);
+  expect(finalRequestBlocked).toBe(true);
+
+  const stagingDirectory = join(context.directory, 'unkeep', 'clip-staging');
+  const stagedFiles = await readdir(stagingDirectory);
+  expect(stagedFiles).toHaveLength(1);
+  await unlink(join(stagingDirectory, stagedFiles[0]!));
 
   const configPath = join(context.directory, 'unkeep', 'config.json');
-  const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
-  const pending = Object.entries(config).find(([key]) =>
-    key.startsWith('unkeep-cli-pending-clip:')
-  )?.[1] as {
-    attachment: NoteAttachment;
-    staged: { fileName: string };
+  const pendingSnapshot = async () => Object.fromEntries(
+    Object.entries(JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>)
+      .filter(([key]) => key.startsWith('unkeep-pending-compound')),
+  );
+  const beforeInvalidCredential = await pendingSnapshot();
+  expect(Object.keys(beforeInvalidCredential).length).toBeGreaterThan(0);
+
+  const rejected = await invoke(['clip', '--list', '--json'], {
+    ...context.environment,
+    UNKEEP_CREDENTIAL: 'invalid-replacement-credential',
+  });
+  expect(rejected.code).toBe(1);
+  expect(rejected.stdout).toBe('');
+  expect(rejected.stderr).toMatch(/invalid_(?:device|service)_credential/);
+  expect(await pendingSnapshot()).toEqual(beforeInvalidCredential);
+
+  const recovered = await invoke(['clip', '--list', '--json'], context.environment);
+  expect(recovered.code, recovered.stderr).toBe(0);
+  expect(recovered.stderr).toContain('Recovered interrupted clip');
+  expect(JSON.parse(recovered.stdout)).toEqual([
+    expect.objectContaining({ name: 'credential-bound.txt' }),
+  ]);
+});
+
+test('a valid replacement credential rebuilds an interrupted clip in the same invocation', async () => {
+  const context = await testContext();
+  const replacement = await new RelayClient(
+    context.session.endpoint,
+    context.session.credential,
+  ).mintServiceCredential('Rotated CLI credential', 'read-write');
+  const source = join(context.directory, 'credential-rotation.txt');
+  const bytes = new TextEncoder().encode('rebuild this exact private clip');
+  await writeFile(source, bytes);
+  const originalFetch = globalThis.fetch;
+  let finalRequestBlocked = false;
+
+  vi.stubGlobal('fetch', async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    const url = typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.href
+        : input.url;
+    if (
+      !finalRequestBlocked
+      && init?.method === 'PUT'
+      && new URL(url).pathname.endsWith('/notes/unkeep-clipboard/compound')
+    ) {
+      finalRequestBlocked = true;
+      throw new TypeError('simulated crash before final request');
+    }
+    return originalFetch(input, init);
+  });
+
+  const interrupted = await invoke(['clip', source, '--json'], context.environment);
+  expect(interrupted.code).toBe(1);
+  expect(finalRequestBlocked).toBe(true);
+
+  const originalAbandon =
+    EncryptedSync.prototype.abandonPendingCompoundAfterCredentialChange;
+  let prePersistenceCrash = false;
+  const abandonment = vi.spyOn(
+    EncryptedSync.prototype,
+    'abandonPendingCompoundAfterCredentialChange',
+  ).mockImplementation(async function (
+    this: EncryptedSync,
+    noteId: string,
+  ) {
+    const abandoned = await originalAbandon.call(this, noteId);
+    if (abandoned && !prePersistenceCrash) {
+      prePersistenceCrash = true;
+      throw new Error('simulated crash before replacement intent persistence');
+    }
+    return abandoned;
+  });
+  const prePersistence = await invoke(['clip', '--list', '--json'], {
+    ...context.environment,
+    UNKEEP_CREDENTIAL: replacement.serviceCredential,
+  });
+  expect(prePersistence.code).toBe(1);
+  expect(prePersistence.stderr).toContain(
+    'simulated crash before replacement intent persistence',
+  );
+  expect(prePersistenceCrash).toBe(true);
+  abandonment.mockRestore();
+
+  const originalSet = JsonFileClientStorage.prototype.set;
+  let replacementIntentCrash = false;
+  const persistence = vi.spyOn(JsonFileClientStorage.prototype, 'set')
+    .mockImplementation(async function (
+      this: JsonFileClientStorage,
+      key: string,
+      value: unknown,
+    ) {
+      await originalSet.call(this, key, value);
+      if (
+        !replacementIntentCrash
+        && key.startsWith('unkeep-cli-pending-clip:')
+        && !!value
+        && typeof value === 'object'
+        && (value as { version?: unknown }).version === 2
+      ) {
+        replacementIntentCrash = true;
+        throw new Error('simulated crash after replacement intent persistence');
+      }
+    });
+  const crashed = await invoke(['clip', '--list', '--json'], {
+    ...context.environment,
+    UNKEEP_CREDENTIAL: replacement.serviceCredential,
+  });
+  expect(crashed.code).toBe(1);
+  expect(crashed.stderr).toContain('simulated crash after replacement intent persistence');
+  expect(replacementIntentCrash).toBe(true);
+
+  persistence.mockRestore();
+  const recovered = await invoke(['clip', '--list', '--json'], {
+    ...context.environment,
+    UNKEEP_CREDENTIAL: replacement.serviceCredential,
+  });
+  expect(recovered.code, recovered.stderr).toBe(0);
+  expect(recovered.stderr).toContain('Recovered interrupted clip');
+  const listed = JSON.parse(recovered.stdout) as NoteAttachment[];
+  expect(listed).toEqual([
+    expect.objectContaining({ name: 'credential-rotation.txt', size: bytes.byteLength }),
+  ]);
+
+  const reader = new EncryptedSync(
+    context.session,
+    context.masterKey,
+    new MemoryClientStorage(),
+  );
+  const pulled = await reader.pull();
+  expect(pulled.notes[0].images?.map(value => value.id)).toEqual([listed[0]!.id]);
+  expect(pulled.attachments[0]?.bytes).toEqual(bytes);
+});
+
+test('recovers a terminal pending clip conflict in the same invocation', async () => {
+  const context = await testContext();
+  const source = join(context.directory, 'terminal-conflict.txt');
+  await writeFile(source, 'local bytes survive a terminal replay conflict');
+  const originalFetch = globalThis.fetch;
+  let finalRequestBlocked = false;
+
+  vi.stubGlobal('fetch', async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    const url = typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.href
+        : input.url;
+    if (
+      !finalRequestBlocked
+      && init?.method === 'PUT'
+      && new URL(url).pathname.endsWith('/notes/unkeep-clipboard/compound')
+    ) {
+      finalRequestBlocked = true;
+      throw new TypeError('simulated crash before final request');
+    }
+    return originalFetch(input, init);
+  });
+
+  const interrupted = await invoke(['clip', source, '--json'], context.environment);
+  expect(interrupted.code).toBe(1);
+  expect(finalRequestBlocked).toBe(true);
+
+  const other = new EncryptedSync(
+    context.session,
+    context.masterKey,
+    new MemoryClientStorage(),
+  );
+  await other.push({
+    id: 'unkeep-clipboard',
+    title: 'Concurrent Clipboard title',
+    content: 'Concurrent fields survive the retry.',
+    createdAt: 100,
+    updatedAt: 200,
+    pinned: true,
+    archived: false,
+    labels: ['remote'],
+  });
+
+  const recovered = await invoke(['clip', '--list', '--json'], context.environment);
+  expect(recovered.code, recovered.stderr).toBe(0);
+  const listed = JSON.parse(recovered.stdout) as NoteAttachment[];
+  expect(listed).toEqual([
+    expect.objectContaining({ name: 'terminal-conflict.txt' }),
+  ]);
+
+  const reader = new EncryptedSync(
+    context.session,
+    context.masterKey,
+    new MemoryClientStorage(),
+  );
+  const pulled = await reader.pull();
+  expect(pulled.notes[0]).toMatchObject({
+    title: 'Concurrent Clipboard title',
+    content: 'Concurrent fields survive the retry.',
+    pinned: true,
+    labels: expect.arrayContaining(['remote']),
+  });
+  expect(pulled.notes[0].images?.map(value => value.id)).toEqual([listed[0]!.id]);
+});
+
+test('recovers a committed clip after the local cache and intent transaction fails', async () => {
+  const context = await testContext();
+  const source = join(context.directory, 'cache-crash.txt');
+  await writeFile(source, 'relay commit must survive a local cache crash');
+  const transaction = vi.spyOn(JsonFileClientStorage.prototype, 'setAndDelete')
+    .mockRejectedValueOnce(new Error('simulated cache transaction crash'));
+
+  const interrupted = await invoke(['clip', source, '--json'], context.environment);
+  expect(interrupted.code).toBe(1);
+  expect(interrupted.stdout).toBe('');
+  expect(interrupted.stderr).toContain('simulated cache transaction crash');
+
+  transaction.mockRestore();
+  const recovered = await invoke(['clip', '--list', '--json'], context.environment);
+  expect(recovered.code).toBe(0);
+  expect(recovered.stderr).toContain('Recovered interrupted clip');
+  expect(JSON.parse(recovered.stdout)).toHaveLength(1);
+});
+
+test('verifies relay bytes before recovering a committed handle after its intent was cleared', async () => {
+  const context = await testContext();
+  const source = join(context.directory, 'handle-crash.txt');
+  await writeFile(source, 'handle completion must be replayable');
+  const completion = vi.spyOn(EncryptedSync.prototype, 'completeCompoundCommit')
+    .mockRejectedValueOnce(new Error('simulated handle completion crash'));
+
+  const interrupted = await invoke(['clip', source, '--json'], context.environment);
+  expect(interrupted.code).toBe(1);
+  expect(interrupted.stdout).toBe('');
+  expect(interrupted.stderr).toContain('simulated handle completion crash');
+
+  completion.mockRestore();
+  const wrongBytes = vi.spyOn(EncryptedSync.prototype, 'downloadAttachment')
+    .mockResolvedValue(new Uint8Array((await stat(source)).size).fill(0xff));
+  const rejected = await invoke(['clip', '--list', '--json'], context.environment);
+  expect(rejected.code).toBe(1);
+  expect(rejected.stdout).toBe('');
+  expect(rejected.stderr).toContain('content does not match the relay attachment');
+
+  wrongBytes.mockRestore();
+  const recovered = await invoke(['clip', '--list', '--json'], context.environment);
+  expect(recovered.code).toBe(0);
+  expect(recovered.stderr).toContain('Recovered interrupted clip');
+  expect(JSON.parse(recovered.stdout)).toHaveLength(1);
+});
+
+test('sweeps a private clip stage left behind after local completion', async () => {
+  const context = await testContext();
+  const source = join(context.directory, 'cleanup-crash.txt');
+  const bytes = new TextEncoder().encode('completed bytes');
+  await writeFile(source, bytes);
+
+  const completed = await invoke(['clip', source, '--json'], context.environment);
+  expect(completed.code).toBe(0);
+  const attachment = JSON.parse(completed.stdout) as NoteAttachment;
+  const stagingDirectory = join(context.directory, 'unkeep', 'clip-staging');
+  const orphan = join(stagingDirectory, `clip-${attachment.id}.bin`);
+  await writeFile(orphan, bytes, { mode: 0o600 });
+
+  const listed = await invoke(['clip', '--list', '--json'], context.environment);
+  expect(listed.code).toBe(0);
+  expect(listed.stderr).toBe('');
+  expect(await readdir(stagingDirectory)).toEqual([]);
+});
+
+test('a missing private stage is discarded without publishing a legacy live attachment', async () => {
+  const context = await testContext();
+  const source = join(context.directory, 'missing-stage.txt');
+  await writeFile(source, 'bytes that cannot be recovered');
+  const configPath = join(context.directory, 'unkeep', 'config.json');
+  const storage = new JsonFileClientStorage(configPath);
+  const attachment: NoteAttachment = {
+    id: globalThis.crypto.randomUUID(),
+    name: 'missing-stage.txt',
+    mimeType: 'text/plain',
+    size: (await stat(source)).size,
   };
-  expect(pending).toBeDefined();
+  const staged = await stageClipFile(
+    storage,
+    source,
+    attachment.name,
+    attachment.id,
+    MAX_ATTACHMENT_SIZE,
+  );
+  await storage.set(
+    `unkeep-cli-pending-clip:${encodeURIComponent(context.session.instanceId)}`,
+    { version: 1, attachment, staged, timestamp: 900 },
+  );
   await unlink(join(
     context.directory,
     'unkeep',
     'clip-staging',
-    pending.staged.fileName,
+    staged.fileName,
   ));
 
-  vi.stubGlobal('fetch', originalFetch);
   const recovered = await invoke(
     ['clip', '--list', '--json'],
     context.environment,
@@ -975,10 +1452,7 @@ test('a missing private stage flushes a pending note before tombstoning its atta
   const pulled = await reader.pull();
   expect(pulled.notes[0].images).toBeUndefined();
   expect(pulled.attachments).toEqual([]);
-  expect(pulled.deletedAttachments).toContainEqual({
-    noteId: 'unkeep-clipboard',
-    attachmentId: pending.attachment.id,
-  });
+  expect(pulled.deletedAttachments).toEqual([]);
 });
 
 test('merges a concurrent Clipboard edit after its first note push conflicts', async () => {
@@ -1012,15 +1486,10 @@ test('merges a concurrent Clipboard edit after its first note push conflicts', a
     if (
       !concurrentWriteInjected
       && init?.method === 'PUT'
-      && new URL(url).pathname.startsWith('/api/v1/attachments/')
+      && new URL(url).pathname.includes('/attachments/')
     ) {
       concurrentWriteInjected = true;
-      await other.uploadAttachment(
-        'unkeep-clipboard',
-        otherAttachment,
-        new TextEncoder().encode('other bytes'),
-      );
-      await other.push({
+      const otherHandle = await other.commitNoteWithAttachments({
         id: 'unkeep-clipboard',
         title: 'Clipboard from another device',
         content: 'Concurrent fields must survive.',
@@ -1030,7 +1499,11 @@ test('merges a concurrent Clipboard edit after its first note push conflicts', a
         archived: false,
         labels: ['remote'],
         images: [otherAttachment],
-      });
+      }, [{
+        attachment: otherAttachment,
+        bytes: new TextEncoder().encode('other bytes'),
+      }]);
+      await other.completeCompoundCommit(otherHandle);
     }
     return response;
   });
@@ -1040,7 +1513,7 @@ test('merges a concurrent Clipboard edit after its first note push conflicts', a
     context.environment,
     { now: () => 500 },
   );
-  expect(result.code).toBe(0);
+  expect(result.code, result.stderr).toBe(0);
   expect(concurrentWriteInjected).toBe(true);
   const localAttachment = JSON.parse(result.stdout) as NoteAttachment;
 

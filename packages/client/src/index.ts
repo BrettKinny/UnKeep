@@ -1,6 +1,20 @@
 export type { ClientStorage, ClientStorageTransaction } from './storage.js';
 export { MemoryClientStorage } from './storage.js';
-export type { RelaySession, RelayStatus, DeviceCredential, ServiceCredential, ServiceCredentialScope, RelayChange, RelayClientOptions } from './relay.js';
+export type {
+  RelaySession,
+  RelayStatus,
+  DeviceCredential,
+  ServiceCredential,
+  ServiceCredentialScope,
+  RelayChange,
+  RelayClientOptions,
+  RelayAttachmentStageRequest,
+  RelayAttachmentStageReceipt,
+  RelayCompoundAttachment,
+  RelayCompoundNoteRequest,
+  RelayCompoundAttachmentRevision,
+  RelayCompoundNoteReceipt,
+} from './relay.js';
 export { RelayClient, RelayHttpError, RecordConflictError, cleanRelayEndpoint } from './relay.js';
 export { RelaySessionStore } from './session.js';
 export type {
@@ -27,5 +41,20 @@ export {
   resumePairingFinalization,
   waitForPairing,
 } from './pairing.js';
-export type { PulledAttachment, PulledAttachmentTombstone, PulledNotes, PulledRevision, QuarantinedRecord, QuarantineReason } from './sync.js';
-export { AttachmentDeletedError, EncryptedSync } from './sync.js';
+export type {
+  PulledAttachment,
+  PulledAttachmentTombstone,
+  PulledNotes,
+  PulledRevision,
+  QuarantinedRecord,
+  QuarantineReason,
+  CompoundAttachmentUpload,
+  CompoundCommitHandle,
+} from './sync.js';
+export {
+  AttachmentDeletedError,
+  EncryptedSync,
+  PendingCompoundCompletionError,
+  PendingMutationCredentialMismatchError,
+  PendingMutationRebaseRequiresPullError,
+} from './sync.js';

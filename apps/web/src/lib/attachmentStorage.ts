@@ -7,6 +7,7 @@ const PENDING_UPLOADS_KEY = 'unkeep-pending-attachment-uploads';
 const STAGED_UPLOADS_KEY = 'unkeep-staged-attachment-uploads';
 const STAGED_REMOTE_ATTACHMENTS_KEY = 'unkeep-staged-remote-attachments';
 const PENDING_DELETES_KEY = 'unkeep-pending-attachment-deletes';
+const COMPOUND_UPLOAD_INTENTS_KEY = 'unkeep-compound-upload-intents';
 export const STAGED_UPLOAD_TTL_MS = 30_000;
 
 interface StoredAttachment {
@@ -50,6 +51,21 @@ export interface AttachmentUploadHandle {
   noteId: string;
   attachmentId: string;
   generation?: string;
+}
+
+export interface LazyAttachmentUpload {
+  attachment: NoteAttachment;
+  handle: AttachmentUploadHandle;
+  loadBytes(): Promise<Uint8Array<ArrayBuffer>>;
+}
+
+export type CompoundUploadConfirmation = 'confirmed' | 'already-confirmed' | 'changed';
+
+export interface CompoundUploadIntent {
+  noteId: string;
+  noteToken: string;
+  uploads: AttachmentUploadHandle[];
+  phase: 'pending' | 'reconciled';
 }
 
 export interface RemoteAttachmentHandle {
@@ -215,6 +231,7 @@ export class AttachmentStore {
   private readonly stagedUploadsKey: string;
   private readonly stagedRemoteAttachmentsKey: string;
   private readonly pendingDeletesKey: string;
+  private readonly compoundUploadIntentsKey: string;
   private readonly operationQueue: StorageQueue;
 
   constructor(private readonly storage: ClientStorage, vaultNamespace?: string) {
@@ -232,11 +249,101 @@ export class AttachmentStore {
     this.pendingDeletesKey = vaultNamespace
       ? `${PENDING_DELETES_KEY}:${encodeURIComponent(vaultNamespace)}`
       : PENDING_DELETES_KEY;
+    this.compoundUploadIntentsKey = vaultNamespace
+      ? `${COMPOUND_UPLOAD_INTENTS_KEY}:${encodeURIComponent(vaultNamespace)}`
+      : COMPOUND_UPLOAD_INTENTS_KEY;
     this.operationQueue = queueFor(storage, this.attachmentPrefix);
   }
 
   storageKey(noteId: string, attachmentId: string): string {
     return `${this.attachmentPrefix}${encodeURIComponent(noteId)}:${encodeURIComponent(attachmentId)}`;
+  }
+
+  async beginCompoundUploadIntent(
+    noteId: string,
+    noteToken: string,
+    uploads: readonly AttachmentUploadHandle[],
+  ): Promise<CompoundUploadIntent> {
+    let result!: CompoundUploadIntent;
+    await this.runExclusive(async () => {
+      await this.updateValue<CompoundUploadIntent[]>(
+        this.compoundUploadIntentsKey,
+        current => {
+          const intents = current ?? [];
+          const existing = intents.find(value => value.noteId === noteId);
+          if (existing) {
+            result = this.normalizeCompoundUploadIntent(existing);
+            return intents;
+          }
+          result = {
+            noteId,
+            noteToken,
+            uploads: uploads.map(handle => ({ ...handle })),
+            phase: 'pending',
+          };
+          return [...intents, result];
+        },
+      );
+    });
+    return result;
+  }
+
+  async compoundUploadIntent(noteId: string): Promise<CompoundUploadIntent | null> {
+    return this.runExclusive(async () => {
+      const intents = await this.storage.get<CompoundUploadIntent[]>(
+        this.compoundUploadIntentsKey,
+      ) ?? [];
+      const intent = intents.find(value => value.noteId === noteId);
+      return intent ? this.normalizeCompoundUploadIntent(intent) : null;
+    });
+  }
+
+  async compoundUploadIntents(): Promise<CompoundUploadIntent[]> {
+    return this.runExclusive(async () => (
+      await this.storage.get<CompoundUploadIntent[]>(this.compoundUploadIntentsKey) ?? []
+    ).map(value => this.normalizeCompoundUploadIntent(value)));
+  }
+
+  async markCompoundUploadIntentReconciled(
+    noteId: string,
+    noteToken: string,
+  ): Promise<boolean> {
+    let reconciled = false;
+    await this.runExclusive(async () => {
+      await this.updateValue<CompoundUploadIntent[]>(
+        this.compoundUploadIntentsKey,
+        current => (current ?? []).map(value => {
+          if (value.noteId !== noteId || value.noteToken !== noteToken) return value;
+          reconciled = true;
+          return { ...value, phase: 'reconciled' };
+        }),
+      );
+    });
+    return reconciled;
+  }
+
+  async completeCompoundUploadIntent(noteId: string, noteToken: string): Promise<boolean> {
+    let completed = false;
+    await this.runExclusive(async () => {
+      await this.updateValue<CompoundUploadIntent[]>(
+        this.compoundUploadIntentsKey,
+        current => {
+          const intents = current ?? [];
+          completed = intents.some(value =>
+            value.noteId === noteId && value.noteToken === noteToken);
+          return intents.filter(value =>
+            value.noteId !== noteId || value.noteToken !== noteToken);
+        },
+      );
+    });
+    return completed;
+  }
+
+  private normalizeCompoundUploadIntent(value: CompoundUploadIntent): CompoundUploadIntent {
+    return {
+      ...structuredClone(value),
+      phase: value.phase === 'reconciled' ? 'reconciled' : 'pending',
+    };
   }
 
   async save(
@@ -566,6 +673,173 @@ export class AttachmentStore {
     return this.runExclusive(async () => (
       await this.pendingUploadsUnlocked()
     ).map(({ noteId, attachment, bytes }) => ({ noteId, attachment, bytes })));
+  }
+
+  /** Enumerate work without loading any attachment byte records. */
+  async pendingUploadNoteIds(): Promise<string[]> {
+    return this.runExclusive(async () => {
+      const noteIds = new Set<string>();
+      for (const { key } of [
+        ...await this.pendingKeysUnlocked(),
+        ...await this.stagedKeysUnlocked(),
+      ]) {
+        if (!key.startsWith(this.attachmentPrefix)) continue;
+        const encoded = key.slice(this.attachmentPrefix.length).split(':', 1)[0];
+        if (encoded) noteIds.add(decodeURIComponent(encoded));
+      }
+      return [...noteIds].sort();
+    });
+  }
+
+  /**
+   * Return metadata plus reusable loaders fenced to the exact queued
+   * generation. Byte arrays are read only when the compound SDK asks for one.
+   */
+  async pendingUploadSources(
+    noteId: string,
+    attachmentIds: readonly string[],
+  ): Promise<LazyAttachmentUpload[]> {
+    return this.runExclusive(async () => {
+      const allowed = new Set(attachmentIds);
+      const sources: LazyAttachmentUpload[] = [];
+      for (const marker of await this.pendingKeysUnlocked()) {
+        const stored = await this.storage.get<StoredAttachment>(marker.key);
+        if (
+          !stored
+          || stored.noteId !== noteId
+          || !allowed.has(stored.attachment.id)
+          || !recordNeedsUpload(marker, stored)
+          || !pendingRecordMatches(marker, stored)
+        ) continue;
+        const handle: AttachmentUploadHandle = {
+          noteId,
+          attachmentId: stored.attachment.id,
+          ...(marker.generation ? { generation: marker.generation } : {}),
+        };
+        const attachment = portableAttachment(stored.attachment);
+        sources.push({
+          attachment,
+          handle,
+          loadBytes: () => this.loadPendingGeneration(handle),
+        });
+      }
+      return sources;
+    });
+  }
+
+  /** Return every still-readable source from an exact persisted intent. */
+  async pendingUploadSourcesForHandles(
+    handles: readonly AttachmentUploadHandle[],
+  ): Promise<LazyAttachmentUpload[]> {
+    return this.runExclusive(async () => {
+      const sources: LazyAttachmentUpload[] = [];
+      for (const handle of handles) {
+        const key = this.storageKey(handle.noteId, handle.attachmentId);
+        const marker: PendingAttachmentKey = {
+          key,
+          ...(handle.generation ? { generation: handle.generation } : {}),
+        };
+        const stored = await this.storage.get<StoredAttachment>(key);
+        if (
+          !stored
+          || !recordNeedsUpload(marker, stored)
+          || !pendingRecordMatches(marker, stored)
+        ) continue;
+        sources.push({
+          attachment: portableAttachment(stored.attachment),
+          handle: { ...handle },
+          loadBytes: () => this.loadPendingGeneration(handle),
+        });
+      }
+      return sources;
+    });
+  }
+
+  async hasReplacementUploadGeneration(handle: AttachmentUploadHandle): Promise<boolean> {
+    return this.runExclusive(async () => {
+      const stored = await this.storage.get<StoredAttachment>(
+        this.storageKey(handle.noteId, handle.attachmentId),
+      );
+      return Boolean(
+        stored?.needsUpload
+        && stored.uploadGeneration
+        && stored.uploadGeneration !== handle.generation,
+      );
+    });
+  }
+
+  private async loadPendingGeneration(
+    handle: AttachmentUploadHandle,
+  ): Promise<Uint8Array<ArrayBuffer>> {
+    return this.runExclusive(async () => {
+      const key = this.storageKey(handle.noteId, handle.attachmentId);
+      const marker: PendingAttachmentKey = {
+        key,
+        ...(handle.generation ? { generation: handle.generation } : {}),
+      };
+      const stored = await this.storage.get<StoredAttachment>(key);
+      if (
+        !stored
+        || !recordNeedsUpload(marker, stored)
+        || !pendingRecordMatches(marker, stored)
+      ) throw new Error('Attachment upload generation changed');
+      return new Uint8Array(stored.bytes);
+    });
+  }
+
+  /**
+   * Confirm relay acceptance only when both the local generation and bytes
+   * still identify the attachment that was committed. A newer generation is
+   * deliberately left queued.
+   */
+  async confirmCompoundUpload(
+    handle: AttachmentUploadHandle,
+    contentHash: string,
+  ): Promise<CompoundUploadConfirmation> {
+    return this.runExclusive(async () => {
+      const key = this.storageKey(handle.noteId, handle.attachmentId);
+      const marker: PendingAttachmentKey = {
+        key,
+        ...(handle.generation ? { generation: handle.generation } : {}),
+      };
+      const stored = await this.storage.get<StoredAttachment>(key);
+      if (!stored) return 'changed';
+      if (!pendingRecordMatches(marker, stored)) return 'changed';
+      const actualHash = [...new Uint8Array(
+        await crypto.subtle.digest('SHA-256', stored.bytes),
+      )].map(value => value.toString(16).padStart(2, '0')).join('');
+      if (actualHash !== contentHash) {
+        if (!recordNeedsUpload(marker, stored)) return 'changed';
+        throw new Error('Committed attachment content hash does not match local bytes');
+      }
+      if (!recordNeedsUpload(marker, stored)) return 'already-confirmed';
+      await this.transact(
+        [key, this.pendingUploadsKey, this.stagedUploadsKey],
+        transaction => {
+          const current = transaction.get<StoredAttachment>(key);
+          if (
+            !current
+            || !recordNeedsUpload(marker, current)
+            || !pendingRecordMatches(marker, current)
+          ) return;
+          const available = { ...current, storageVersion: 2 as const };
+          delete available.needsUpload;
+          delete available.uploadGeneration;
+          transaction.set(key, available);
+          transaction.set(
+            this.pendingUploadsKey,
+            normalizePendingAttachmentKeys(transaction.get<unknown>(this.pendingUploadsKey))
+              .filter(value => pendingEntryIdentity(value) !== pendingEntryIdentity(marker)),
+          );
+          transaction.set(
+            this.stagedUploadsKey,
+            (transaction.get<StagedAttachmentKey[]>(this.stagedUploadsKey) ?? [])
+              .filter(value => value.key !== key || value.generation !== handle.generation),
+          );
+        },
+      );
+      return 'confirmed';
+    });
   }
 
   async stagedUploads(): Promise<StagedAttachmentUpload[]> {
@@ -1245,29 +1519,48 @@ export class AttachmentStore {
   async cancelDelete(noteId: string, attachmentId: string): Promise<void> {
     await this.runExclusive(async () => {
       const key = this.storageKey(noteId, attachmentId);
-      await this.transact([key, this.pendingDeletesKey], transaction => {
-        const deletes = transaction.get<QueuedAttachmentDelete[]>(
-          this.pendingDeletesKey,
-        ) ?? [];
-        if (deletes.some(value =>
-          value.noteId === noteId
-          && value.attachment.id === attachmentId
-          && value.claimToken)) {
-          throw new Error('Attachment deletion is already in progress');
-        }
-        transaction.set(
-          this.pendingDeletesKey,
-          deletes
-            .filter(value =>
-              value.noteId !== noteId || value.attachment.id !== attachmentId),
-        );
-        const stored = transaction.get<StoredAttachment>(key);
-        if (stored?.retainedForUndo) {
-          const available = { ...stored };
-          delete available.retainedForUndo;
-          transaction.set(key, available);
-        }
-      });
+      await this.transact(
+        [key, this.pendingDeletesKey, this.pendingUploadsKey],
+        transaction => {
+          const deletes = transaction.get<QueuedAttachmentDelete[]>(
+            this.pendingDeletesKey,
+          ) ?? [];
+          if (deletes.some(value =>
+            value.noteId === noteId
+            && value.attachment.id === attachmentId
+            && value.claimToken)) {
+            throw new Error('Attachment deletion is already in progress');
+          }
+          const cancelled = deletes.find(value =>
+            value.noteId === noteId && value.attachment.id === attachmentId);
+          transaction.set(
+            this.pendingDeletesKey,
+            deletes
+              .filter(value =>
+                value.noteId !== noteId || value.attachment.id !== attachmentId),
+          );
+          const stored = transaction.get<StoredAttachment>(key);
+          if (cancelled && stored?.retainedForUndo) {
+            const available = { ...stored };
+            delete available.retainedForUndo;
+            if (cancelled.uploadGeneration) {
+              available.storageVersion = 2;
+              available.uploadGeneration = cancelled.uploadGeneration;
+              available.needsUpload = true;
+              transaction.set(
+                this.pendingUploadsKey,
+                [
+                  ...normalizePendingAttachmentKeys(
+                    transaction.get<unknown>(this.pendingUploadsKey),
+                  ).filter(value => value.key !== key),
+                  { key, generation: cancelled.uploadGeneration },
+                ],
+              );
+            }
+            transaction.set(key, available);
+          }
+        },
+      );
     });
   }
 

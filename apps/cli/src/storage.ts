@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { constants as fsConstants } from 'node:fs';
 import { chmod, link, lstat, mkdir, open, readFile, readlink, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
-import type { ClientStorage } from '@unkeep/client';
+import type { ClientStorage, ClientStorageTransaction } from '@unkeep/client';
 
 type StoredValues = Record<string, unknown>;
 
@@ -535,6 +535,48 @@ export class JsonFileClientStorage implements ClientStorage {
       const next = change(current);
       if (next === null) delete values[key];
       else values[key] = next;
+    });
+  }
+
+  transact(
+    keys: readonly string[],
+    change: (transaction: ClientStorageTransaction) => void,
+  ): Promise<void> {
+    const allowed = new Set(keys);
+    return this.mutate(values => {
+      const next = Object.create(null) as StoredValues;
+      for (const key of allowed) {
+        if (Object.hasOwn(values, key)) next[key] = structuredClone(values[key]);
+      }
+      const assertAllowed = (key: string) => {
+        if (!allowed.has(key)) {
+          throw new Error(`Client storage transaction did not declare key: ${key}`);
+        }
+      };
+      const returned = change({
+        get: <T>(key: string) => {
+          assertAllowed(key);
+          return Object.hasOwn(next, key) ? next[key] as T : null;
+        },
+        set: <T>(key: string, value: T) => {
+          assertAllowed(key);
+          next[key] = structuredClone(value);
+        },
+        delete: (key: string) => {
+          assertAllowed(key);
+          delete next[key];
+        },
+      }) as unknown;
+      if (
+        returned
+        && typeof (returned as { then?: unknown }).then === 'function'
+      ) {
+        throw new Error('Client storage transaction callback must be synchronous');
+      }
+      for (const key of allowed) {
+        if (Object.hasOwn(next, key)) values[key] = next[key];
+        else delete values[key];
+      }
     });
   }
 

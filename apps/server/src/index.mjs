@@ -74,6 +74,7 @@ const DEFAULT_MAX_DEVICES = 1_000;
 const DEFAULT_MAX_SERVICE_CREDENTIALS = 10_000;
 const DEFAULT_MAX_MUTATION_RECEIPTS = 100_000;
 const DEFAULT_MUTATION_RECEIPT_TTL_MS = 7 * 24 * 60 * 60_000;
+const DEFAULT_ATTACHMENT_STAGE_TTL_MS = 10 * 60_000;
 const DEFAULT_ADMIN_RATE_WINDOW_MS = 5 * 60_000;
 const DEFAULT_ADMIN_SOURCE_RATE_LIMIT = 5;
 const DEFAULT_ADMIN_GLOBAL_RATE_LIMIT = 100;
@@ -136,6 +137,11 @@ const MUTATION_RECEIPT_TTL_MS = storageLimitSetting(
   DEFAULT_MUTATION_RECEIPT_TTL_MS,
   90 * 24 * 60 * 60_000,
 );
+const ATTACHMENT_STAGE_TTL_MS = storageLimitSetting(
+  'UNKEEP_ATTACHMENT_STAGE_TTL_MS',
+  DEFAULT_ATTACHMENT_STAGE_TTL_MS,
+  24 * 60 * 60_000,
+);
 const TRUST_PROXY = process.env.UNKEEP_TRUST_PROXY === '1';
 const MAX_ATTACHMENT_SIZE = storageLimitSetting(
   'UNKEEP_MAX_ATTACHMENT_SIZE',
@@ -145,7 +151,9 @@ const MAX_ATTACHMENT_SIZE = storageLimitSetting(
 const AES_GCM_TAG_SIZE = 16;
 const MAX_ATTACHMENT_BODY = 4 * Math.ceil((MAX_ATTACHMENT_SIZE + AES_GCM_TAG_SIZE) / 3) + 64 * 1024;
 const MAX_SHARE_FALLBACK_BODY = 512 * 1024;
-const PROTOCOL_VERSION = 2;
+const MAX_COMPOUND_ATTACHMENTS = 1_000;
+const MAX_ATTACHMENT_STAGE_BUNDLE_LIFETIME_MS = 24 * 60 * 60_000;
+const PROTOCOL_VERSION = 3;
 const pairingRateLimiter = createPairingRateLimiter({
   windowMs: PAIRING_RATE_WINDOW_MS,
   sourceLimit: PAIRING_SOURCE_RATE_LIMIT,
@@ -187,6 +195,9 @@ const deleteStalePairingReceipts = db.prepare('DELETE FROM pairing_consume_recei
 const deleteExpiredMutationReceipts = db.prepare(
   'DELETE FROM mutations WHERE created_at<=?',
 );
+const deleteExpiredAttachmentStages = db.prepare(
+  'DELETE FROM attachment_stages WHERE expires_at<=?',
+);
 const countMutationReceipts = db.prepare(
   'SELECT COUNT(*) AS count FROM mutations',
 );
@@ -220,6 +231,7 @@ function pruneMutationReceipts(reservedSlots = 0, now = Date.now()) {
 }
 function cleanupTransientState() {
   cleanupPairings();
+  deleteExpiredAttachmentStages.run(Date.now());
   pruneMutationReceipts();
 }
 cleanupTransientState();
@@ -231,6 +243,16 @@ pairingCleanupTimer.unref();
 
 function hash(value) { return createHash('sha256').update(value).digest('hex'); }
 function token() { return randomBytes(32).toString('base64url'); }
+function attachmentStageHash(value) {
+  return hash(
+    `unkeep:attachment-stage:v1\n${JSON.stringify(value)}`,
+  );
+}
+function noteBundlePayloadHash(value) {
+  return hash(
+    `unkeep:note-bundle:v1\n${JSON.stringify(value)}`,
+  );
+}
 function equalSecret(a, b) {
   return timingSafeSecretEqual(a, b);
 }
@@ -264,6 +286,14 @@ function credentialByHash(tokenHash) {
   const service = db.prepare('SELECT id,name,scope FROM service_credentials WHERE token_hash=? AND revoked_at IS NULL').get(tokenHash);
   return service ? { ...service, kind: 'service' } : null;
 }
+function credentialHashRegistered(tokenHash) {
+  return Boolean(db.prepare(`
+    SELECT 1 FROM devices WHERE token_hash=?
+    UNION ALL
+    SELECT 1 FROM service_credentials WHERE token_hash=?
+    LIMIT 1
+  `).get(tokenHash, tokenHash));
+}
 function requireCredential(req) {
   const credential = bearer(req);
   if (!credential) return null;
@@ -274,6 +304,13 @@ function requireCredential(req) {
 function nextRevision() { return Number(db.prepare('SELECT COALESCE(MAX(revision),0)+1 AS value FROM records').get().value); }
 function validId(value) { return isValidRecordId(value); }
 function validSha256Hash(value) { return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value); }
+function hasExactKeys(value, keys) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length
+    && actual.every((key, index) => key === expected[index]);
+}
 
 function invalidCredential(req, res) {
   return json(res, 401, {
@@ -480,6 +517,10 @@ async function api(req, res, url) {
         db.exec('ROLLBACK');
         return json(res, 409, { error: 'device_id_unavailable' });
       }
+      if (credentialHashRegistered(value.deviceCredentialHash)) {
+        db.exec('ROLLBACK');
+        return json(res, 409, { error: 'pairing_credential_unavailable' });
+      }
       if (Number(countDevices.get().count) >= MAX_DEVICES) {
         db.exec('ROLLBACK');
         return json(res, 507, { error: 'device_count_limit' });
@@ -604,6 +645,10 @@ async function api(req, res, url) {
         db.exec('ROLLBACK');
         return json(res, 403, { error: 'pairing_device_required' });
       }
+      if (credentialHashRegistered(pairing.device_token_hash)) {
+        db.exec('ROLLBACK');
+        return json(res, 409, { error: 'pairing_credential_unavailable' });
+      }
       if (db.prepare('SELECT 1 FROM devices WHERE id=?').get(pairing.device_id)) {
         db.exec('ROLLBACK');
         return json(res, 409, { error: 'device_id_unavailable' });
@@ -645,6 +690,383 @@ async function api(req, res, url) {
   const credential = requireCredential(req);
   if (!credential) return invalidCredential(req, res);
   if (req.method === 'GET' && url.pathname === '/api/v1/vault') return json(res, 200, { vaultId: instance.id });
+  const attachmentStage = url.pathname.match(
+    /^\/api\/v1\/note-mutations\/([A-Za-z0-9_-]+)\/attachments\/([A-Za-z0-9_-]+)$/,
+  );
+  if (attachmentStage && req.method === 'PUT') {
+    if (credential.kind === 'service' && credential.scope === 'read-only') {
+      return json(res, 403, { error: 'service_credential_read_only' });
+    }
+    const bundleMutationId = attachmentStage[1];
+    const attachmentId = attachmentStage[2];
+    if (!validId(bundleMutationId) || !validId(attachmentId)) {
+      return json(res, 400, { error: 'invalid_record_id' });
+    }
+    const value = await body(req, MAX_ATTACHMENT_BODY);
+    if (
+      !hasExactKeys(value, ['noteId', 'envelope'])
+      || !validId(value.noteId)
+    ) {
+      return json(res, 400, { error: 'invalid_attachment_stage' });
+    }
+    const envelope = normalizeRecordEnvelope(
+      value.envelope,
+      attachmentId,
+      MAX_ATTACHMENT_SIZE + AES_GCM_TAG_SIZE,
+    );
+    if (!envelope) {
+      return json(res, 400, { error: 'invalid_record_envelope' });
+    }
+    const serializedEnvelope = JSON.stringify(envelope);
+    const envelopeBytes = Buffer.byteLength(serializedEnvelope);
+    const stageHash = attachmentStageHash({
+      bundleMutationId,
+      attachmentId,
+      noteId: value.noteId,
+      envelope,
+    });
+    let created = false;
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      deleteExpiredAttachmentStages.run(Date.now());
+      const freshCredential = credentialByHash(credential.tokenHash);
+      if (!freshCredential) {
+        db.exec('ROLLBACK');
+        return invalidCredential(req, res);
+      }
+      if (
+        freshCredential.kind === 'service'
+        && freshCredential.scope === 'read-only'
+      ) {
+        db.exec('ROLLBACK');
+        return json(res, 403, { error: 'service_credential_read_only' });
+      }
+      if (db.prepare('SELECT 1 FROM mutations WHERE id=?').get(bundleMutationId)) {
+        db.exec('ROLLBACK');
+        return json(res, 409, { error: 'mutation_conflict' });
+      }
+      const existing = db.prepare(`
+        SELECT owner_token_hash AS ownerTokenHash,stage_hash AS stageHash
+        FROM attachment_stages
+        WHERE bundle_mutation_id=? AND attachment_id=?
+      `).get(bundleMutationId, attachmentId);
+      if (existing) {
+        const matches = existing.ownerTokenHash === credential.tokenHash
+          && existing.stageHash === stageHash;
+        if (matches) {
+          const now = Date.now();
+          const bundle = db.prepare(`
+            SELECT MIN(created_at) AS createdAt
+            FROM attachment_stages
+            WHERE bundle_mutation_id=? AND owner_token_hash=?
+          `).get(bundleMutationId, credential.tokenHash);
+          const expiresAt = Math.min(
+            now + ATTACHMENT_STAGE_TTL_MS,
+            Number(bundle.createdAt) + MAX_ATTACHMENT_STAGE_BUNDLE_LIFETIME_MS,
+          );
+          db.prepare(`
+            UPDATE attachment_stages SET expires_at=?
+            WHERE bundle_mutation_id=? AND owner_token_hash=?
+          `).run(expiresAt, bundleMutationId, credential.tokenHash);
+          db.exec('COMMIT');
+        } else {
+          db.exec('ROLLBACK');
+        }
+        return matches
+          ? json(res, 200, { stageHash })
+          : json(res, 409, { error: 'attachment_stage_conflict' });
+      }
+      if (
+        db.prepare(`
+          SELECT 1 FROM attachment_stages WHERE attachment_id=?
+        `).get(attachmentId)
+        || db.prepare(`
+          SELECT 1 FROM records WHERE kind='attachment' AND id=?
+        `).get(attachmentId)
+      ) {
+        db.exec('ROLLBACK');
+        return json(res, 409, { error: 'attachment_id_unavailable' });
+      }
+      const bundle = db.prepare(`
+        SELECT COUNT(*) AS count,MIN(created_at) AS createdAt
+        FROM attachment_stages
+        WHERE bundle_mutation_id=? AND owner_token_hash=?
+      `).get(bundleMutationId, credential.tokenHash);
+      if (Number(bundle.count) >= MAX_COMPOUND_ATTACHMENTS) {
+        db.exec('ROLLBACK');
+        return json(res, 507, { error: 'attachment_count_limit' });
+      }
+      const liveUsage = db.prepare(`
+        SELECT record_count AS recordCount,
+          attachment_count AS attachmentCount,
+          encrypted_bytes AS encryptedBytes
+        FROM record_storage_usage WHERE singleton=1
+      `).get();
+      const stagedUsage = db.prepare(`
+        SELECT stage_count AS stageCount,encrypted_bytes AS encryptedBytes
+        FROM attachment_stage_usage WHERE singleton=1
+      `).get();
+      if (
+        Number(liveUsage.recordCount) + Number(stagedUsage.stageCount) + 1
+          > MAX_RECORDS
+      ) {
+        db.exec('ROLLBACK');
+        return json(res, 507, { error: 'record_count_limit' });
+      }
+      if (
+        Number(liveUsage.attachmentCount) + Number(stagedUsage.stageCount) + 1
+          > MAX_ATTACHMENTS
+      ) {
+        db.exec('ROLLBACK');
+        return json(res, 507, { error: 'attachment_count_limit' });
+      }
+      if (
+        Number(liveUsage.encryptedBytes)
+          + Number(stagedUsage.encryptedBytes)
+          + envelopeBytes
+          > MAX_ENCRYPTED_RECORD_BYTES
+      ) {
+        db.exec('ROLLBACK');
+        return json(res, 507, { error: 'encrypted_record_bytes_limit' });
+      }
+      const now = Date.now();
+      const bundleCreatedAt = bundle.createdAt === null
+        ? now
+        : Number(bundle.createdAt);
+      const expiresAt = Math.min(
+        now + ATTACHMENT_STAGE_TTL_MS,
+        bundleCreatedAt + MAX_ATTACHMENT_STAGE_BUNDLE_LIFETIME_MS,
+      );
+      db.prepare(`
+        UPDATE attachment_stages SET expires_at=?
+        WHERE bundle_mutation_id=? AND owner_token_hash=?
+      `).run(expiresAt, bundleMutationId, credential.tokenHash);
+      db.prepare(`
+        INSERT INTO attachment_stages(
+          bundle_mutation_id,attachment_id,note_id,owner_token_hash,
+          stage_hash,envelope,envelope_bytes,created_at,expires_at
+        ) VALUES(?,?,?,?,?,?,?,?,?)
+      `).run(
+        bundleMutationId,
+        attachmentId,
+        value.noteId,
+        credential.tokenHash,
+        stageHash,
+        serializedEnvelope,
+        envelopeBytes,
+        now,
+        expiresAt,
+      );
+      created = true;
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+    return json(res, created ? 201 : 200, { stageHash });
+  }
+  const noteBundle = url.pathname.match(
+    /^\/api\/v1\/notes\/([A-Za-z0-9_-]+)\/compound$/,
+  );
+  if (noteBundle && req.method === 'PUT') {
+    if (credential.kind === 'service' && credential.scope === 'read-only') {
+      return json(res, 403, { error: 'service_credential_read_only' });
+    }
+    const noteId = noteBundle[1];
+    if (!validId(noteId)) return json(res, 400, { error: 'invalid_record_id' });
+    const value = await body(req);
+    if (
+      !hasExactKeys(
+        value,
+        ['mutationId', 'baseRevision', 'envelope', 'deleted', 'newAttachments'],
+      )
+      || !validId(value.mutationId)
+      || !Number.isSafeInteger(value.baseRevision)
+      || value.baseRevision < 0
+      || value.deleted !== false
+      || !Array.isArray(value.newAttachments)
+      || value.newAttachments.length < 1
+      || value.newAttachments.length > MAX_COMPOUND_ATTACHMENTS
+      || value.newAttachments.some(
+        attachment => !hasExactKeys(attachment, ['id', 'stageHash'])
+          || !validId(attachment.id)
+          || !validSha256Hash(attachment.stageHash),
+      )
+      || value.newAttachments.some(
+        (attachment, index) => index > 0
+          && value.newAttachments[index - 1].id >= attachment.id,
+      )
+      || new Set(
+        value.newAttachments.map(attachment => attachment.stageHash),
+      ).size !== value.newAttachments.length
+    ) {
+      return json(res, 400, { error: 'invalid_note_bundle' });
+    }
+    const envelope = normalizeRecordEnvelope(value.envelope, noteId, MAX_BODY);
+    if (!envelope) {
+      return json(res, 400, { error: 'invalid_record_envelope' });
+    }
+    const serializedEnvelope = JSON.stringify(envelope);
+    const envelopeBytes = Buffer.byteLength(serializedEnvelope);
+    const payloadHash = noteBundlePayloadHash({
+      mutationId: value.mutationId,
+      noteId,
+      baseRevision: value.baseRevision,
+      deleted: false,
+      envelope,
+      newAttachments: value.newAttachments,
+    });
+    let responseBody;
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      deleteExpiredAttachmentStages.run(Date.now());
+      const freshCredential = credentialByHash(credential.tokenHash);
+      if (!freshCredential) {
+        db.exec('ROLLBACK');
+        return invalidCredential(req, res);
+      }
+      if (
+        freshCredential.kind === 'service'
+        && freshCredential.scope === 'read-only'
+      ) {
+        db.exec('ROLLBACK');
+        return json(res, 403, { error: 'service_credential_read_only' });
+      }
+      const prior = db.prepare(`
+        SELECT payload_hash AS payloadHash,response,owner_token_hash AS ownerTokenHash,
+          mutation_kind AS mutationKind
+        FROM mutations WHERE id=?
+      `).get(value.mutationId);
+      if (prior) {
+        const matches = prior.payloadHash === payloadHash
+          && prior.ownerTokenHash === credential.tokenHash
+          && prior.mutationKind === 'note-bundle'
+          && typeof prior.response === 'string';
+        db.exec(matches ? 'COMMIT' : 'ROLLBACK');
+        return matches
+          ? json(res, 200, JSON.parse(prior.response))
+          : json(res, 409, { error: 'mutation_conflict' });
+      }
+      const current = db.prepare(`
+        SELECT revision,length(CAST(envelope AS BLOB)) AS envelopeBytes
+        FROM records WHERE kind='note' AND id=?
+      `).get(noteId);
+      const currentRevision = Number(current?.revision ?? 0);
+      if (currentRevision !== value.baseRevision) {
+        db.prepare(`
+          DELETE FROM attachment_stages
+          WHERE bundle_mutation_id=? AND owner_token_hash=?
+        `).run(value.mutationId, credential.tokenHash);
+        db.exec('COMMIT');
+        return json(res, 409, {
+          error: 'record_conflict',
+          currentRevision,
+        });
+      }
+      const stages = db.prepare(`
+        SELECT attachment_id AS attachmentId,note_id AS noteId,
+          stage_hash AS stageHash,envelope,envelope_bytes AS envelopeBytes
+        FROM attachment_stages
+        WHERE bundle_mutation_id=? AND owner_token_hash=?
+        ORDER BY attachment_id
+      `).all(value.mutationId, credential.tokenHash);
+      if (
+        stages.length !== value.newAttachments.length
+        || stages.some(
+          (stage, index) =>
+            stage.attachmentId !== value.newAttachments[index].id
+            || stage.stageHash !== value.newAttachments[index].stageHash
+            || stage.noteId !== noteId,
+        )
+      ) {
+        db.exec('ROLLBACK');
+        return json(res, 409, { error: 'attachment_stage_missing' });
+      }
+      const orderedStages = stages;
+      const collision = orderedStages.find(stage => db.prepare(`
+        SELECT 1 FROM records WHERE kind='attachment' AND id=?
+      `).get(stage.attachmentId));
+      if (collision) {
+        db.prepare(`
+          DELETE FROM attachment_stages
+          WHERE bundle_mutation_id=? AND owner_token_hash=?
+        `).run(value.mutationId, credential.tokenHash);
+        db.exec('COMMIT');
+        return json(res, 409, { error: 'attachment_id_unavailable' });
+      }
+      const liveUsage = db.prepare(`
+        SELECT record_count AS recordCount,encrypted_bytes AS encryptedBytes
+        FROM record_storage_usage WHERE singleton=1
+      `).get();
+      const stagedUsage = db.prepare(`
+        SELECT stage_count AS stageCount,encrypted_bytes AS encryptedBytes
+        FROM attachment_stage_usage WHERE singleton=1
+      `).get();
+      if (
+        Number(liveUsage.recordCount) + Number(stagedUsage.stageCount)
+          + (current ? 0 : 1) > MAX_RECORDS
+      ) {
+        db.exec('ROLLBACK');
+        return json(res, 507, { error: 'record_count_limit' });
+      }
+      if (
+        Number(liveUsage.encryptedBytes) + Number(stagedUsage.encryptedBytes)
+          - Number(current?.envelopeBytes ?? 0) + envelopeBytes
+          > MAX_ENCRYPTED_RECORD_BYTES
+      ) {
+        db.exec('ROLLBACK');
+        return json(res, 507, { error: 'encrypted_record_bytes_limit' });
+      }
+      pruneMutationReceipts(1);
+      let revision = nextRevision();
+      const attachmentRevisions = [];
+      const insertAttachment = db.prepare(`
+        INSERT INTO records(kind,id,note_id,envelope,deleted,revision)
+        VALUES('attachment',?,?,?,0,?)
+      `);
+      for (const stage of orderedStages) {
+        insertAttachment.run(
+          stage.attachmentId,
+          noteId,
+          stage.envelope,
+          revision,
+        );
+        attachmentRevisions.push({ id: stage.attachmentId, revision });
+        revision += 1;
+      }
+      db.prepare(`
+        INSERT INTO records(kind,id,note_id,envelope,deleted,revision)
+        VALUES('note',?,NULL,?,0,?)
+        ON CONFLICT(kind,id) DO UPDATE SET
+          note_id=NULL,envelope=excluded.envelope,deleted=0,
+          revision=excluded.revision
+      `).run(noteId, serializedEnvelope, revision);
+      responseBody = { revision, attachmentRevisions };
+      db.prepare(`
+        INSERT INTO mutations(
+          id,payload_hash,revision,created_at,response,owner_token_hash,
+          mutation_kind
+        ) VALUES(?,?,?,?,?,?,?)
+      `).run(
+        value.mutationId,
+        payloadHash,
+        revision,
+        Date.now(),
+        JSON.stringify(responseBody),
+        credential.tokenHash,
+        'note-bundle',
+      );
+      db.prepare(`
+        DELETE FROM attachment_stages
+        WHERE bundle_mutation_id=? AND owner_token_hash=?
+      `).run(value.mutationId, credential.tokenHash);
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+    return json(res, 200, responseBody);
+  }
   if (url.pathname === '/api/v1/service-credentials') {
     if (credential.kind !== 'device') return json(res, 403, { error: 'device_credential_required' });
     if (req.method === 'GET') {
@@ -869,6 +1291,13 @@ async function api(req, res, url) {
         WHERE kind=? AND id=?
       `).get(kind, id);
       const currentRevision = Number(current?.revision ?? 0);
+      if (kind === 'attachment' && !current && !value.deleted) {
+        db.exec('ROLLBACK');
+        return json(res, 428, {
+          error: 'compound_mutation_required',
+          requiredProtocol: PROTOCOL_VERSION,
+        });
+      }
       if (kind === 'attachment' && current && Boolean(current.deleted) && value.deleted) {
         if (current.noteId !== value.noteId) {
           db.exec('ROLLBACK');

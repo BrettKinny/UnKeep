@@ -114,11 +114,20 @@ mount a home directory or repository just to move one file. `paste` refuses to
 overwrite an existing path unless `--force` is supplied.
 
 `clip` first creates a private, fsynced staging snapshot under the CLI config
-directory using bounded reads. Its durable intent is replayed under the config
-lock on the next connected command, so a lost upload or note response reuses
-one attachment ID and a concurrent Clipboard edit is merged before success is
-reported. The staging snapshot is plaintext and may temporarily consume up to
-the 25 MiB attachment limit.
+directory using bounded reads. It encrypts and stages the attachment, then asks
+the relay to publish that exact ciphertext and the updated Clipboard note in
+one atomic compound mutation. Its durable intent and encrypted mutation are
+replayed under the config lock on the next connected command, so a lost stage
+or final response reuses one attachment ID and a concurrent Clipboard edit is
+merged before success is reported. The SDK completion handle is cleared only
+after the local note cache and intent update is durable; recovery verifies the
+attachment content hash before reconciling the remaining crash window. The
+plaintext staging snapshot may temporarily consume up to the 25 MiB attachment
+limit and is removed after local completion. If the original device credential
+is replaced, the CLI first authenticates the replacement to the same vault.
+It preserves exact retry state for invalid or read-only credentials and uses a
+fresh attachment identity when a private stage remains reserved to the old
+credential.
 
 ## Machine output
 

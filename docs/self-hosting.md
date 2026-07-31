@@ -223,6 +223,26 @@ increase usage. New growth fails with HTTP 507 and a stable
 `attachment_count_limit` error. Raise a ceiling only after confirming the
 host has enough space for SQLite, its WAL, and backups.
 
+Schema v11 adds the protocol-3 private attachment-stage ledger and includes it
+in the existing record, attachment, and encrypted-byte accounting. Protocol 3
+stages new encrypted attachment envelopes before publishing their note. Stages
+are private to the exact device or service credential that created them and do
+not appear in the change feed or attachment download route. Both live records
+and incomplete stages count toward the configured ceilings, so abandoning an
+upload cannot bypass storage limits.
+
+A stage is removed by successful finalization, by a terminal stale-note or
+attachment-ID conflict, or after `UNKEEP_ATTACHMENT_STAGE_TTL_MS`: ten minutes
+of bundle inactivity by default, with a hard maximum of one day. Adding or
+exactly replaying a stage refreshes all stages owned by that credential and
+bundle together, so a sequential upload does not expire its earliest
+attachment while making progress. A bundle is capped at 1,000 stages, and no
+continuously retained stage epoch survives more than one day from its first
+stage. After every stage expires, a later retry may restage a fresh epoch.
+Other failures leave stages available for a bounded retry until expiry.
+Lowering the inactivity window reduces abandoned ciphertext retention but also
+shortens the pause a slow or interrupted upload can survive without restaging.
+
 Device and service-credential counts include revoked rows so lineage and
 credential audit history remain available. Reclaiming an existing device ID
 does not grow the registry and remains available at the device ceiling.
@@ -258,11 +278,24 @@ pre-upgrade backup protected or securely retire it. If one may have left your
 control, revoke and re-pair devices that originally joined through the legacy
 pairing flow, and rotate legacy service credentials.
 
-Relay protocol 2 requires an optimistic `baseRevision` on every new record
-mutation. This deliberately makes cached 0.1 clients fail with
-`base_revision_required` instead of silently overwriting a newer device. After
-upgrading the relay, reload or reopen every installed PWA and update every CLI
-before editing.
+Relay protocol 3 retains the optimistic `baseRevision` requirement on every
+record mutation and adds atomic publication for a note with new attachments.
+The current client uploads each encrypted attachment to a credential-owned
+stage, then finalizes the non-deleted note with the exact sorted stage manifest
+and note base revision. The relay validates the base revision before publishing
+anything and writes the attachments in deterministic consecutive revision
+order followed immediately by the note revision in one SQLite transaction.
+The mutation receipt makes a lost final response safely replayable without
+requiring the already-consumed stages.
+
+A direct attempt to create a new live attachment through the old attachment
+record route now fails with HTTP 428 `compound_mutation_required`; replay of a
+previously accepted legacy mutation receipt and attachment tombstones remain
+supported. Missing `baseRevision` still fails with HTTP 428
+`base_revision_required`. These fail-closed responses deliberately prevent an
+older or hand-written client from publishing an attachment that no note can
+reach. After upgrading the relay, reload or reopen every installed PWA and
+update every CLI before editing or uploading files.
 
 ## Recover access after losing every device
 
@@ -441,6 +474,7 @@ backup, because schema migrations are one-way.
 - Optional variable: `UNKEEP_MAX_SERVICE_CREDENTIALS` (service-credential rows including revoked credentials; defaults to 10000)
 - Optional variable: `UNKEEP_MAX_MUTATION_RECEIPTS` (recent idempotency receipts; defaults to 100000)
 - Optional variable: `UNKEEP_MUTATION_RECEIPT_TTL_MS` (receipt retention; defaults to seven days)
+- Optional variable: `UNKEEP_ATTACHMENT_STAGE_TTL_MS` (incomplete encrypted attachment-stage inactivity window; defaults to 600000, hard maximum 86400000; each continuously retained stage epoch is capped at one day)
 - Optional variable: `UNKEEP_PAIRING_TTL_MS` (pairing request lifetime; defaults to 600000, hard maximum 86400000)
 - Optional variable: `UNKEEP_MAX_PENDING_PAIRINGS` (global pending-pairing cap; defaults to 100)
 - Optional variable: `UNKEEP_PAIRING_RATE_WINDOW_MS` (rate-limit window in milliseconds; defaults to 60000)

@@ -186,6 +186,43 @@ describe('JsonFileClientStorage', () => {
     expect(await storage.get('credential')).toBeNull();
   });
 
+  test('commits declared SDK transaction keys in one durable config rewrite', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'unkeep-cli-storage-transaction-'));
+    temporaryDirectories.push(directory);
+    const file = join(directory, 'config.json');
+    const storage = new JsonFileClientStorage(file);
+    await storage.setMany({ retained: 'yes', pending: 'intent', note: { id: 'old' } });
+
+    await storage.transact?.(['pending', 'note'], transaction => {
+      expect(transaction.get('pending')).toBe('intent');
+      transaction.delete('pending');
+      transaction.set('note', { id: 'new' });
+    });
+
+    expect(JSON.parse(await readFile(file, 'utf8'))).toEqual({
+      retained: 'yes',
+      note: { id: 'new' },
+    });
+  });
+
+  test('fails a storage transaction closed when it touches an undeclared key', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'unkeep-cli-storage-transaction-guard-'));
+    temporaryDirectories.push(directory);
+    const file = join(directory, 'config.json');
+    const storage = new JsonFileClientStorage(file);
+    await storage.setMany({ pending: 'intent', note: { id: 'old' } });
+
+    await expect(storage.transact(['pending'], transaction => {
+      transaction.delete('pending');
+      transaction.set('note', { id: 'new' });
+    })).rejects.toThrow('Client storage transaction did not declare key: note');
+
+    expect(JSON.parse(await readFile(file, 'utf8'))).toEqual({
+      pending: 'intent',
+      note: { id: 'old' },
+    });
+  });
+
   test('preserves every concurrent process config mutation', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'unkeep-cli-process-storage-'));
     temporaryDirectories.push(directory);

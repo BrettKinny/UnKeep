@@ -165,7 +165,7 @@ pnpm preview      # preview the static PWA without the relay API
 - **Local-first editing** — note writes go to IndexedDB first, with a 500 ms editor debounce and queued retries when the relay is unavailable.
 - **Search** — client-side matching across titles, bodies, checklist items, and labels.
 - **Attachments** — image previews and downloadable general files up to 25 MiB each. Bytes are saved durably in IndexedDB before upload and encrypted separately from note metadata.
-- **Encrypted sync** — AES-256-GCM note and attachment envelopes, revision cursors, tombstones, optimistic revision conflict protection, durable idempotent replay after a lost mutation response, device pairing, device revocation, and restricted service credentials.
+- **Encrypted sync** — AES-256-GCM note and attachment envelopes, atomic note-plus-new-attachment publication, revision cursors, tombstones, optimistic revision conflict protection, durable idempotent replay after a lost mutation response, device pairing, device revocation, and restricted service credentials.
 - **Recovery** — authenticated recovery-kit v2 binds the vault key to its relay instance; a separate operator token restores relay authorization after every device is lost.
 - **Markdown preview** — a safe rendered subset covering headings, paragraphs, emphasis, strong text, inline and fenced code, ordered and unordered lists, line breaks, and absolute HTTP(S) links.
 - **Google Keep import** — Takeout ZIPs, or selected JSON and media files, import titles, text, checklists, labels, colors, timestamps, pin/archive state, and referenced media. Trashed Keep notes are skipped; note records commit in one local transaction, failed staging rolls back, and a durable journal finalizes or removes an import interrupted by tab termination on the next startup.
@@ -319,6 +319,19 @@ undecryptable or invalid note before returning it in `quarantined`, allowing
 the caller to surface the problem and acknowledge later records without
 silently accepting the bad note.
 
+Relay protocol 3 publishes a note and its new attachments as one compound
+mutation. The client first uploads each context-bound encrypted attachment to
+a private, credential-owned stage, then finalizes the note with the exact
+sorted stage manifest and its optimistic base revision. Finalization assigns
+consecutive attachment revisions followed immediately by the note revision in
+one SQLite transaction, so another device cannot observe a live attachment
+without its referencing note. Retrying the same compound mutation after a
+lost response returns its stored receipt. Incomplete stages expire and count
+toward the configured relay storage ceilings while retained. Direct creation
+of a new live attachment through the legacy record route fails with HTTP 428
+`compound_mutation_required`; use `EncryptedSync`, `RelayClient`, or the CLI
+rather than scripting raw relay requests.
+
 ### Package and compatibility boundary
 
 The public packages are ESM and require Node.js 20 or newer when used in Node.
@@ -401,6 +414,7 @@ Common environment variables:
 | `UNKEEP_MAX_SERVICE_CREDENTIALS` | Service-credential rows including revoked credentials; defaults to 10,000, maximum 1,000,000 |
 | `UNKEEP_MAX_MUTATION_RECEIPTS` | Retained recent mutation receipts; defaults to 100,000, maximum 1,000,000 |
 | `UNKEEP_MUTATION_RECEIPT_TTL_MS` | Mutation replay retention; defaults to seven days, maximum 90 days |
+| `UNKEEP_ATTACHMENT_STAGE_TTL_MS` | Incomplete encrypted attachment-stage inactivity window; defaults to 10 minutes, maximum one day; each continuously retained stage epoch is capped at one day |
 | `UNKEEP_PAIRING_TTL_MS` | Pairing request lifetime; defaults to 10 minutes, maximum one day |
 | `UNKEEP_MAX_PENDING_PAIRINGS` | Global pending-pairing cap; defaults to 100 |
 | `UNKEEP_PAIRING_RATE_WINDOW_MS` | Pairing rate-limit window; defaults to 60 seconds |

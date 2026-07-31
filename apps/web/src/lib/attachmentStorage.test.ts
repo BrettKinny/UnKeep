@@ -16,6 +16,83 @@ const attachment: NoteAttachment = {
 };
 
 describe('AttachmentStore', () => {
+  it('discovers queued note IDs without reading attachment byte records', async () => {
+    const backing = new MemoryClientStorage();
+    const store = new AttachmentStore(backing);
+    await store.save('note-one', attachment, new Uint8Array([1, 2, 3, 4]), {
+      pendingUpload: true,
+    });
+    const reads: string[] = [];
+    const observing = new Proxy(backing, {
+      get(target, property, receiver) {
+        if (property === 'get') {
+          return async (key: string) => {
+            reads.push(key);
+            return target.get(key);
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as ClientStorage;
+
+    await expect(new AttachmentStore(observing).pendingUploadNoteIds())
+      .resolves.toEqual(['note-one']);
+    expect(reads).not.toContain(store.storageKey('note-one', attachment.id));
+  });
+
+  it('provides reusable generation-fenced lazy byte loaders', async () => {
+    const storage = new MemoryClientStorage();
+    const store = new AttachmentStore(storage);
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    await store.save('note-one', attachment, bytes, { pendingUpload: true });
+
+    const [source] = await store.pendingUploadSources('note-one', [attachment.id]);
+    expect(source.attachment).toEqual(attachment);
+    await expect(source.loadBytes()).resolves.toEqual(bytes);
+    await expect(source.loadBytes()).resolves.toEqual(bytes);
+
+    await store.stageUpload('note-one', attachment, new Uint8Array([9, 9, 9, 9]));
+    await expect(source.loadBytes()).rejects.toThrow('Attachment upload generation changed');
+  });
+
+  it('confirms only the exact generation whose bytes match the relay content hash', async () => {
+    const store = new AttachmentStore(new MemoryClientStorage());
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    await store.save('note-one', attachment, bytes, { pendingUpload: true });
+    const [source] = await store.pendingUploadSources('note-one', [attachment.id]);
+    const contentHash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
+      .map(value => value.toString(16).padStart(2, '0')).join('');
+
+    await expect(store.confirmCompoundUpload(source.handle, contentHash)).resolves.toBe('confirmed');
+    await expect(store.pendingUploads()).resolves.toEqual([]);
+
+    await store.stageUpload('note-one', attachment, new Uint8Array([8, 8, 8, 8]));
+    await expect(store.confirmCompoundUpload(source.handle, contentHash)).resolves.toBe('changed');
+    await expect(store.stagedUploads()).resolves.toHaveLength(1);
+  });
+
+  it('persists the compound completion phase until exact cleanup', async () => {
+    const storage = new MemoryClientStorage();
+    const first = new AttachmentStore(storage, 'compound-phase');
+    await first.save('note-one', attachment, new Uint8Array([1]), { pendingUpload: true });
+    const [source] = await first.pendingUploadSources('note-one', [attachment.id]);
+
+    await first.beginCompoundUploadIntent('note-one', 'token-one', [source.handle]);
+    await expect(new AttachmentStore(storage, 'compound-phase').compoundUploadIntent('note-one'))
+      .resolves.toMatchObject({ phase: 'pending', noteToken: 'token-one' });
+
+    await expect(first.markCompoundUploadIntentReconciled('note-one', 'wrong-token'))
+      .resolves.toBe(false);
+    await expect(first.markCompoundUploadIntentReconciled('note-one', 'token-one'))
+      .resolves.toBe(true);
+    await expect(new AttachmentStore(storage, 'compound-phase').compoundUploadIntent('note-one'))
+      .resolves.toMatchObject({ phase: 'reconciled', noteToken: 'token-one' });
+
+    await expect(first.completeCompoundUploadIntent('note-one', 'wrong-token')).resolves.toBe(false);
+    await expect(first.completeCompoundUploadIntent('note-one', 'token-one')).resolves.toBe(true);
+    await expect(first.compoundUploadIntent('note-one')).resolves.toBeNull();
+  });
   it('keeps attachment bytes and pending upload work across store instances', async () => {
     const storage = new MemoryClientStorage();
     const first = new AttachmentStore(storage);
@@ -1018,6 +1095,29 @@ describe('AttachmentStore', () => {
     await store.cancelDelete('note-one', attachment.id);
     await expect(store.pendingDeletes()).resolves.toEqual([]);
     await expect(store.get('note-one', attachment.id)).resolves.toEqual({ attachment, bytes });
+  });
+
+  it('restores an interrupted unsynced upload when a queued note deletion is cancelled after restart', async () => {
+    const storage = new MemoryClientStorage();
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    const beforeCrash = new AttachmentStore(storage);
+    await beforeCrash.save('note-one', attachment, bytes, { pendingUpload: true });
+    const originalHandles = await beforeCrash.pendingUploadHandles(
+      'note-one',
+      [attachment.id],
+    );
+    await beforeCrash.queueDelete('note-one', attachment, { retainBytes: true });
+
+    const afterRestart = new AttachmentStore(storage);
+    await afterRestart.cancelDelete('note-one', attachment.id);
+
+    await expect(afterRestart.pendingUploadHandles(
+      'note-one',
+      [attachment.id],
+    )).resolves.toEqual(originalHandles);
+    await expect(afterRestart.pendingUploads()).resolves.toEqual([
+      { noteId: 'note-one', attachment, bytes },
+    ]);
   });
 
   it('purges crash-retained removal bytes only after the remote deletion completes', async () => {

@@ -7,7 +7,15 @@ import type {
   StorageAdapter,
 } from '@unkeep/core/experimental';
 import { NOTE_CREATION_CLAIM_TTL_MS } from '@unkeep/core/experimental';
-import { EncryptedSync, RecordConflictError, type RelaySession } from '@unkeep/client';
+import {
+  EncryptedSync,
+  PendingCompoundCompletionError,
+  PendingMutationCredentialMismatchError,
+  PendingMutationRebaseRequiresPullError,
+  RecordConflictError,
+  type CompoundCommitHandle,
+  type RelaySession,
+} from '@unkeep/client';
 import { toastStore } from './toast.svelte';
 import { clientStorage } from './clientStorage';
 import { attachmentSizeError } from './attachments';
@@ -78,6 +86,93 @@ function durableNoteAdapter(adapter: StorageAdapter): DurableNoteStorageAdapter 
     throw new Error('The active storage adapter does not support durable note synchronization');
   }
   return candidate as DurableNoteStorageAdapter;
+}
+
+function isRecordConflict(error: unknown): boolean {
+  if (error instanceof RecordConflictError) return true;
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { status?: unknown; code?: unknown };
+  return candidate.status === 409 && candidate.code === 'record_conflict';
+}
+
+function isPreservableRemoteConflict(error: unknown): boolean {
+  if (isRecordConflict(error)) return true;
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { status?: unknown; code?: unknown };
+  return candidate.status === 409 && candidate.code === 'attachment_id_unavailable';
+}
+
+function isPendingCredentialMismatch(error: unknown): boolean {
+  return error instanceof PendingMutationCredentialMismatchError
+    || (
+      !!error
+      && typeof error === 'object'
+      && (error as { name?: unknown }).name === 'PendingMutationCredentialMismatchError'
+    );
+}
+
+function isRebaseRequiresPull(error: unknown): boolean {
+  return error instanceof PendingMutationRebaseRequiresPullError
+    || (
+      !!error
+      && typeof error === 'object'
+      && (error as { name?: unknown }).name
+        === 'PendingMutationRebaseRequiresPullError'
+    );
+}
+
+function isForeignCompoundRebuildRejection(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { status?: unknown; code?: unknown };
+  return candidate.status === 409
+    && typeof candidate.code === 'string'
+    && new Set([
+      'attachment_id_unavailable',
+      'attachment_stage_conflict',
+      'attachment_stage_missing',
+      'mutation_conflict',
+      'record_conflict',
+    ]).has(candidate.code);
+}
+
+function attachmentIdUnavailable(): Error & { status: number; code: string } {
+  return Object.assign(new Error('attachment_id_unavailable'), {
+    name: 'RelayHttpError',
+    status: 409,
+    code: 'attachment_id_unavailable',
+  });
+}
+
+async function pushWithCredentialHandoff(
+  sync: EncryptedSync,
+  note: Note,
+): Promise<number> {
+  try {
+    return await sync.push(note);
+  } catch (error) {
+    if (!isPendingCredentialMismatch(error)) throw error;
+    try {
+      await sync.resumePendingMutationAfterCredentialChange('note', note.id);
+    } catch (handoffError) {
+      if (!isRecordConflict(handoffError)) throw handoffError;
+      try {
+        return await sync.rebasePendingNoteAfterCredentialChange(note);
+      } catch (rebaseError) {
+        if (
+          !isRebaseRequiresPull(rebaseError)
+          || !await sync.abandonPendingMutationAfterCredentialChange(
+            'note',
+            note.id,
+          )
+        ) throw rebaseError;
+        // The durable browser outbox still owns the full local snapshot.
+        // Surface the original conflict so the normal path preserves it as a
+        // separate note before clearing the original ID and pulling.
+        throw handoffError;
+      }
+    }
+    return sync.push(note);
+  }
 }
 
 async function receivedNoteId(idempotencyKey: string): Promise<string> {
@@ -168,6 +263,8 @@ export class NoteStore {
   private unsubscribeRealtime: (() => void) | null = null;
   private readonly syncCoordinator = new VaultTaskCoordinator();
   private readonly preservedConflicts = new Set<string>();
+  private readonly localEditGenerations = new Map<string, number>();
+  private readonly remoteNoteMutationTails = new Map<string, Promise<void>>();
   private importInProgress = false;
   private lifecycleListening = false;
   private readonly wakeSync = () => void this.sync();
@@ -566,9 +663,11 @@ export class NoteStore {
   }
 
   private debouncedSave(note: Note) {
+    this.markLocalEdit(note.id);
+    const snapshot = this.portableNote(note);
     saveQueue.schedule(
       note.id,
-      note,
+      snapshot,
       async value => {
         if (!await this.persistNote(value)) {
           throw new Error('Debounced note edit could not be saved locally');
@@ -597,6 +696,7 @@ export class NoteStore {
     }: { deferRemote?: boolean; beforeAttachments?: Note } = {},
     target = this.captureMutationTarget(),
   ): Promise<boolean> {
+    this.markLocalEdit(note.id);
     // Every awaited write uses one immutable vault snapshot. A reset can make
     // this context stale, but it cannot redirect an old-vault note, attachment,
     // or pending marker into the newly selected vault.
@@ -621,6 +721,13 @@ export class NoteStore {
       }
       return false;
     }
+  }
+
+  private markLocalEdit(noteId: string): void {
+    this.localEditGenerations.set(
+      noteId,
+      (this.localEditGenerations.get(noteId) ?? 0) + 1,
+    );
   }
 
   private async pushPendingNote(
@@ -648,17 +755,13 @@ export class NoteStore {
         pending.id,
         (pending.note.images ?? []).map(attachment => attachment.id),
       );
-      await this.pushNoteWithAttachments(
-        pending.note,
-        target,
-        pending.beforeAttachments,
-      );
-      await durable.completePendingNoteSync(pending.id, pending.token);
+      await this.pushNoteWithAttachments(pending, target, durable);
       return true;
     } catch (error) {
       let queuedError: unknown = error;
-      if (error instanceof RecordConflictError && context.isCurrent()) {
+      if (isPreservableRemoteConflict(error) && context.isCurrent()) {
         try {
+          await attachments.completeCompoundUploadIntent(pending.id, pending.token);
           // The note mutation was rejected, so none of its attachment
           // deletions are authorized. Leaving them queued would let a later
           // retry delete blobs still referenced by the winning note.
@@ -686,16 +789,36 @@ export class NoteStore {
    * the note revision check accepts the version that stopped referencing them.
    */
   private async pushNoteWithAttachments(
-    note: Note,
+    pending: PendingNoteSync,
     target: VaultMutationTarget,
-    beforeAttachments?: Note,
+    durable = durableNoteAdapter(target.adapter!),
+  ): Promise<void> {
+    const previous = this.remoteNoteMutationTails.get(pending.id) ?? Promise.resolve();
+    let release!: () => void;
+    const turn = new Promise<void>(resolve => { release = resolve; });
+    const tail = previous.then(() => turn);
+    this.remoteNoteMutationTails.set(pending.id, tail);
+    await previous;
+    try {
+      await this.pushNoteWithAttachmentsUnlocked(pending, target, durable);
+    } finally {
+      release();
+      if (this.remoteNoteMutationTails.get(pending.id) === tail) {
+        this.remoteNoteMutationTails.delete(pending.id);
+      }
+    }
+  }
+
+  private async pushNoteWithAttachmentsUnlocked(
+    pending: PendingNoteSync,
+    target: VaultMutationTarget,
+    durable: DurableNoteStorageAdapter,
   ): Promise<void> {
     const sync = target.sync;
     if (!sync) return;
+    const note = pending.note;
+    const beforeAttachments = pending.beforeAttachments;
     if (beforeAttachments) {
-      const beforeIds = new Set(
-        (beforeAttachments.images ?? []).map(attachment => attachment.id),
-      );
       const finalAttachments = note.deleted ? [] : (note.images ?? []);
       const referenced = new Set(finalAttachments.map(attachment => attachment.id));
       for (const attachment of beforeAttachments.images ?? []) {
@@ -704,13 +827,6 @@ export class NoteStore {
           retainBytes: true,
           purgeRetainedBytesOnComplete: true,
         });
-      }
-      // A predecessor is needed when a tombstoned note must be reopened before
-      // new immutable attachment bytes can be uploaded (Undo). A pure removal
-      // can push the final note directly, avoiding a transient remote revision
-      // that still references bytes which may never have reached the relay.
-      if (finalAttachments.some(attachment => !beforeIds.has(attachment.id))) {
-        await sync.push(beforeAttachments);
       }
     }
     await target.attachments.prepareUploads(
@@ -731,22 +847,230 @@ export class NoteStore {
       }
     }
 
-    const uploads = await target.attachments.flushUploads(
-      (noteId, attachment, bytes) => sync.uploadAttachment(noteId, attachment, bytes),
+    const uploads = await target.attachments.pendingUploadSources(
       note.id,
       note.deleted ? [] : (note.images ?? []).map(attachment => attachment.id),
-      { deferConfirmation: true },
     );
-    if (uploads.failed.length) throw uploads.error ?? new Error('Attachment upload failed');
-
-    await sync.push(note);
-    await target.attachments.confirmUploads(uploads.pendingConfirmation ?? []);
+    if (uploads.length > 0) {
+      const awaitingCompletion = await sync.pendingCompoundCommit(note.id);
+      if (awaitingCompletion) {
+        await this.finishCompoundCommit(awaitingCompletion, target, durable);
+      } else {
+        const stale = await target.attachments.compoundUploadIntent(note.id);
+        if (stale?.phase === 'reconciled') {
+          await target.attachments.completeCompoundUploadIntent(
+            stale.noteId,
+            stale.noteToken,
+          );
+        }
+      }
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await target.attachments.beginCompoundUploadIntent(
+          note.id,
+          pending.token,
+          uploads.map(value => value.handle),
+        );
+        try {
+          const compoundUploads = uploads.map(
+            ({ attachment, loadBytes }) => ({ attachment, loadBytes }),
+          );
+          let handle: CompoundCommitHandle;
+          try {
+            handle = await sync.commitNoteWithAttachments(note, compoundUploads);
+          } catch (error) {
+            if (!isPendingCredentialMismatch(error)) throw error;
+            try {
+              handle = await sync.resumePendingCompoundCommitAfterCredentialChange(
+                note.id,
+                compoundUploads,
+              ) ?? await sync.commitNoteWithAttachments(note, compoundUploads);
+            } catch (handoffError) {
+              if (!isForeignCompoundRebuildRejection(handoffError)) {
+                throw handoffError;
+              }
+              if (!await sync.abandonPendingCompoundAfterCredentialChange(note.id)) {
+                throw handoffError;
+              }
+              throw attachmentIdUnavailable();
+            }
+          }
+          await this.finishCompoundCommit(handle, target, durable);
+          break;
+        } catch (error) {
+          if (
+            error instanceof PendingCompoundCompletionError
+            && error.handle.noteId === note.id
+            && attempt === 0
+          ) {
+            await this.finishCompoundCommit(error.handle, target, durable);
+            continue;
+          }
+          throw error;
+        }
+      }
+    } else {
+      await pushWithCredentialHandoff(sync, note);
+      await durable.completePendingNoteSync(pending.id, pending.token);
+    }
 
     const deletions = await target.attachments.flushDeletes(
-      (noteId, attachment) => sync.deleteAttachment(noteId, attachment),
+      async (noteId, attachment) => {
+        try {
+          return await sync.deleteAttachment(noteId, attachment);
+        } catch (error) {
+          if (!isPendingCredentialMismatch(error)) throw error;
+          await sync.resumePendingMutationAfterCredentialChange(
+            'attachment',
+            attachment.id,
+          );
+          return sync.deleteAttachment(noteId, attachment);
+        }
+      },
       note.id,
     );
     if (deletions.failed.length) throw new Error('Attachment deletion failed');
+  }
+
+  private async finishCompoundCommit(
+    handle: CompoundCommitHandle,
+    target: VaultMutationTarget,
+    durable: DurableNoteStorageAdapter,
+  ): Promise<void> {
+    const sync = target.sync;
+    if (!sync) return;
+    const intent = await target.attachments.compoundUploadIntent(handle.noteId);
+    if (!intent) throw new Error('Committed attachment mutation has no local completion intent');
+    if (intent.phase === 'pending') {
+      const committed = new Map(
+        handle.attachmentRevisions.map(value => [value.id, value.contentHash]),
+      );
+      for (const upload of intent.uploads) {
+        const contentHash = committed.get(upload.attachmentId);
+        if (!contentHash) throw new Error('Committed attachment mutation is missing an intended upload');
+        await target.attachments.confirmCompoundUpload(upload, contentHash);
+      }
+      // The compare-clear may intentionally return false when a newer local
+      // snapshot replaced this token. Marking this exact intent reconciled is
+      // the durable boundary before the SDK root may be removed.
+      await durable.completePendingNoteSync(handle.noteId, intent.noteToken);
+      if (!await target.attachments.markCompoundUploadIntentReconciled(
+        handle.noteId,
+        intent.noteToken,
+      )) throw new Error('Compound completion intent changed during reconciliation');
+    }
+    await sync.completeCompoundCommit(handle);
+    await target.attachments.completeCompoundUploadIntent(handle.noteId, intent.noteToken);
+  }
+
+  private async recoverCompoundCommits(
+    target: VaultMutationTarget,
+    durable: DurableNoteStorageAdapter,
+  ): Promise<void> {
+    if (!target.sync) return;
+    const committedHandles = await target.sync.pendingCompoundCommits();
+    for (const handle of committedHandles) {
+      await this.finishCompoundCommit(handle, target, durable);
+    }
+    const currentPending = new Map(
+      (await durable.listPendingNoteSync()).map(value => [value.id, value]),
+    );
+    for (const intent of await target.attachments.compoundUploadIntents()) {
+      if (intent.phase === 'reconciled') {
+        // SDK completion succeeded but the browser stopped before deleting the
+        // web intent. No SDK handle is expected or needed at this point.
+        await target.attachments.completeCompoundUploadIntent(
+          intent.noteId,
+          intent.noteToken,
+        );
+        continue;
+      }
+      const exactSources = await target.attachments.pendingUploadSourcesForHandles(
+        intent.uploads,
+      );
+      try {
+        const resumed = await target.sync.resumePendingCompoundCommit(
+          intent.noteId,
+          exactSources.map(({ attachment, loadBytes }) => ({ attachment, loadBytes })),
+        );
+        if (resumed) {
+          await this.finishCompoundCommit(resumed, target, durable);
+          continue;
+        }
+      } catch (error) {
+        if (isPendingCredentialMismatch(error)) {
+          const current = currentPending.get(intent.noteId);
+          if (!current) throw error;
+          try {
+            const resumed = await target.sync
+              .resumePendingCompoundCommitAfterCredentialChange(
+                intent.noteId,
+                exactSources.map(
+                  ({ attachment, loadBytes }) => ({ attachment, loadBytes }),
+                ),
+              );
+            if (resumed) {
+              await this.finishCompoundCommit(resumed, target, durable);
+              continue;
+            }
+          } catch (handoffError) {
+            if (isForeignCompoundRebuildRejection(handoffError)) {
+              if (!await target.sync.abandonPendingCompoundAfterCredentialChange(
+                intent.noteId,
+              )) throw handoffError;
+              if (current.token !== intent.noteToken) {
+                await target.attachments.completeCompoundUploadIntent(
+                  intent.noteId,
+                  intent.noteToken,
+                );
+              }
+              // The current token retains its exact generations for the normal
+              // push path. A newer token has already retired the old intent
+              // above and may be an ordinary removal with no uploads at all.
+              continue;
+            }
+            // An authenticated replacement can still lack an old pre-stage
+            // source. Fall through to the generation-fenced cancellation
+            // below only when a newer outbox token makes that source obsolete.
+            if (exactSources.length === intent.uploads.length) throw handoffError;
+          }
+        }
+        if (exactSources.length === intent.uploads.length) throw error;
+        const current = currentPending.get(intent.noteId);
+        if (!current || current.token === intent.noteToken) throw error;
+        const currentAttachmentIds = new Set(
+          (current.note.deleted ? [] : (current.note.images ?? []))
+            .map(value => value.id),
+        );
+        const exactIdentities = new Set(exactSources.map(value =>
+          `${value.handle.attachmentId}\0${value.handle.generation ?? 'legacy'}`));
+        for (const upload of intent.uploads) {
+          if (exactIdentities.has(
+            `${upload.attachmentId}\0${upload.generation ?? 'legacy'}`,
+          )) continue;
+          if (
+            currentAttachmentIds.has(upload.attachmentId)
+            && !await target.attachments.hasReplacementUploadGeneration(upload)
+          ) throw error;
+        }
+        // A newer same-key generation can make an unfinished old stage
+        // irrecoverable. Cancellation is safe only when the SDK proves the
+        // root never reached finalization; false preserves ambiguity.
+        if (!await target.sync.cancelPendingCompoundCommit(intent.noteId)) throw error;
+        await target.attachments.completeCompoundUploadIntent(
+          intent.noteId,
+          intent.noteToken,
+        );
+        continue;
+      }
+      // No SDK root exists. Retain an intent that still owns the current
+      // outbox so the normal commit path can start it; otherwise it is stale.
+      if (currentPending.get(intent.noteId)?.token !== intent.noteToken) {
+        await target.attachments.completeCompoundUploadIntent(
+          intent.noteId,
+          intent.noteToken,
+        );
+      }
+    }
   }
 
   private async cancelAttachmentDeletes(
@@ -854,6 +1178,7 @@ export class NoteStore {
     const activeNote = this.notes.find(note => note.id === id);
     if (!activeNote || !target.adapter) return null;
     const note = this.portableNote(activeNote);
+    this.markLocalEdit(id);
     const attachments = note.images ?? [];
     saveQueue.cancel(id);
     const queuedAttachments: NoteAttachment[] = [];
@@ -891,10 +1216,10 @@ export class NoteStore {
     }
     if (target.sync) {
       try {
-        await this.pushNoteWithAttachments(pendingSync.note, target);
-        await durableNoteAdapter(target.adapter).completePendingNoteSync(
-          pendingSync.id,
-          pendingSync.token,
+        await this.pushNoteWithAttachments(
+          pendingSync,
+          target,
+          durableNoteAdapter(target.adapter),
         );
       } catch (error) {
         if (error instanceof RecordConflictError) {
@@ -1316,9 +1641,10 @@ export class NoteStore {
       if (encryptedSync) {
         const durable = durableNoteAdapter(adapter);
         const mutationFailures = new Set<string>();
+        await this.recoverCompoundCommits(target, durable);
         const stagedUploads = await target.attachments.stagedUploads();
         const queuedAttachmentNoteIds = new Set([
-          ...(await target.attachments.pendingUploads()).map(value => value.noteId),
+          ...await target.attachments.pendingUploadNoteIds(),
           ...(await target.attachments.pendingDeletes()).map(value => value.noteId),
           ...stagedUploads.map(value => value.noteId),
         ]);
@@ -1346,16 +1672,12 @@ export class NoteStore {
               id,
               (pending.note.images ?? []).map(attachment => attachment.id),
             );
-            await this.pushNoteWithAttachments(
-              pending.note,
-              target,
-              pending.beforeAttachments,
-            );
+            await this.pushNoteWithAttachments(pending, target, durable);
             if (!context.isCurrent()) return;
-            await durable.completePendingNoteSync(id, pending.token);
           } catch (error) {
-            if (error instanceof RecordConflictError) {
+            if (isPreservableRemoteConflict(error)) {
               try {
+                await target.attachments.completeCompoundUploadIntent(id, pending.token);
                 await this.cancelAttachmentDeletes(id, target.attachments);
               } catch {
                 mutationFailures.add(id);
@@ -1391,33 +1713,55 @@ export class NoteStore {
           this.syncStatus = 'offline';
           return;
         }
+        const pullEditGenerations = new Map(this.localEditGenerations);
+        const editedDuringPull = (noteId: string) =>
+          (this.localEditGenerations.get(noteId) ?? 0)
+          !== (pullEditGenerations.get(noteId) ?? 0);
+        const stopForLocalEdit = (noteId: string): boolean => {
+          if (!editedDuringPull(noteId)) return false;
+          this.syncStatus = 'offline';
+          return true;
+        };
         const pulled = await encryptedSync.pull();
         if (!context.isCurrent()) return;
+        const affectedNoteIds = new Set([
+          ...pulled.notes.map(note => note.id),
+          ...pulled.deletedIds,
+          ...pulled.attachments.map(value => value.noteId),
+          ...pulled.deletedAttachments.map(value => value.noteId),
+        ]);
+        if ([...affectedNoteIds].some(editedDuringPull)) {
+          this.syncStatus = 'offline';
+          return;
+        }
         const attachmentBytes = new Set<string>();
         const remoteAttachmentHandles = new Map<string, RemoteAttachmentHandle>();
         for (const value of pulled.attachments) {
+          if (stopForLocalEdit(value.noteId)) return;
           const handle = await target.attachments.saveRemote(
             value.noteId,
             value.attachment,
             value.bytes,
           );
-          if (!context.isCurrent()) return;
+          if (!context.isCurrent() || stopForLocalEdit(value.noteId)) return;
           const key = `${value.noteId}:${value.attachment.id}`;
           attachmentBytes.add(key);
           remoteAttachmentHandles.set(key, handle);
         }
         for (const { noteId, attachmentId } of pulled.deletedAttachments) {
+          if (stopForLocalEdit(noteId)) return;
           target.urls.release(noteId, attachmentId);
           await target.attachments.applyRemoteDelete(noteId, attachmentId);
-          if (!context.isCurrent()) return;
+          if (!context.isCurrent() || stopForLocalEdit(noteId)) return;
           const existing = this.notes.find(note => note.id === noteId);
           if (!existing?.images?.some(attachment => attachment.id === attachmentId)) continue;
           existing.images = existing.images.filter(attachment => attachment.id !== attachmentId);
           if (!existing.images.length) existing.images = undefined;
           await adapter.saveNote(this.portableNote(existing));
-          if (!context.isCurrent()) return;
+          if (!context.isCurrent() || stopForLocalEdit(noteId)) return;
         }
         for (const note of pulled.notes) {
+          if (stopForLocalEdit(note.id)) return;
           for (const attachment of note.images ?? []) {
             const key = `${note.id}:${attachment.id}`;
             if (!attachmentBytes.has(key) && !await target.attachments.get(note.id, attachment.id)) {
@@ -1426,7 +1770,7 @@ export class NoteStore {
           }
           const portable = this.portableNote(note);
           await adapter.saveNote(portable);
-          if (!context.isCurrent()) return;
+          if (!context.isCurrent() || stopForLocalEdit(note.id)) return;
           for (const attachment of portable.images ?? []) {
             const handle = remoteAttachmentHandles.get(
               `${portable.id}:${attachment.id}`,
@@ -1436,9 +1780,10 @@ export class NoteStore {
                 `Attachment changed locally while applying remote note: ${attachment.name}`,
               );
             }
+            if (stopForLocalEdit(note.id)) return;
           }
           const hydrated = await target.urls.hydrate(portable);
-          if (!context.isCurrent()) return;
+          if (!context.isCurrent() || stopForLocalEdit(note.id)) return;
           const existing = this.notes.find(value => value.id === note.id);
           if (existing) {
             for (const attachment of existing.images ?? []) {
@@ -1453,13 +1798,14 @@ export class NoteStore {
           this.preservedConflicts.delete(note.id);
         }
         for (const id of pulled.deletedIds) {
+          if (stopForLocalEdit(id)) return;
           const existing = this.notes.find(note => note.id === id);
           await applyRemoteNoteTombstone(adapter, id);
-          if (!context.isCurrent()) return;
+          if (!context.isCurrent() || stopForLocalEdit(id)) return;
           for (const attachment of existing?.images ?? []) {
             target.urls.release(id, attachment.id);
             await target.attachments.applyRemoteDelete(id, attachment.id);
-            if (!context.isCurrent()) return;
+            if (!context.isCurrent() || stopForLocalEdit(id)) return;
           }
           this.notes = this.notes.filter(note => note.id !== id);
           this.preservedConflicts.delete(id);

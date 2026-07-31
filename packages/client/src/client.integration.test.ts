@@ -12,6 +12,15 @@ function note(id:string,content:string,images?:NoteAttachment[]):Note {
   return {id,content,...(images?{images}:{}),createdAt:1,updatedAt:1,pinned:false,archived:false};
 }
 
+async function commitAttachments(
+  sync:EncryptedSync,
+  value:Note,
+  uploads:readonly {attachment:NoteAttachment;bytes:Uint8Array<ArrayBuffer>}[],
+):Promise<void> {
+  const handle=await sync.commitNoteWithAttachments(value,uploads);
+  if(!await sync.completeCompoundCommit(handle))throw new Error('Compound test bundle was not completed');
+}
+
 test('claims setup through the SDK relay client over policy-approved loopback HTTP',async()=>{
   const relay=await startTestServer();
   try {
@@ -33,6 +42,39 @@ test('round-trips an encrypted note through the SDK sync interface',async()=>{
     const pulled=await reader.pull();
     expect(pulled.notes).toEqual([{...note('sdk-note','encrypted hello'),schemaVersion:1}]);
     expect(pulled.cursor).toBeGreaterThan(0);
+  } finally {await relay.stop()}
+});
+
+test('atomically round-trips a note with a new encrypted attachment and durably completes its bundle',async()=>{
+  const relay=await startTestServer();
+  try {
+    const session=await claim(relay);
+    const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice(session.instanceId);
+    const storage=new MemoryClientStorage();
+    const writer=new EncryptedSync(session,masterKey,storage);
+    const reader=new EncryptedSync(session,masterKey,new MemoryClientStorage());
+    const attachment:NoteAttachment={
+      id:'compound-sdk-attachment',
+      name:'proof.bin',
+      mimeType:'application/octet-stream',
+      size:3,
+    };
+    const bytes=new Uint8Array([1,2,3]);
+    const bundledNote=note('compound-sdk-note','encrypted bundle',[attachment]);
+
+    const handle=await writer.commitNoteWithAttachments(
+      bundledNote,
+      [{attachment,bytes}],
+    );
+    expect(await writer.pendingCompoundCommit(bundledNote.id)).toEqual(handle);
+    expect(await writer.completeCompoundCommit(handle)).toBe(true);
+
+    const pulled=await reader.pull();
+    expect(pulled.notes).toEqual([{...bundledNote,schemaVersion:1}]);
+    expect(pulled.attachments).toEqual([{noteId:bundledNote.id,attachment,bytes}]);
+    await expect(writer.push({...bundledNote,content:'updated',updatedAt:2}))
+      .resolves.toEqual(expect.any(Number));
+    await expect(writer.deleteAttachment(bundledNote.id,attachment)).resolves.toBeUndefined();
   } finally {await relay.stop()}
 });
 
@@ -268,8 +310,11 @@ test('returns note tombstone and attachment revisions with a pull',async()=>{
     const writer=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const reader=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const attachment:NoteAttachment={id:'revision-attachment',name:'revision.txt',mimeType:'text/plain',size:8};
-    await writer.uploadAttachment('revision-note',attachment,new TextEncoder().encode('revision'));
-    await writer.push(note('revision-note','before deletion',[attachment]));
+    await commitAttachments(
+      writer,
+      note('revision-note','before deletion',[attachment]),
+      [{attachment,bytes:new TextEncoder().encode('revision')}],
+    );
     await writer.push({...note('revision-note','deleted'),deleted:true,updatedAt:2});
 
     const pulled=await reader.pull();
@@ -394,8 +439,11 @@ test('round-trips encrypted attachment bytes through the SDK',async()=>{
     const reader=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const attachment:NoteAttachment={id:'sdk-attachment',name:'hello.txt',mimeType:'text/plain',size:5};
     const bytes=new TextEncoder().encode('hello');
-    await writer.uploadAttachment('attachment-note',attachment,bytes);
-    await writer.push(note('attachment-note','with attachment',[attachment]));
+    await commitAttachments(
+      writer,
+      note('attachment-note','with attachment',[attachment]),
+      [{attachment,bytes}],
+    );
     expect(await reader.downloadAttachment('attachment-note',attachment)).toEqual(bytes);
     const pulled=await reader.pull();
     expect(pulled.notes[0].images).toEqual([attachment]);
@@ -411,7 +459,11 @@ test('recovers a post-success attachment replay only when owner, bytes, and size
     const attachment:NoteAttachment={id:'immutable-replay',name:'replay.bin',mimeType:'application/octet-stream',size:4};
     const bytes=new Uint8Array([1,2,3,4]);
     const first=new EncryptedSync(session,masterKey,storage);
-    await first.uploadAttachment('immutable-owner',attachment,bytes);
+    await commitAttachments(
+      first,
+      note('immutable-owner','with attachment',[attachment]),
+      [{attachment,bytes}],
+    );
 
     // AttachmentStore can stop after the SDK has committed its mutation and
     // revision but before clearing its own pending-upload marker. A restarted
@@ -446,7 +498,11 @@ test('does not recover a deleted immutable upload while delete replay stays idem
     const attachment:NoteAttachment={id:'deleted-replay',name:'gone.bin',mimeType:'application/octet-stream',size:3};
     const bytes=new Uint8Array([7,8,9]);
     const first=new EncryptedSync(session,masterKey,storage);
-    await first.uploadAttachment('deleted-replay-owner',attachment,bytes);
+    await commitAttachments(
+      first,
+      note('deleted-replay-owner','with attachment',[attachment]),
+      [{attachment,bytes}],
+    );
     await first.deleteAttachment('deleted-replay-owner',attachment);
 
     const restarted=new EncryptedSync(session,masterKey,storage);
@@ -466,8 +522,11 @@ test('retries a pull instead of accepting stale attachment bytes after a downloa
     const writer=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const reader=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const attachment:NoteAttachment={id:'retry-attachment',name:'retry.txt',mimeType:'text/plain',size:3};
-    await writer.uploadAttachment('retry-owner',attachment,new TextEncoder().encode('one'));
-    await writer.push(note('retry-owner','first',[attachment]));
+    await commitAttachments(
+      writer,
+      note('retry-owner','first',[attachment]),
+      [{attachment,bytes:new TextEncoder().encode('one')}],
+    );
     const initial=await reader.pull();
     await reader.acknowledge(initial.cursor,initial.revisions);
 
@@ -477,8 +536,11 @@ test('retries a pull instead of accepting stale attachment bytes after a downloa
       mimeType:'text/plain',
       size:3,
     };
-    await writer.uploadAttachment('retry-owner',replacement,new TextEncoder().encode('two'));
-    await writer.push({...note('retry-owner','second',[replacement]),updatedAt:2});
+    await commitAttachments(
+      writer,
+      {...note('retry-owner','second',[replacement]),updatedAt:2},
+      [{attachment:replacement,bytes:new TextEncoder().encode('two')}],
+    );
     await writer.deleteAttachment('retry-owner',attachment);
     const originalFetch=globalThis.fetch;
     const fetch=vi.spyOn(globalThis,'fetch').mockImplementation(async(input,init)=>{
@@ -518,9 +580,14 @@ test('retries a pull instead of accepting attachment bytes inconsistent with not
     const session=await claim(relay);const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice(session.instanceId);
     const writer=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const reader=new EncryptedSync(session,masterKey,new MemoryClientStorage());
-    const attachment:NoteAttachment={id:'size-mismatch-attachment',name:'mismatch.txt',mimeType:'text/plain',size:4};
-    await writer.uploadAttachment('size-mismatch-owner',attachment,new TextEncoder().encode('bad'));
-    await writer.push(note('size-mismatch-owner','inconsistent',[attachment]));
+    const acceptedAttachment:NoteAttachment={id:'size-mismatch-attachment',name:'mismatch.txt',mimeType:'text/plain',size:3};
+    await commitAttachments(
+      writer,
+      note('size-mismatch-owner','accepted bytes',[acceptedAttachment]),
+      [{attachment:acceptedAttachment,bytes:new TextEncoder().encode('bad')}],
+    );
+    const attachment={...acceptedAttachment,size:4};
+    await writer.push({...note('size-mismatch-owner','inconsistent',[attachment]),updatedAt:2});
 
     await expect(reader.pull()).rejects.toThrow('expected 4 bytes but received 3');
     expect(await reader.getCursor()).toBe(0);
@@ -531,8 +598,11 @@ test('retries a pull instead of accepting attachment bytes inconsistent with not
       ...attachment,
       id:'size-mismatch-attachment-corrected',
     };
-    await writer.uploadAttachment('size-mismatch-owner',correctedAttachment,correctedBytes);
-    await writer.push(note('size-mismatch-owner','corrected',[correctedAttachment]));
+    await commitAttachments(
+      writer,
+      {...note('size-mismatch-owner','corrected',[correctedAttachment]),updatedAt:3},
+      [{attachment:correctedAttachment,bytes:correctedBytes}],
+    );
     await writer.deleteAttachment('size-mismatch-owner',attachment);
     const retried=await reader.pull();
     expect(retried.attachments).toEqual([{
@@ -554,8 +624,11 @@ test('pulls an encrypted attachment tombstone without downloading deleted bytes'
     const writer=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const reader=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const attachment:NoteAttachment={id:'deleted-attachment',name:'gone.txt',mimeType:'text/plain',size:4};
-    await writer.uploadAttachment('attachment-owner',attachment,new TextEncoder().encode('gone'));
-    await writer.push(note('attachment-owner','stale metadata',[attachment]));
+    await commitAttachments(
+      writer,
+      note('attachment-owner','stale metadata',[attachment]),
+      [{attachment,bytes:new TextEncoder().encode('gone')}],
+    );
     await writer.deleteAttachment('attachment-owner',attachment);
 
     const pulled=await reader.pull();
@@ -574,7 +647,11 @@ test('keeps attachment IDs immutable while stale deletes remain idempotent',asyn
     const writer=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const stale=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     const attachment:NoteAttachment={id:'protected-attachment',name:'protected.txt',mimeType:'text/plain',size:3};
-    await writer.uploadAttachment('attachment-owner',attachment,new TextEncoder().encode('one'));
+    await commitAttachments(
+      writer,
+      note('attachment-owner','protected',[attachment]),
+      [{attachment,bytes:new TextEncoder().encode('one')}],
+    );
     const staleBase=await stale.pull();
     await stale.acknowledge(staleBase.cursor,staleBase.revisions);
 

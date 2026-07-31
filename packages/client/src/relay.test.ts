@@ -46,6 +46,120 @@ describe('cleanRelayEndpoint', () => {
 });
 
 describe('RelayClient errors', () => {
+  it('stages an exact attachment payload under a stable bundle mutation and validates the stage receipt', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      stageHash: 'a'.repeat(64),
+    }), {
+      status: 201,
+      headers: { 'content-type': 'application/json' },
+    }));
+    try {
+      const payload = {
+        noteId: 'note-one',
+        envelope: { iv: 'iv', ciphertext: 'ciphertext' },
+      };
+      await expect(new RelayClient('http://localhost:3000', 'credential')
+        .stageNoteAttachment('mutation-one', 'attachment-one', payload))
+        .resolves.toEqual({ stageHash: 'a'.repeat(64) });
+
+      expect(fetch).toHaveBeenCalledWith(
+        'http://localhost:3000/api/v1/note-mutations/mutation-one/attachments/attachment-one',
+        expect.objectContaining({
+          method: 'PUT',
+          body: JSON.stringify(payload),
+        }),
+      );
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
+  it('rejects a malformed attachment stage receipt', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      stageHash: '../not-a-hash',
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    try {
+      await expect(new RelayClient('http://localhost:3000', 'credential')
+        .stageNoteAttachment('mutation-one', 'attachment-one', {
+          noteId: 'note-one',
+          envelope: {},
+        }))
+        .rejects.toThrow(/invalid attachment stage receipt/i);
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
+  it('finalizes a staged note bundle and validates its exact revision manifest', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      revision: 12,
+      attachmentRevisions: [
+        { id: 'attachment-one', revision: 10 },
+        { id: 'attachment-two', revision: 11 },
+      ],
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    try {
+      const payload = {
+        mutationId: 'mutation-one',
+        baseRevision: 3,
+        envelope: { iv: 'iv', ciphertext: 'ciphertext' },
+        deleted: false as const,
+        newAttachments: [
+          { id: 'attachment-one', stageHash: 'a'.repeat(64) },
+          { id: 'attachment-two', stageHash: 'b'.repeat(64) },
+        ],
+      };
+      await expect(new RelayClient('http://localhost:3000', 'credential')
+        .finalizeNoteWithAttachments('note-one', payload))
+        .resolves.toEqual({
+          revision: 12,
+          attachmentRevisions: [
+            { id: 'attachment-one', revision: 10 },
+            { id: 'attachment-two', revision: 11 },
+          ],
+        });
+
+      expect(fetch).toHaveBeenCalledWith(
+        'http://localhost:3000/api/v1/notes/note-one/compound',
+        expect.objectContaining({
+          method: 'PUT',
+          body: JSON.stringify(payload),
+        }),
+      );
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
+  it('rejects a final receipt that does not exactly match the requested attachment manifest', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      revision: 8,
+      attachmentRevisions: [{ id: 'substituted-attachment', revision: 7 }],
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    try {
+      await expect(new RelayClient('http://localhost:3000', 'credential')
+        .finalizeNoteWithAttachments('note-one', {
+          mutationId: 'mutation-one',
+          baseRevision: 0,
+          envelope: {},
+          deleted: false,
+          newAttachments: [{ id: 'attachment-one', stageHash: 'a'.repeat(64) }],
+        }))
+        .rejects.toThrow(/invalid compound note receipt/i);
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
   it('uses the device collection endpoint for emergency revoke-all', async () => {
     const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(null, { status: 204 }),

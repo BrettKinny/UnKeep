@@ -33,7 +33,7 @@ export function stagedClipFileName(attachmentId: string): string {
   return `clip-${attachmentId}.bin`;
 }
 
-function validateStagingFileName(fileName: string): string {
+export function validateStagedClipFileName(fileName: string): string {
   const match = fileName.match(STAGING_FILE_PATTERN);
   if (!match || basename(fileName) !== fileName) {
     throw new Error('Stored interrupted clip staging name is invalid');
@@ -199,7 +199,7 @@ export async function readStagedClip(
   storage: JsonFileClientStorage,
   staged: StagedClip,
 ): Promise<Uint8Array<ArrayBuffer>> {
-  validateStagingFileName(staged.fileName);
+  validateStagedClipFileName(staged.fileName);
   if (
     !Number.isSafeInteger(staged.size)
     || staged.size < 0
@@ -273,7 +273,7 @@ export async function removeStagedClip(
   storage: JsonFileClientStorage,
   fileName: string,
 ): Promise<void> {
-  validateStagingFileName(fileName);
+  validateStagedClipFileName(fileName);
   const directory = stagingDirectory(storage);
   await unlink(join(directory, fileName)).catch(error => {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;

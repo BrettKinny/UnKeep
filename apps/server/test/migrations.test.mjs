@@ -30,7 +30,7 @@ test('migrates a fresh database to the current schema with explicit metadata', t
 
   migrateDatabase(db);
 
-  assert.equal(CURRENT_SERVER_SCHEMA_VERSION, 9);
+  assert.equal(CURRENT_SERVER_SCHEMA_VERSION, 11);
   assert.deepEqual(
     db.prepare('SELECT version,name FROM schema_migrations ORDER BY version').all().map(row => ({ ...row })),
     [
@@ -43,6 +43,8 @@ test('migrates a fresh database to the current schema with explicit metadata', t
       { version: 7, name: 'paired-device-approver-lineage' },
       { version: 8, name: 'record-storage-accounting-and-mutation-retention' },
       { version: 9, name: 'protocol-record-identity-guards' },
+      { version: 10, name: 'credential-hash-namespace-guards' },
+      { version: 11, name: 'atomic-note-attachment-bundles' },
     ],
   );
   assert.deepEqual(
@@ -72,7 +74,29 @@ test('migrates a fresh database to the current schema with explicit metadata', t
   );
   assert.deepEqual(
     db.prepare('PRAGMA table_info(mutations)').all().map(row => row.name),
-    ['id', 'payload_hash', 'revision', 'created_at'],
+    [
+      'id',
+      'payload_hash',
+      'revision',
+      'created_at',
+      'response',
+      'owner_token_hash',
+      'mutation_kind',
+    ],
+  );
+  assert.deepEqual(
+    db.prepare('PRAGMA table_info(attachment_stages)').all().map(row => row.name),
+    [
+      'bundle_mutation_id',
+      'attachment_id',
+      'note_id',
+      'owner_token_hash',
+      'stage_hash',
+      'envelope',
+      'envelope_bytes',
+      'created_at',
+      'expires_at',
+    ],
   );
   assert.deepEqual(
     db.prepare(`
@@ -111,6 +135,8 @@ test('migrates a fresh database to the current schema with explicit metadata', t
   assert.deepEqual(
     db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map(row => ({ ...row })),
     [
+      { name: 'attachment_stage_usage' },
+      { name: 'attachment_stages' },
       { name: 'devices' },
       { name: 'instance' },
       { name: 'maintenance_tasks' },
@@ -182,19 +208,125 @@ test('adopts an unversioned legacy database without losing relay data', t => {
     { id: 'mutation-one', payload_hash: 'payload-hash', revision: 7 },
   );
   assert.ok(migratedMutation.created_at > 0);
-  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get().count, 9);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get().count, 11);
 });
 
-test('refuses a legacy protocol-invalid record without changing or exposing it', t => {
+test('refuses cross-registry credential aliases on every startup without changing access', t => {
+  const db = new DatabaseSync(':memory:');
+  t.after(() => db.close());
+  migrateDatabase(db);
+  db.exec(`
+    DROP TRIGGER IF EXISTS devices_token_hash_namespace_insert;
+    DROP TRIGGER IF EXISTS devices_token_hash_namespace_update;
+    DROP TRIGGER IF EXISTS service_credentials_token_hash_namespace_insert;
+    DROP TRIGGER IF EXISTS service_credentials_token_hash_namespace_update;
+  `);
+  db.prepare(`
+    INSERT INTO devices(id,name,token_hash,revoked_at)
+    VALUES(?,?,?,NULL)
+  `).run('alias-device', 'Aliased device', 'shared-token-hash');
+  db.prepare(`
+    INSERT INTO service_credentials(id,name,token_hash,revoked_at,scope)
+    VALUES(?,?,?,datetime('now'),'read-only')
+  `).run('alias-service', 'Aliased revoked service', 'shared-token-hash');
+  const migrationCount = db.prepare(`
+    SELECT COUNT(*) AS count FROM schema_migrations
+  `).get().count;
+
+  assert.throws(
+    () => migrateDatabase(db),
+    /device and service credential registries contain 1 duplicate token hash/,
+  );
+  assert.equal(
+    db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get().count,
+    migrationCount,
+  );
+  assert.equal(
+    db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM devices AS device
+      JOIN service_credentials AS service
+        ON service.token_hash=device.token_hash
+    `).get().count,
+    1,
+  );
+});
+
+test('guards the credential token-hash namespace below the HTTP layer', t => {
+  const db = new DatabaseSync(':memory:');
+  t.after(() => db.close());
+  migrateDatabase(db);
+  db.prepare(`
+    INSERT INTO devices(id,name,token_hash,revoked_at)
+    VALUES(?,?,?,datetime('now'))
+  `).run('namespace-device', 'Revoked namespace device', 'device-token-hash');
+  assert.throws(
+    () => db.prepare(`
+      INSERT INTO service_credentials(id,name,token_hash,revoked_at,scope)
+      VALUES(?,?,?,NULL,'read-only')
+    `).run(
+      'namespace-service-conflict',
+      'Conflicting service',
+      'device-token-hash',
+    ),
+    /credential token hash namespace conflict/,
+  );
+
+  db.prepare(`
+    INSERT INTO service_credentials(id,name,token_hash,revoked_at,scope)
+    VALUES(?,?,?,datetime('now'),'read-only')
+  `).run(
+    'namespace-service',
+    'Revoked namespace service',
+    'service-token-hash',
+  );
+  assert.throws(
+    () => db.prepare(`
+      INSERT INTO devices(id,name,token_hash,revoked_at)
+      VALUES(?,?,?,NULL)
+    `).run(
+      'namespace-device-conflict',
+      'Conflicting device',
+      'service-token-hash',
+    ),
+    /credential token hash namespace conflict/,
+  );
+  assert.throws(
+    () => db.prepare(`
+      UPDATE devices SET token_hash=? WHERE id=?
+    `).run('service-token-hash', 'namespace-device'),
+    /credential token hash namespace conflict/,
+  );
+  assert.throws(
+    () => db.prepare(`
+      UPDATE service_credentials SET token_hash=? WHERE id=?
+    `).run('device-token-hash', 'namespace-service'),
+    /credential token hash namespace conflict/,
+  );
+});
+
+test('refuses a legacy record ID with a hidden NUL suffix without changing or exposing it', t => {
   const db = new DatabaseSync(':memory:');
   t.after(() => db.close());
   migrateDatabase(db);
   db.exec(`
     DROP TRIGGER records_protocol_guard_insert;
     DROP TRIGGER records_protocol_guard_update;
-    DELETE FROM schema_migrations WHERE version=9;
+    DROP TRIGGER devices_token_hash_namespace_insert;
+    DROP TRIGGER devices_token_hash_namespace_update;
+    DROP TRIGGER service_credentials_token_hash_namespace_insert;
+    DROP TRIGGER service_credentials_token_hash_namespace_update;
+    DROP TRIGGER attachment_stage_usage_insert;
+    DROP TRIGGER attachment_stage_usage_update;
+    DROP TRIGGER attachment_stage_usage_delete;
+    DROP TABLE attachment_stage_usage;
+    DROP TABLE attachment_stages;
+    ALTER TABLE mutations DROP COLUMN response;
+    ALTER TABLE mutations DROP COLUMN owner_token_hash;
+    ALTER TABLE mutations DROP COLUMN mutation_kind;
+    DELETE FROM schema_migrations WHERE version IN (9,10,11);
   `);
-  const invalidId = 'x'.repeat(129);
+  const invalidId = 'valid-prefix\0hidden-suffix';
   db.prepare(`
     INSERT INTO records(kind,id,note_id,envelope,deleted,revision)
     VALUES('note',?,NULL,'{"ciphertext":"preserve-me"}',0,1)
@@ -237,7 +369,9 @@ test('guards record protocol identities and metadata below the HTTP layer', t =>
   for (const values of [
     ['note', 'b'.repeat(129), null, '{}', 0, 2],
     ['note', 'bad.dot', null, '{}', 0, 2],
+    ['note', 'nul\0suffix', null, '{}', 0, 2],
     ['attachment', 'file-one', 'bad.owner', '{}', 0, 2],
+    ['attachment', 'file-two', 'owner\0suffix', '{}', 0, 2],
     ['note', 'note-with-owner', 'owner', '{}', 0, 2],
     ['note', 'bad-deleted', null, '{}', 2, 2],
     ['note', 'bad-revision', null, '{}', 0, 0],
@@ -278,7 +412,19 @@ test('upgrades schema v6 lineage, storage accounting, and record guards, then re
     ALTER TABLE mutations DROP COLUMN created_at;
     DROP INDEX devices_approver;
     ALTER TABLE devices DROP COLUMN approved_by_device_id;
-    DELETE FROM schema_migrations WHERE version IN (7,8,9);
+    DROP TRIGGER devices_token_hash_namespace_insert;
+    DROP TRIGGER devices_token_hash_namespace_update;
+    DROP TRIGGER service_credentials_token_hash_namespace_insert;
+    DROP TRIGGER service_credentials_token_hash_namespace_update;
+    DROP TRIGGER attachment_stage_usage_insert;
+    DROP TRIGGER attachment_stage_usage_update;
+    DROP TRIGGER attachment_stage_usage_delete;
+    DROP TABLE attachment_stage_usage;
+    DROP TABLE attachment_stages;
+    ALTER TABLE mutations DROP COLUMN response;
+    ALTER TABLE mutations DROP COLUMN owner_token_hash;
+    ALTER TABLE mutations DROP COLUMN mutation_kind;
+    DELETE FROM schema_migrations WHERE version IN (7,8,9,10,11);
   `);
   db.prepare('INSERT INTO devices(id,name,token_hash) VALUES(?,?,?)').run(
     'v6-device',
@@ -303,7 +449,7 @@ test('upgrades schema v6 lineage, storage accounting, and record guards, then re
   db.close();
 
   db = new DatabaseSync(path);
-  assert.equal(migrateDatabase(db), 9);
+  assert.equal(migrateDatabase(db), 11);
   assert.deepEqual(
     { ...db.prepare(`
       SELECT id,name,approved_by_device_id
@@ -509,6 +655,8 @@ test('reopening a current database is idempotent', t => {
       { version: 7, name: 'paired-device-approver-lineage' },
       { version: 8, name: 'record-storage-accounting-and-mutation-retention' },
       { version: 9, name: 'protocol-record-identity-guards' },
+      { version: 10, name: 'credential-hash-namespace-guards' },
+      { version: 11, name: 'atomic-note-attachment-bundles' },
     ],
   );
 });
@@ -585,7 +733,7 @@ test('refuses to open a database created by a newer server schema', t => {
   const db = new DatabaseSync(':memory:');
   t.after(() => db.close());
   migrateDatabase(db);
-  db.prepare('INSERT INTO schema_migrations(version,name) VALUES(?,?)').run(10, 'future-schema');
+  db.prepare('INSERT INTO schema_migrations(version,name) VALUES(?,?)').run(12, 'future-schema');
   db.prepare('INSERT INTO instance(id,initialized) VALUES(?,?)').run('untouched-instance', 1);
 
   assert.throws(() => migrateDatabase(db), UnsupportedServerSchemaError);

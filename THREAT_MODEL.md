@@ -29,7 +29,7 @@ The system has four main parts:
 | Local edits | Stored locally before normal remote synchronization |
 | Concurrent record writes | Optimistic revisions detect stale writes; callers must preserve or surface conflicts |
 | Recovery | A recovery kit restores the vault key; the separate operator token authorizes a replacement relay credential |
-| Relay storage exhaustion | Atomic encrypted-byte, record-count, and credential-registry ceilings fail writes closed; bounded mutation receipts retain recent replay results |
+| Relay storage exhaustion | Atomic encrypted-byte, record-count, and credential-registry ceilings fail writes closed; incomplete attachment stages consume the same count and byte budgets and expire; bounded mutation receipts retain recent replay results |
 
 These guarantees depend on current, authentic client code, uncompromised client
 devices, sound key storage, and correct deployment.
@@ -44,6 +44,8 @@ may inspect everything it stores or receives. It can see:
 - the relay instance identifier and whether setup is complete;
 - record kinds and identifiers, note-to-attachment relationships, ciphertext
   lengths, revisions, tombstones, timing, and access patterns;
+- temporary attachment-stage identifiers, ownership, ciphertext lengths,
+  expiry times, and intended note relationships;
 - device and service-credential names and lifecycle metadata;
 - pairing state; and
 - network metadata and anything recorded by reverse-proxy logs.
@@ -89,9 +91,10 @@ are administrative: they can approve devices and manage service credentials.
 A provisioned agent bundle contains a scoped service credential and the same
 vault key. A read-only service credential can sync and download encrypted
 records but cannot mutate records or use administrative endpoints. A read-write
-service credential can also mutate note and attachment records; neither scope
-can administer devices, pairings, or credentials. Existing credentials created
-before scopes were introduced retain read-write authority.
+service credential can also mutate note records and stage/finalize encrypted
+attachments; neither scope can administer devices, pairings, or credentials.
+Existing credentials created before scopes were introduced retain read-write
+authority.
 
 Scope limits relay operations, not decryption. Every service bundle can decrypt
 the entire vault, retain plaintext, and inspect every label. The relay cannot
@@ -238,6 +241,27 @@ which is not included in the HTTP request.
 
 - Multi-device sync is asynchronous optimistic concurrency, not live
   collaborative editing or a transactional distributed database.
+- Creating attachments uses a bounded two-phase relay mutation. The client
+  first uploads context-bound encrypted attachment envelopes under one
+  route-safe mutation ID. Each stage is owned by the exact credential hash,
+  immutable for that mutation and attachment ID, and absent from public change
+  and download routes. The client then submits the non-deleted note envelope,
+  its optimistic base revision, and an exact sorted unique stage manifest.
+  Under one serialized SQLite transaction the relay reauthenticates the
+  credential, validates the note revision and stages, assigns deterministic
+  consecutive attachment revisions, and assigns the immediately following
+  revision to the note. A stale note or attachment-ID collision publishes no
+  row. Thus another device may see the entire committed revision sequence or
+  none of it, but it can still receive that sequence later through ordinary
+  asynchronous sync.
+- A successful compound mutation stores a credential-bound, domain-separated
+  receipt before removing its stages. Retrying the same canonical request after
+  a lost final response returns the original attachment and note revisions;
+  reusing its mutation ID with another credential or payload conflicts.
+  Receipt count and retention remain finite, so this replay guarantee is
+  bounded. Direct creation of a new live attachment through the legacy record
+  route fails with HTTP 428 `compound_mutation_required` after checking for a
+  prior legacy receipt; existing tombstones remain retryable.
 - Removing an attachment commits the note-without-attachment and its prior
   attachment snapshot to the local note outbox atomically before any local
   bytes can be deleted. Sync derives the deletion intent from that durable
@@ -263,12 +287,24 @@ which is not included in the HTTP request.
   erasure from SSDs, backups, logs, browser storage, or other devices.
 - The relay limits the total serialized encrypted-envelope bytes, total record
   rows, attachment rows, device rows, service-credential rows, and mutation
-  receipts. A write that would increase an exceeded record budget fails
-  atomically; storage-reducing replacements remain available for recovery.
-  Record and attachment counts include tombstones because deleting them without
-  per-device acknowledgement could resurrect stale data. Device and
-  service-credential counts include revoked rows so lineage and audit history
-  remain available.
+  receipts. Live records and incomplete attachment stages share the byte,
+  record-count, and attachment-count budgets. A write that would increase an
+  exceeded record budget fails atomically; storage-reducing replacements remain
+  available for recovery. Record and attachment counts include tombstones
+  because deleting them without per-device acknowledgement could resurrect
+  stale data. Device and service-credential counts include revoked rows so
+  lineage and audit history remain available.
+- Incomplete encrypted attachment stages expire after ten minutes of bundle
+  inactivity by default; operators may configure a positive inactivity window
+  up to one day with `UNKEEP_ATTACHMENT_STAGE_TTL_MS`. Stage creation and exact
+  replay refresh every stage owned by that credential and bundle together, but
+  each bundle is capped at 1,000 stages and no continuously retained stage epoch
+  survives more than one day from its first stage. After full expiry, a later
+  retry may restage a fresh epoch. Expiry and terminal conflict cleanup update
+  stage accounting atomically. A quota failure can retain an otherwise valid
+  stage until expiry so a bounded retry is possible. These limits bound
+  persistent abandoned-stage growth but do not prevent an authorized client
+  from occupying the configured capacity until expiry.
 - Relay routes and SQLite guards enforce the same bounded record identities as
   clients. An upgrade refuses a legacy database containing an unusable record
   identity without deleting or printing the ciphertext row; operators must

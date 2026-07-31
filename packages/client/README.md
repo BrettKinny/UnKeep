@@ -18,7 +18,55 @@ change. Surface that metadata to the operator. `getQuarantinedRecords()`
 returns the durable outstanding set, and a later valid revision clears its
 entry. Quarantine metadata never contains plaintext or raw exception text.
 
-Writes use optimistic record revisions and durable mutation IDs. If a response is lost after the relay accepts a mutation, the client replays the exact stored ciphertext and mutation ID before sending a newer write for that record.
+Writes use optimistic record revisions and durable mutation IDs. If a response
+is lost after the relay accepts a mutation, the client replays the exact stored
+ciphertext and mutation ID before sending a newer write for that record.
+
+Create a note with new attachments through
+`commitNoteWithAttachments(note, uploads)`, preferably using each upload's
+reusable async `loadBytes` callback. The SDK hashes and encrypts attachments
+sequentially, durably retains at most one in-flight ciphertext payload, and
+publishes the sorted attachment set plus note in one relay transaction. Keep
+the caller's attachment generations and note outbox durable until the method
+returns a `CompoundCommitHandle`. Confirm only local generations whose bytes
+match the handle's `contentHash`, compare-clear the exact note outbox, then call
+`completeCompoundCommit(handle)`.
+
+On restart, `pendingCompoundCommits()` discovers every accepted handle even if
+the caller already cleared its outbox. `resumePendingCompoundCommit(noteId,
+uploads?)` resumes an existing uncommitted bundle from its exact persisted
+payload and needs loaders only for stages whose ciphertext was never stored.
+If those source bytes are irrecoverably gone,
+`cancelPendingCompoundCommit(noteId)` can abandon only a pre-finalization
+bundle; it deliberately refuses finalizing or accepted mutations. Callers must
+serialize ordinary and compound writes to the same note. Do not create a new
+live attachment with `uploadAttachment` followed by `push`: protocol 3 requires
+the compound path.
+
+Pending mutations are bound to the credential that encrypted and first sent
+them. After credential replacement, use
+`resumePendingMutationAfterCredentialChange(kind, id)` or
+`resumePendingCompoundCommitAfterCredentialChange(noteId, uploads?)`. These
+methods authenticate the current credential to the same vault and replay the
+exact stored payload. Every failed authentication or write preserves the old
+retry root. If an authenticated ordinary-note replay returns
+`record_conflict`, call `rebasePendingNoteAfterCredentialChange(note)` to
+atomically replace the proven-stale root with a complete freshly encrypted
+mutation only after pulling, merging, and acknowledging that exact
+`currentRevision` or a newer revision of the same note; a crash cannot fall
+between deletion and replacement. The method rejects with
+`PendingMutationRebaseRequiresPullError` instead of using a conflict revision
+the caller has not applied. If the note advances while pulling, merge and
+acknowledge that newer revision; the replacement uses the newer acknowledged
+base.
+`abandonPendingMutationAfterCredentialChange(kind, id)` is the lower-level
+compare-bound alternative and returns true only after this SDK instance has
+received that exact authenticated conflict. The caller must already retain the
+desired state and must not call it after authentication or authorization
+failures. Call `abandonPendingCompoundAfterCredentialChange(noteId)` only after
+a write-capable replacement receives a terminal stage conflict and the
+application still has a durable note outbox plus the exact attachment bytes
+needed to rebuild with fresh attachment IDs.
 
 Attachment IDs are content-record identities, not mutable filenames. Upload
 each new or replacement byte sequence under a fresh ID, update the owning

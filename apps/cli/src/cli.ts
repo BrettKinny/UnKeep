@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import { link, lstat, open, rename, unlink } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve } from 'node:path';
@@ -7,10 +8,12 @@ import {
   DeviceKeyStore,
   EncryptedSync,
   MemoryClientStorage,
+  PendingMutationCredentialMismatchError,
   RelayClient,
   RelaySessionStore,
   resumePairingFinalization,
   waitForPairing,
+  type CompoundCommitHandle,
   type RelaySession,
 } from '@unkeep/client';
 import {
@@ -36,6 +39,7 @@ import {
   stageClipFile,
   stagedClipFileName,
   sweepStagedClips,
+  validateStagedClipFileName,
   type StagedClip,
 } from './clipStaging.js';
 import { JsonFileClientStorage } from './storage.js';
@@ -121,7 +125,7 @@ interface ProvisioningBundle {
 }
 
 interface PendingClipIntent {
-  version: 1;
+  version: 1 | 2;
   attachment: NoteAttachment;
   staged: StagedClip;
   timestamp: number;
@@ -150,6 +154,70 @@ const TERMINAL_UNSAFE_GLOBAL_PATTERN = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isRecordConflict(error: unknown): error is RecordConflictError {
+  if (error instanceof RecordConflictError) return true;
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as Partial<RecordConflictError>;
+  return candidate.name === 'RecordConflictError'
+    && candidate.status === 409
+    && candidate.code === 'record_conflict'
+    && Number.isSafeInteger(candidate.currentRevision)
+    && candidate.currentRevision! >= 0;
+}
+
+function isPendingCredentialMismatch(
+  error: unknown,
+): error is PendingMutationCredentialMismatchError {
+  return error instanceof PendingMutationCredentialMismatchError
+    || (
+      !!error
+      && typeof error === 'object'
+      && (error as { name?: unknown }).name === 'PendingMutationCredentialMismatchError'
+    );
+}
+
+function isTerminalRelayRejection(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { status?: unknown; code?: unknown };
+  return Number.isSafeInteger(candidate.status)
+    && Number(candidate.status) >= 400
+    && Number(candidate.status) < 500
+    && typeof candidate.code === 'string'
+    && candidate.code.length > 0;
+}
+
+function isForeignCompoundRebuildRejection(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { status?: unknown; code?: unknown };
+  return candidate.status === 409
+    && typeof candidate.code === 'string'
+    && new Set([
+      'attachment_id_unavailable',
+      'attachment_stage_conflict',
+      'attachment_stage_missing',
+      'mutation_conflict',
+      'record_conflict',
+    ]).has(candidate.code);
+}
+
+async function pushWithCredentialHandoff(
+  vault: ConnectedVault,
+  note: Note,
+): Promise<number> {
+  try {
+    return await vault.sync.push(note);
+  } catch (error) {
+    if (!isPendingCredentialMismatch(error)) throw error;
+    try {
+      await vault.sync.resumePendingMutationAfterCredentialChange('note', note.id);
+    } catch (handoffError) {
+      if (!isRecordConflict(handoffError)) throw handoffError;
+      return vault.sync.rebasePendingNoteAfterCredentialChange(note);
+    }
+    return vault.sync.push(note);
+  }
 }
 
 function escapeTerminalControls(value: string): string {
@@ -288,7 +356,14 @@ async function connectedVault(context: CommandContext): Promise<ConnectedVault> 
     deviceId,
     credential: requireValue(configuration.credential, 'Missing device credential'),
   };
-  return { session, masterKey, sync: new EncryptedSync(session, masterKey, context.storage) };
+  const connected = {
+    session,
+    masterKey,
+    sync: new EncryptedSync(session, masterKey, context.storage),
+  };
+  await recoverCommittedClipHandles(connected, context.storage, context.stderr);
+  await recoverPendingClipCompound(connected, context.storage, context.stderr);
+  return connected;
 }
 
 function isNote(value: unknown): value is Note {
@@ -405,6 +480,13 @@ function clipboardAttachments(notes: Record<string, Note>): NoteAttachment[] {
   return cachedNote(notes, CLIPBOARD_NOTE_ID)?.images ?? [];
 }
 
+function sameAttachment(left: NoteAttachment, right: NoteAttachment): boolean {
+  return left.id === right.id
+    && left.name === right.name
+    && left.mimeType === right.mimeType
+    && left.size === right.size;
+}
+
 function pendingClipKey(instanceId: string): string {
   return PENDING_CLIP_PREFIX + encodeURIComponent(instanceId);
 }
@@ -416,7 +498,7 @@ function pendingClipIntent(value: unknown): PendingClipIntent {
   const candidate = value as Partial<PendingClipIntent>;
   if (
     Object.keys(value).sort().join(',') !== 'attachment,staged,timestamp,version'
-    || candidate.version !== 1
+    || (candidate.version !== 1 && candidate.version !== 2)
     || !candidate.attachment
     || !candidate.staged
     || typeof candidate.timestamp !== 'number'
@@ -442,19 +524,26 @@ function pendingClipIntent(value: unknown): PendingClipIntent {
     throw new Error('Stored interrupted clip state is invalid');
   }
   const attachment = normalized.images?.[0];
+  let stagedFileName: string;
+  try {
+    stagedFileName = validateStagedClipFileName(candidate.staged.fileName);
+  } catch {
+    throw new Error('Stored interrupted clip state is invalid');
+  }
   if (
     !attachment
-    || candidate.staged.fileName !== stagedClipFileName(attachment.id)
+    || (candidate.version === 1
+      && stagedFileName !== stagedClipFileName(attachment.id))
     || candidate.staged.size !== attachment.size
     || !/^[0-9a-f]{64}$/.test(candidate.staged.sha256)
   ) {
     throw new Error('Stored interrupted clip state is invalid');
   }
   return {
-    version: 1,
+    version: candidate.version,
     attachment,
     staged: {
-      fileName: candidate.staged.fileName,
+      fileName: stagedFileName,
       sha256: candidate.staged.sha256,
       size: candidate.staged.size,
     },
@@ -528,72 +617,166 @@ async function removeCompletedClipStage(
   }
 }
 
+function onlyClipRevision(handle: CompoundCommitHandle): CompoundCommitHandle['attachmentRevisions'][number] {
+  if (handle.noteId !== CLIPBOARD_NOTE_ID || handle.attachmentRevisions.length !== 1) {
+    throw new Error('Stored completed clip state is invalid');
+  }
+  return handle.attachmentRevisions[0]!;
+}
+
+async function recoverCommittedClipHandles(
+  vault: ConnectedVault,
+  storage: JsonFileClientStorage,
+  diagnostics?: CliOutput,
+): Promise<void> {
+  const handles = await vault.sync.pendingCompoundCommits();
+  for (const handle of handles) {
+    if (handle.noteId !== CLIPBOARD_NOTE_ID) continue;
+    const revision = onlyClipRevision(handle);
+    const intentKey = pendingClipKey(vault.session.instanceId);
+    const storedIntent = await storage.get<unknown>(intentKey);
+    const notes = await loadNotes(storage, vault.session.instanceId);
+    const existing = cachedNote(notes, CLIPBOARD_NOTE_ID);
+    let attachment: NoteAttachment;
+    let stagedFileName = stagedClipFileName(revision.id);
+
+    if (storedIntent !== null) {
+      const intent = pendingClipIntent(storedIntent);
+      if (
+        intent.attachment.id !== revision.id
+        || intent.staged.sha256 !== revision.contentHash
+      ) {
+        throw new Error('Stored completed clip does not match its pending intent');
+      }
+      const cached = existing?.images?.find(candidate => candidate.id === revision.id);
+      if (cached && !sameAttachment(cached, intent.attachment)) {
+        throw new Error('Stored completed clip does not match the local note cache');
+      }
+      attachment = intent.attachment;
+      stagedFileName = intent.staged.fileName;
+      const note = clipboardNote(existing, attachment, intent.timestamp);
+      notes[note.id] = note;
+      await storage.setAndDelete(
+        { [NOTES_PREFIX + vault.session.instanceId]: notes },
+        [intentKey],
+      );
+    } else {
+      const cached = existing?.images?.find(candidate => candidate.id === revision.id);
+      if (!cached) {
+        throw new Error('Stored completed clip is absent from the local note cache');
+      }
+      const remoteBytes = await vault.sync.downloadAttachment(CLIPBOARD_NOTE_ID, cached);
+      const contentHash = createHash('sha256').update(remoteBytes).digest('hex');
+      if (contentHash !== revision.contentHash) {
+        throw new Error('Stored completed clip content does not match the relay attachment');
+      }
+      attachment = cached;
+    }
+
+    if (!await vault.sync.completeCompoundCommit(handle)) {
+      throw new Error('Stored completed clip changed during local recovery');
+    }
+    await removeCompletedClipStage(storage, stagedFileName, diagnostics);
+    diagnostics?.write(`Recovered interrupted clip ${attachment.id}.\n`);
+  }
+}
+
+async function recoverPendingClipCompound(
+  vault: ConnectedVault,
+  storage: JsonFileClientStorage,
+  diagnostics?: CliOutput,
+): Promise<void> {
+  const intentKey = pendingClipKey(vault.session.instanceId);
+  const storedIntent = await storage.get<unknown>(intentKey);
+  if (storedIntent === null) return;
+  const intent = pendingClipIntent(storedIntent);
+  let handle: CompoundCommitHandle | null;
+  try {
+    handle = await vault.sync.resumePendingCompoundCommit(CLIPBOARD_NOTE_ID, [{
+      attachment: intent.attachment,
+      loadBytes: () => readStagedClip(storage, intent.staged),
+    }]);
+  } catch (error) {
+    if (isPendingCredentialMismatch(error)) {
+      // Do not destroy another credential's exact retry state until this
+      // invocation has authenticated and completed its normal pull.
+      return;
+    }
+    if (isTerminalRelayRejection(error)) {
+      // The SDK has already removed the exact terminally rejected root. Let
+      // this command's normal sync pull/merge and rebuild the retained intent.
+      return;
+    }
+    if (
+      !message(error).startsWith('Interrupted clip staging file ')
+      || !await vault.sync.cancelPendingCompoundCommit(CLIPBOARD_NOTE_ID)
+    ) throw error;
+    return;
+  }
+  if (!handle) return;
+  const revision = onlyClipRevision(handle);
+  if (
+    revision.id !== intent.attachment.id
+    || revision.contentHash !== intent.staged.sha256
+  ) {
+    throw new Error('Stored completed clip does not match its pending intent');
+  }
+
+  const notes = await loadNotes(storage, vault.session.instanceId);
+  const existing = cachedNote(notes, CLIPBOARD_NOTE_ID);
+  const cached = existing?.images?.find(candidate => candidate.id === revision.id);
+  if (cached && !sameAttachment(cached, intent.attachment)) {
+    throw new Error('Stored completed clip does not match the local note cache');
+  }
+  const note = clipboardNote(existing, intent.attachment, intent.timestamp);
+  notes[note.id] = note;
+  await storage.setAndDelete(
+    { [NOTES_PREFIX + vault.session.instanceId]: notes },
+    [intentKey],
+  );
+  if (!await vault.sync.completeCompoundCommit(handle)) {
+    throw new Error('Stored completed clip changed during local recovery');
+  }
+  await removeCompletedClipStage(storage, intent.staged.fileName, diagnostics);
+  diagnostics?.write(`Recovered interrupted clip ${intent.attachment.id}.\n`);
+}
+
 async function recoverInterruptedClip(
   vault: ConnectedVault,
   storage: JsonFileClientStorage,
   diagnostics?: CliOutput,
+  announceRecovery = true,
 ): Promise<NoteAttachment | undefined> {
   const key = pendingClipKey(vault.session.instanceId);
   const stored = await storage.get<unknown>(key);
   if (stored === null) return undefined;
-  const intent = pendingClipIntent(stored);
+  let intent = pendingClipIntent(stored);
   let notes = await loadNotes(storage, vault.session.instanceId);
   let existing = cachedNote(notes, CLIPBOARD_NOTE_ID);
+  const reidentifyIntent = async (): Promise<void> => {
+    intent = {
+      ...intent,
+      version: 2,
+      attachment: {
+        ...intent.attachment,
+        id: globalThis.crypto.randomUUID(),
+      },
+    };
+    await storage.set(key, intent);
+  };
 
   if (existing?.images?.some(value => value.id === intent.attachment.id)) {
+    // A successful pull may have observed a final response that was lost
+    // under a replaced credential. The public attachment is now reconciled,
+    // so its foreign local replay root can be retired explicitly.
+    await vault.sync.abandonPendingCompoundAfterCredentialChange(
+      CLIPBOARD_NOTE_ID,
+    );
     await storage.delete(key);
     await removeCompletedClipStage(storage, intent.staged.fileName, diagnostics);
-    diagnostics?.write(`Recovered interrupted clip ${intent.attachment.id}.\n`);
+    if (announceRecovery) diagnostics?.write(`Recovered interrupted clip ${intent.attachment.id}.\n`);
     return intent.attachment;
   }
-
-  let bytes: Uint8Array<ArrayBuffer>;
-  try {
-    bytes = await readStagedClip(storage, intent.staged);
-  } catch {
-    // A lost note response may have left an SDK pending mutation that still
-    // references this attachment. Flush it, then publish the final note
-    // without the attachment before tombstoning the immutable attachment ID.
-    // This preserves the same final-note-before-delete invariant as ordinary
-    // attachment removal.
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      notes = await loadNotes(storage, vault.session.instanceId);
-      existing = cachedNote(notes, CLIPBOARD_NOTE_ID);
-      if (existing?.images?.some(value => value.id === intent.attachment.id)) {
-        await storage.delete(key);
-        await removeCompletedClipStage(storage, intent.staged.fileName, diagnostics);
-        diagnostics?.write(`Recovered interrupted clip ${intent.attachment.id}.\n`);
-        return intent.attachment;
-      }
-      const finalNote = clipboardNoteWithoutAttachment(
-        existing,
-        intent.attachment.id,
-        intent.timestamp,
-      );
-      try {
-        await vault.sync.push(finalNote);
-        notes[finalNote.id] = finalNote;
-        await saveNotes(storage, vault.session.instanceId, notes);
-        break;
-      } catch (error) {
-        if (!(error instanceof RecordConflictError) || attempt === 2) throw error;
-        await syncNotes(vault, storage, diagnostics, false);
-      }
-    }
-    await vault.sync.deleteAttachment(CLIPBOARD_NOTE_ID, intent.attachment);
-    await storage.delete(key);
-    await removeCompletedClipStage(storage, intent.staged.fileName, diagnostics);
-    diagnostics?.write(
-      `Discarded interrupted clip ${intent.attachment.id} because its private staging file was missing or changed.\n`,
-    );
-    return undefined;
-  }
-
-  await vault.sync.uploadAttachment(
-    CLIPBOARD_NOTE_ID,
-    intent.attachment,
-    bytes,
-  );
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     notes = await loadNotes(storage, vault.session.instanceId);
@@ -601,24 +784,114 @@ async function recoverInterruptedClip(
     if (existing?.images?.some(value => value.id === intent.attachment.id)) {
       await storage.delete(key);
       await removeCompletedClipStage(storage, intent.staged.fileName, diagnostics);
-      diagnostics?.write(`Recovered interrupted clip ${intent.attachment.id}.\n`);
+      if (announceRecovery) diagnostics?.write(`Recovered interrupted clip ${intent.attachment.id}.\n`);
       return intent.attachment;
     }
 
     const note = clipboardNote(existing, intent.attachment, intent.timestamp);
+    const upload = {
+      attachment: intent.attachment,
+      loadBytes: () => readStagedClip(storage, intent.staged),
+    } as const;
     try {
-      await vault.sync.push(note);
+      let handle: CompoundCommitHandle | null;
+      try {
+        handle = await vault.sync.resumePendingCompoundCommit(note.id, [upload]);
+      } catch (error) {
+        if (!isPendingCredentialMismatch(error)) throw error;
+        try {
+          handle = await vault.sync.resumePendingCompoundCommitAfterCredentialChange(
+            note.id,
+            [upload],
+          );
+        } catch (handoffError) {
+          if (!isForeignCompoundRebuildRejection(handoffError)) throw handoffError;
+          if (!await vault.sync.abandonPendingCompoundAfterCredentialChange(note.id)) {
+            throw handoffError;
+          }
+          await reidentifyIntent();
+          continue;
+        }
+      }
+      handle ??= await vault.sync.commitNoteWithAttachments(note, [upload]);
+      const revision = onlyClipRevision(handle);
+      if (
+        revision.id !== intent.attachment.id
+        || revision.contentHash !== intent.staged.sha256
+      ) {
+        throw new Error('Committed clip does not match its private staging snapshot');
+      }
       notes[note.id] = note;
       await storage.setAndDelete(
         { [NOTES_PREFIX + vault.session.instanceId]: notes },
         [key],
       );
+      if (!await vault.sync.completeCompoundCommit(handle)) {
+        throw new Error('Committed clip changed during local completion');
+      }
       await removeCompletedClipStage(storage, intent.staged.fileName, diagnostics);
-      diagnostics?.write(`Recovered interrupted clip ${intent.attachment.id}.\n`);
+      if (announceRecovery) diagnostics?.write(`Recovered interrupted clip ${intent.attachment.id}.\n`);
       return intent.attachment;
     } catch (error) {
-      if (!(error instanceof RecordConflictError) || attempt === 2) throw error;
-      await syncNotes(vault, storage, diagnostics, false);
+      if (isRecordConflict(error) && attempt < 2) {
+        await syncNotes(vault, storage, diagnostics, false);
+        continue;
+      }
+      if (isForeignCompoundRebuildRejection(error)) {
+        // A prior authenticated handoff may have crashed after retiring its
+        // foreign root but before persisting the replacement identity. The
+        // same reserved ID then fails under a fresh current-credential root.
+        // That terminal root is already gone; make the retained private bytes
+        // replayable under a new durable attachment identity.
+        await vault.sync.abandonPendingCompoundAfterCredentialChange(note.id);
+        await reidentifyIntent();
+        continue;
+      }
+      if (!message(error).startsWith('Interrupted clip staging file ')) throw error;
+
+      // If the exact encrypted payload was not durable before the private
+      // plaintext disappeared, abandon only that non-finalizing bundle. Any
+      // server-side stage remains unpublished and expires under the relay TTL.
+      const cancelled = await vault.sync.cancelPendingCompoundCommit(note.id);
+      if (!cancelled && await vault.sync.pendingCompoundCommit(note.id)) {
+        throw new Error('Interrupted clip was already committed but could not be reconciled');
+      }
+
+      // No live attachment exists: publish the final Clipboard note without
+      // the failed reference, and never call the legacy direct attachment PUT.
+      // Conflict retries merge concurrent Clipboard fields first.
+      let finalNote = clipboardNoteWithoutAttachment(
+        existing,
+        intent.attachment.id,
+        intent.timestamp,
+      );
+      for (let discardAttempt = 0; discardAttempt < 3; discardAttempt += 1) {
+        try {
+          await pushWithCredentialHandoff(vault, finalNote);
+          notes = await loadNotes(storage, vault.session.instanceId);
+          notes[finalNote.id] = finalNote;
+          await storage.setAndDelete(
+            { [NOTES_PREFIX + vault.session.instanceId]: notes },
+            [key],
+          );
+          await removeCompletedClipStage(storage, intent.staged.fileName, diagnostics);
+          diagnostics?.write(
+            `Discarded interrupted clip ${intent.attachment.id} because its private staging file was missing or changed.\n`,
+          );
+          return undefined;
+        } catch (discardError) {
+          if (!isRecordConflict(discardError) || discardAttempt === 2) {
+            throw discardError;
+          }
+          await syncNotes(vault, storage, diagnostics, false);
+          notes = await loadNotes(storage, vault.session.instanceId);
+          finalNote = clipboardNoteWithoutAttachment(
+            cachedNote(notes, CLIPBOARD_NOTE_ID),
+            intent.attachment.id,
+            intent.timestamp,
+          );
+        }
+      }
     }
   }
   throw new Error('Interrupted clip could not be reconciled');
@@ -947,7 +1220,7 @@ async function handlePut(context: CommandContext): Promise<void> {
   if (context.arguments.title !== undefined) note.title = context.arguments.title;
   if (context.arguments.labels.length) note.labels = requestedLabels;
 
-  await vault.sync.push(note);
+  await pushWithCredentialHandoff(vault, note);
   notes[id] = note;
   await saveNotes(context.storage, vault.session.instanceId, notes);
   if (context.arguments.json) writeJson(context.stdout, stableNote(note));
@@ -966,7 +1239,10 @@ async function handleDelete(context: CommandContext): Promise<void> {
   const existing = cachedNote(notes, id);
   if (!existing) throw new Error(`Note not found: ${id}`);
 
-  await vault.sync.push({ ...existing, deleted: true, updatedAt: context.now() });
+  await pushWithCredentialHandoff(
+    vault,
+    { ...existing, deleted: true, updatedAt: context.now() },
+  );
   delete notes[id];
   await saveNotes(context.storage, vault.session.instanceId, notes);
   if (context.arguments.json) writeJson(context.stdout, { id, deleted: true });
@@ -1023,7 +1299,7 @@ async function handleClip(context: CommandContext): Promise<void> {
     await removeStagedClip(context.storage, staged.fileName);
     throw error;
   }
-  await recoverInterruptedClip(vault, context.storage);
+  await recoverInterruptedClip(vault, context.storage, context.stderr, false);
 
   if (context.arguments.json) writeJson(context.stdout, stableAttachment(attachment));
   else context.stdout.write(`${terminalValue(context.stdout, attachment.id)}\n`);

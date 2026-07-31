@@ -19,6 +19,7 @@ const INVALID_RECORD_METADATA = `
   OR kind NOT IN ('note','attachment')
   OR typeof(id) <> 'text'
   OR length(id) NOT BETWEEN 1 AND 128
+  OR length(CAST(id AS BLOB)) <> length(id)
   OR id GLOB '*[^A-Za-z0-9_-]*'
   OR (
     kind='note'
@@ -29,6 +30,7 @@ const INVALID_RECORD_METADATA = `
     AND (
       typeof(note_id) <> 'text'
       OR length(note_id) NOT BETWEEN 1 AND 128
+      OR length(CAST(note_id AS BLOB)) <> length(note_id)
       OR note_id GLOB '*[^A-Za-z0-9_-]*'
     )
   )
@@ -39,13 +41,40 @@ const INVALID_RECORD_METADATA = `
   OR revision <= 0
 `;
 
-export function countProtocolInvalidRecords(db) {
-  const hasRecords = db.prepare(`
+function hasTable(db, name) {
+  return Boolean(db.prepare(`
     SELECT 1
     FROM sqlite_master
-    WHERE type='table' AND name='records'
-  `).get();
-  if (!hasRecords) return 0;
+    WHERE type='table' AND name=?
+  `).get(name));
+}
+
+function countCredentialHashAliases(db) {
+  if (!hasTable(db, 'devices') || !hasTable(db, 'service_credentials')) {
+    return 0;
+  }
+  return Number(db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM devices AS device
+    JOIN service_credentials AS service
+      ON service.token_hash=device.token_hash
+  `).get().count);
+}
+
+function assertNoCredentialHashAliases(db) {
+  const aliases = countCredentialHashAliases(db);
+  if (aliases === 0) return;
+  throw new Error(
+    'Database device and service credential registries contain '
+    + `${aliases} duplicate token hash`
+    + `${aliases === 1 ? '' : 'es'}; restore or repair the credential `
+    + 'registries with the previous server before upgrading. '
+    + 'No credential was changed.',
+  );
+}
+
+export function countProtocolInvalidRecords(db) {
+  if (!hasTable(db, 'records')) return 0;
   return Number(db.prepare(`
     SELECT COUNT(*) AS count
     FROM records
@@ -320,6 +349,144 @@ const SERVER_MIGRATIONS = Object.freeze([
       `);
     },
   }),
+  Object.freeze({
+    version: 10,
+    name: 'credential-hash-namespace-guards',
+    up(db) {
+      // Recheck while the migration's BEGIN IMMEDIATE lock is held, closing
+      // the interval between the startup audit and trigger installation.
+      assertNoCredentialHashAliases(db);
+      db.exec(`
+        CREATE TRIGGER devices_token_hash_namespace_insert
+        BEFORE INSERT ON devices
+        WHEN EXISTS (
+          SELECT 1
+          FROM service_credentials
+          WHERE token_hash=NEW.token_hash
+        )
+        BEGIN
+          SELECT RAISE(ABORT,'credential token hash namespace conflict');
+        END;
+        CREATE TRIGGER devices_token_hash_namespace_update
+        BEFORE UPDATE OF token_hash ON devices
+        WHEN EXISTS (
+          SELECT 1
+          FROM service_credentials
+          WHERE token_hash=NEW.token_hash
+        )
+        BEGIN
+          SELECT RAISE(ABORT,'credential token hash namespace conflict');
+        END;
+        CREATE TRIGGER service_credentials_token_hash_namespace_insert
+        BEFORE INSERT ON service_credentials
+        WHEN EXISTS (
+          SELECT 1
+          FROM devices
+          WHERE token_hash=NEW.token_hash
+        )
+        BEGIN
+          SELECT RAISE(ABORT,'credential token hash namespace conflict');
+        END;
+        CREATE TRIGGER service_credentials_token_hash_namespace_update
+        BEFORE UPDATE OF token_hash ON service_credentials
+        WHEN EXISTS (
+          SELECT 1
+          FROM devices
+          WHERE token_hash=NEW.token_hash
+        )
+        BEGIN
+          SELECT RAISE(ABORT,'credential token hash namespace conflict');
+        END;
+      `);
+    },
+  }),
+  Object.freeze({
+    version: 11,
+    name: 'atomic-note-attachment-bundles',
+    up(db) {
+      db.exec(`
+        ALTER TABLE mutations ADD COLUMN response TEXT;
+        ALTER TABLE mutations ADD COLUMN owner_token_hash TEXT;
+        ALTER TABLE mutations
+          ADD COLUMN mutation_kind TEXT NOT NULL DEFAULT 'record'
+          CHECK(mutation_kind IN ('record','note-bundle'));
+
+        CREATE TABLE attachment_stages (
+          bundle_mutation_id TEXT NOT NULL
+            CHECK(
+              length(bundle_mutation_id) BETWEEN 1 AND 128
+              AND length(CAST(bundle_mutation_id AS BLOB))
+                = length(bundle_mutation_id)
+              AND bundle_mutation_id NOT GLOB '*[^A-Za-z0-9_-]*'
+            ),
+          attachment_id TEXT NOT NULL UNIQUE
+            CHECK(
+              length(attachment_id) BETWEEN 1 AND 128
+              AND length(CAST(attachment_id AS BLOB))=length(attachment_id)
+              AND attachment_id NOT GLOB '*[^A-Za-z0-9_-]*'
+            ),
+          note_id TEXT NOT NULL
+            CHECK(
+              length(note_id) BETWEEN 1 AND 128
+              AND length(CAST(note_id AS BLOB))=length(note_id)
+              AND note_id NOT GLOB '*[^A-Za-z0-9_-]*'
+            ),
+          owner_token_hash TEXT NOT NULL
+            CHECK(
+              length(owner_token_hash)=64
+              AND owner_token_hash NOT GLOB '*[^0-9a-f]*'
+            ),
+          stage_hash TEXT NOT NULL UNIQUE
+            CHECK(
+              length(stage_hash)=64
+              AND stage_hash NOT GLOB '*[^0-9a-f]*'
+            ),
+          envelope TEXT NOT NULL,
+          envelope_bytes INTEGER NOT NULL CHECK(envelope_bytes > 0),
+          created_at INTEGER NOT NULL CHECK(created_at >= 0),
+          expires_at INTEGER NOT NULL CHECK(expires_at > created_at),
+          PRIMARY KEY(bundle_mutation_id,attachment_id)
+        ) WITHOUT ROWID;
+        CREATE INDEX attachment_stages_expiry
+          ON attachment_stages(expires_at);
+        CREATE INDEX attachment_stages_owner_bundle
+          ON attachment_stages(owner_token_hash,bundle_mutation_id,stage_hash);
+
+        CREATE TABLE attachment_stage_usage (
+          singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+          stage_count INTEGER NOT NULL CHECK(stage_count >= 0),
+          encrypted_bytes INTEGER NOT NULL CHECK(encrypted_bytes >= 0)
+        ) WITHOUT ROWID;
+        INSERT INTO attachment_stage_usage(
+          singleton,stage_count,encrypted_bytes
+        ) VALUES(1,0,0);
+        CREATE TRIGGER attachment_stage_usage_insert
+        AFTER INSERT ON attachment_stages
+        BEGIN
+          UPDATE attachment_stage_usage
+          SET stage_count=stage_count+1,
+            encrypted_bytes=encrypted_bytes+NEW.envelope_bytes
+          WHERE singleton=1;
+        END;
+        CREATE TRIGGER attachment_stage_usage_update
+        AFTER UPDATE OF envelope_bytes ON attachment_stages
+        BEGIN
+          UPDATE attachment_stage_usage
+          SET encrypted_bytes=encrypted_bytes
+            + NEW.envelope_bytes-OLD.envelope_bytes
+          WHERE singleton=1;
+        END;
+        CREATE TRIGGER attachment_stage_usage_delete
+        AFTER DELETE ON attachment_stages
+        BEGIN
+          UPDATE attachment_stage_usage
+          SET stage_count=stage_count-1,
+            encrypted_bytes=encrypted_bytes-OLD.envelope_bytes
+          WHERE singleton=1;
+        END;
+      `);
+    },
+  }),
 ]);
 
 export const CURRENT_SERVER_SCHEMA_VERSION = SERVER_MIGRATIONS.at(-1)?.version ?? 0;
@@ -364,6 +531,8 @@ export function migrateDatabase(db) {
       throw new Error(`Invalid database migration history at version ${actual.version}`);
     }
   }
+
+  assertNoCredentialHashAliases(db);
 
   for (const migration of SERVER_MIGRATIONS) {
     if (migration.version <= latest) continue;

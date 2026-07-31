@@ -47,9 +47,15 @@ collaboration.
 - Added optimistic record revisions, durable idempotent mutation replay,
   conflict preservation, poison-record quarantine, and vault-scoped local
   state.
+- Upgraded the relay to protocol 3: new attachment ciphertext is staged
+  privately and the exact sorted attachment manifest plus note is published in
+  one atomic mutation. Legacy direct creation now fails with an upgrade hint.
 - Made attachment staging, note/outbox writes, import leases and receipts,
   tombstone application, and sync acknowledgement durable across interruption
   and concurrent browser tabs.
+- Made browser and CLI compound mutations recover exact encrypted payloads,
+  content hashes, and completion handles across lost responses, conflicts,
+  process restarts, and credential replacement.
 - Clarified the supported `0.x` package and CLI boundaries; legacy Git, S3,
   local Markdown, and selectable-adapter exports remain experimental.
 - Improved mobile layout, themes, application icons, links in note text,
@@ -82,8 +88,16 @@ collaboration.
   revocation and incident response.
 - Serialized credential revalidation with record writes and credential
   issuance so revocation wins against already-started slow requests.
+- Bound durable retry roots to the exact credential that created them. A
+  replacement credential must authenticate to the same vault and explicitly
+  replay the exact pending ciphertext; invalid and read-only credentials cannot
+  erase another credential's retry state.
 - Required optimistic base revisions, made attachment identifiers immutable,
   and atomically cascaded note tombstones to their attachments.
+- Bounded private attachment stages by shared storage quotas, a ten-minute
+  inactivity window, a 1,000-stage bundle limit, and a maximum one-day
+  continuous retention epoch while refreshing active sequential uploads
+  together.
 - Committed attachment removal and its predecessor snapshot to the local note
   outbox before destructive work, retained the bytes through note and
   attachment acknowledgement, and made crash/restart replay preserve the
@@ -106,7 +120,8 @@ collaboration.
   remote note cannot be decrypted or normalized, allowing later valid changes
   to continue without storing plaintext or raw exception text.
 - Made CLI clipboard uploads use bounded reads, a private durable staging
-  intent, one replay-stable attachment ID, conflict-aware note merging, and
+  intent, credential-aware exact replay, conflict-aware note merging, fresh
+  identities when an old credential still reserves a stage, and
   final-note-before-delete cleanup after interruption.
 - Isolated npm trusted-publisher OIDC from the image-attestation job with a
   separate protected release environment and a structural workflow regression
