@@ -523,9 +523,9 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
-          npm publish --registry=https://registry.npmjs.org/ --dry-run --access public --tag next "release-assets/unkeep-core-$VERSION.tgz"
-          npm publish --registry=https://registry.npmjs.org/ --dry-run --access public --tag next "release-assets/unkeep-client-$VERSION.tgz"
-          npm publish --registry=https://registry.npmjs.org/ --dry-run --access public --tag next "release-assets/unkeep-cli-$VERSION.tgz"
+          npm publish --registry=https://registry.npmjs.org/ --dry-run --access public --tag next "./release-assets/unkeep-core-$VERSION.tgz"
+          npm publish --registry=https://registry.npmjs.org/ --dry-run --access public --tag next "./release-assets/unkeep-client-$VERSION.tgz"
+          npm publish --registry=https://registry.npmjs.org/ --dry-run --access public --tag next "./release-assets/unkeep-cli-$VERSION.tgz"
 
       - name: Record exact npm artifact digests
         id: npm_hashes
@@ -1976,9 +1976,9 @@ jobs:
               "$tarball"
           }
 
-          publish_package @unkeep/core "npm-artifacts/unkeep-core-$VERSION.tgz"
-          publish_package @unkeep/client "npm-artifacts/unkeep-client-$VERSION.tgz"
-          publish_package @unkeep/cli "npm-artifacts/unkeep-cli-$VERSION.tgz"
+          publish_package @unkeep/core "./npm-artifacts/unkeep-core-$VERSION.tgz"
+          publish_package @unkeep/client "./npm-artifacts/unkeep-client-$VERSION.tgz"
+          publish_package @unkeep/cli "./npm-artifacts/unkeep-cli-$VERSION.tgz"
 
       - name: Verify the npm preview tags are coherent
         run: |

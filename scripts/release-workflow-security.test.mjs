@@ -117,6 +117,35 @@ test('release documentation configures the isolated npm identity', () => {
   );
 });
 
+test('npm publication treats every tarball as an explicit local path', () => {
+  for (const name of ['core', 'client', 'cli']) {
+    assert.match(
+      workflow,
+      new RegExp(
+        `npm publish [^\\n]*"\\./release-assets/unkeep-${name}-`
+        + '\\$VERSION\\.tgz"',
+      ),
+      `dry-run publication must use a local ${name} tarball path`,
+    );
+    assert.match(
+      workflow,
+      new RegExp(
+        `publish_package @unkeep/${name} `
+        + `"\\./npm-artifacts/unkeep-${name}-\\$VERSION\\.tgz"`,
+      ),
+      `trusted publication must use a local ${name} tarball path`,
+    );
+    assert.match(
+      releasingGuide,
+      new RegExp(
+        `\\./release-assets/unkeep-${name}-`
+        + '0\\.0\\.0-bootstrap\\.0\\.tgz',
+      ),
+      `bootstrap documentation must use a local ${name} tarball path`,
+    );
+  }
+});
+
 test('every external write requires the manually reviewed immutable-release guard', () => {
   const jobs = workflowJobs(workflow);
   const externalWriteJobs = [
