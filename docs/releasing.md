@@ -232,11 +232,11 @@ pnpm --filter @unkeep/cli pack --pack-destination "$PWD/release-assets"
 
 npm login
 npm publish --registry=https://registry.npmjs.org/ --access public --tag bootstrap \
-  release-assets/unkeep-core-0.0.0-bootstrap.0.tgz
+  ./release-assets/unkeep-core-0.0.0-bootstrap.0.tgz
 npm publish --registry=https://registry.npmjs.org/ --access public --tag bootstrap \
-  release-assets/unkeep-client-0.0.0-bootstrap.0.tgz
+  ./release-assets/unkeep-client-0.0.0-bootstrap.0.tgz
 npm publish --registry=https://registry.npmjs.org/ --access public --tag bootstrap \
-  release-assets/unkeep-cli-0.0.0-bootstrap.0.tgz
+  ./release-assets/unkeep-cli-0.0.0-bootstrap.0.tgz
 npm logout
 
 cd -
