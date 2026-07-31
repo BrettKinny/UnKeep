@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { downloadRecoveryKit } from './recoveryKit';
+import {
+  downloadRecoveryKit,
+  MAX_RECOVERY_KIT_FILE_SIZE,
+  readRecoveryKitFile,
+} from './recoveryKit';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -31,5 +35,17 @@ describe('recovery kit download', () => {
     expect(revokeObjectURL).not.toHaveBeenCalled();
     vi.runAllTimers();
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:recovery-kit');
+  });
+});
+
+describe('recovery kit input', () => {
+  it('rejects an oversized kit before reading its text', async () => {
+    const file = new File(['{}'], 'recovery.json', { type: 'application/json' });
+    const text = vi.fn(async () => { throw new Error('must not read'); });
+    Object.defineProperty(file, 'size', { value: MAX_RECOVERY_KIT_FILE_SIZE + 1 });
+    Object.defineProperty(file, 'text', { value: text });
+
+    await expect(readRecoveryKitFile(file)).rejects.toThrow('64 KiB or smaller');
+    expect(text).not.toHaveBeenCalled();
   });
 });

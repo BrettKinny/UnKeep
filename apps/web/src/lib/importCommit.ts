@@ -1,10 +1,11 @@
 import type { Note, NoteAttachment } from '@unkeep/core';
+import type { StagedAttachmentHandle } from './attachmentStorage';
 import type { ImportedAttachment } from './keepImporter';
 
 export interface ImportCommitTarget {
-  saveAttachment(imported: ImportedAttachment): Promise<void>;
-  deleteAttachment(noteId: string, attachmentId: string): Promise<void>;
-  saveNotesAtomically(notes: Note[]): Promise<void>;
+  saveAttachment(imported: ImportedAttachment): Promise<StagedAttachmentHandle>;
+  discardAttachment(handle: StagedAttachmentHandle): Promise<unknown>;
+  saveNotesWithPendingSyncAtomically(notes: Note[]): Promise<unknown>;
 }
 
 function attachmentKey(noteId: string, attachmentId: string): string {
@@ -64,22 +65,25 @@ export async function commitImportBatch(
   target: ImportCommitTarget,
 ): Promise<void> {
   validateImportManifest(notes, attachments);
-  const staged: ImportedAttachment[] = [];
+  const staged: StagedAttachmentHandle[] = [];
   try {
     for (const imported of attachments) {
-      // Record the attempt first: a storage implementation can persist bytes
-      // and then fail while updating its queue, and that partial write must be
-      // included in rollback as well.
-      staged.push(imported);
-      await target.saveAttachment(imported);
+      // stageUpload is one storage transaction. A rejected call cannot leave
+      // partially indexed bytes, and a successful call returns the exact
+      // generation that owns its rollback.
+      staged.push(await target.saveAttachment(imported));
     }
-    await target.saveNotesAtomically(notes);
+    await target.saveNotesWithPendingSyncAtomically(notes);
   } catch (error) {
-    const cleanup = await Promise.allSettled(staged.map(imported =>
-      target.deleteAttachment(imported.noteId, imported.attachment.id)));
+    const cleanup = await Promise.allSettled(staged.map(handle =>
+      target.discardAttachment(handle)));
     const cleanupErrors = cleanup.flatMap(result => result.status === 'rejected' ? [result.reason] : []);
     if (cleanupErrors.length) {
-      throw new AggregateError([error, ...cleanupErrors], 'Import failed and staged attachment cleanup was incomplete');
+      throw new AggregateError(
+        [error, ...cleanupErrors],
+        'Import failed and staged attachment cleanup was incomplete',
+        { cause: error },
+      );
     }
     throw error;
   }

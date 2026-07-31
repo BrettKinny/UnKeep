@@ -1,6 +1,6 @@
 {
   "name": "@unkeep/cli",
-  "version": "0.1.0",
+  "version": "0.2.0-rc.1",
   "description": "Command-line client for encrypted UnKeep notes and automation workflows",
   "license": "MIT",
   "repository": {
@@ -25,15 +25,7 @@
     "!dist/**/*.test.*",
     "!dist/**/*.integration.test.*"
   ],
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "default": "./dist/index.js"
-    }
-  },
+  "exports": {},
   "bin": {
     "unkeep": "./dist/bin.js"
   },
@@ -48,16 +40,17 @@
     "node": ">=20"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
-    "@unkeep/client": "workspace:^",
-    "@unkeep/core": "workspace:^"
+    "@unkeep/client": "workspace:*",
+    "@unkeep/core": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "^26.0.0",
+    "@types/node": "^26.1.2",
     "@unkeep/server": "workspace:*",
-    "typescript": "^5.7.0",
-    "vitest": "^4.0.18"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
   }
 }

@@ -9,8 +9,13 @@
  * - Storing/retrieving OAuth token metadata alongside adapter config
  */
 
-import type { OAuthProviderConfig, OAuthTokens } from '@unkeep/core';
-import { generateCodeVerifier, generateCodeChallenge, generateState } from '@unkeep/core';
+import {
+  generateCodeVerifier,
+  generateCodeChallenge,
+  generateState,
+  type OAuthProviderConfig,
+  type OAuthTokens,
+} from '@unkeep/core/experimental';
 
 const TOKEN_STORAGE_KEY = 'unkeep-oauth-tokens';
 const PKCE_STORAGE_KEY = 'unkeep-oauth-pkce';

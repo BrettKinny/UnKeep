@@ -1,3 +1,4 @@
+import type { ServiceCredentialScope } from '@unkeep/client';
 import type { ConfigFlags } from './config.js';
 
 export type CommandName = 'login' | 'provision' | 'credentials' | 'list' | 'get' | 'put' | 'delete' | 'sync' | 'clip' | 'paste';
@@ -9,6 +10,7 @@ export interface ParsedArguments extends ConfigFlags {
   help: boolean;
   version: boolean;
   name?: string;
+  scope?: ServiceCredentialScope;
   labels: string[];
   archived?: boolean;
   pinned?: boolean;
@@ -28,6 +30,11 @@ function booleanValue(option: string, value: string | undefined): boolean {
   if (value === 'true' || value === '1') return true;
   if (value === 'false' || value === '0') return false;
   throw new Error(`${option} expects true or false`);
+}
+
+function serviceCredentialScope(option: string, value: string): ServiceCredentialScope {
+  if (value === 'read-only' || value === 'read-write') return value;
+  throw new Error(`${option} expects read-only or read-write`);
 }
 
 export function parseArguments(arguments_: readonly string[]): ParsedArguments {
@@ -75,6 +82,7 @@ export function parseArguments(arguments_: readonly string[]): ParsedArguments {
       case '--vault-key': result.vaultKey = takeValue(); break;
       case '--config-dir': result.configDir = takeValue(); break;
       case '--name': result.name = takeValue(); break;
+      case '--scope': result.scope = serviceCredentialScope(option, takeValue()); break;
       case '--label': result.labels.push(takeValue()); break;
       case '--search':
       case '-q': result.search = takeValue(); break;

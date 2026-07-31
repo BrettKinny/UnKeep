@@ -25,8 +25,8 @@ function startRelay() {
       PORT: '4173',
       UNKEEP_DATA_DIR: dataDir,
       UNKEEP_WEB_DIR: join(root, 'apps/web/build'),
-      UNKEEP_SETUP_TOKEN: 'playwright-setup-token',
-      UNKEEP_RECOVERY_TOKEN: 'playwright-recovery-token',
+      UNKEEP_SETUP_TOKEN: 'playwright-setup-token-0000000001',
+      UNKEEP_RECOVERY_TOKEN: 'playwright-recovery-token-00000001',
     },
     stdio: 'inherit',
   });

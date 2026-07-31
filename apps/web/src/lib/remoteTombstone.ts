@@ -1,4 +1,4 @@
-import type { StorageAdapter } from '@unkeep/core';
+import type { StorageAdapter } from '@unkeep/core/experimental';
 
 type NoteTombstoneAdapter = Pick<StorageAdapter, 'listNotes' | 'deleteNote'>;
 

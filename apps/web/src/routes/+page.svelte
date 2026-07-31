@@ -10,7 +10,7 @@
   import Toast from '$lib/components/Toast.svelte';
   import AuthVaultGate, { type VaultReady } from '$lib/components/AuthVaultGate.svelte';
   import KeepImporter from '$lib/components/KeepImporter.svelte';
-  import { takePendingShares } from '$lib/shareTarget';
+  import { listPendingShares, removePendingShares } from '$lib/shareTarget';
   import { toastStore } from '$lib/toast.svelte';
 
   let editingNote: Note | null = $state(null);
@@ -41,12 +41,41 @@
     await noteStore.init(vault.ownerId, vault.migrateLegacy);
     await noteStore.enableEncryptedSync(vault.session, vault.masterKey);
     vaultReady = true;
-    const shares = takePendingShares();
+    const pending = listPendingShares();
+    const matching = pending.filter(share => share.targetInstanceId === vault.session.instanceId);
+    const unbound = pending.filter(share => share.targetInstanceId === null);
+    const foreign = pending.filter(
+      share => share.targetInstanceId !== null && share.targetInstanceId !== vault.session.instanceId,
+    );
+    const acceptedUnbound = !unbound.length || window.confirm(
+      `Save ${unbound.length} pending shared note${unbound.length === 1 ? '' : 's'} to this vault?`,
+    );
+    const shares = acceptedUnbound ? [...matching, ...unbound] : matching;
+    const savedIds: string[] = [];
+    let failures = 0;
     for (const share of shares) {
-      noteStore.createNote(share.text, share.title);
+      try {
+        await noteStore.createReceivedNote(
+          { title: share.title, content: share.text },
+          { idempotencyKey: share.id, createdAt: share.createdAt },
+        );
+        savedIds.push(share.id);
+      } catch {
+        failures += 1;
+      }
     }
-    if (shares.length === 1) toastStore.show('Shared note saved');
-    else if (shares.length > 1) toastStore.show(`${shares.length} shared notes saved`);
+    removePendingShares(savedIds);
+    if (failures) {
+      toastStore.show(`${failures} shared note${failures === 1 ? '' : 's'} could not be saved and remain pending`);
+    } else if (savedIds.length === 1) {
+      toastStore.show('Shared note saved');
+    } else if (savedIds.length > 1) {
+      toastStore.show(`${savedIds.length} shared notes saved`);
+    } else if (unbound.length && !acceptedUnbound) {
+      toastStore.show('Shared notes remain pending until you choose a vault');
+    } else if (foreign.length) {
+      toastStore.show(`${foreign.length} shared note${foreign.length === 1 ? '' : 's'} belongs to another vault`);
+    }
   }
 
   function handleEditNote(note: Note) {

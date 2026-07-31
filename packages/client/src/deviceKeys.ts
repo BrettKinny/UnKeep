@@ -12,15 +12,22 @@ import {
 } from '@unkeep/core';
 import type { ClientStorage } from './storage.js';
 
-const DEVICE_KEYS_KEY = 'unkeep-device-keys';
-const DEVICE_ID_KEY = 'unkeep-device-id';
+export const DEVICE_KEYS_KEY = 'unkeep-device-keys';
+export const DEVICE_ID_KEY = 'unkeep-device-id';
 const VAULT_KEY_FINGERPRINT_PREFIX = 'unkeep-vault-key-fingerprint:';
+const VALID_DEVICE_ID = /^[A-Za-z0-9_-]{1,128}$/;
+const deviceKeyStoreBackings = new WeakMap<DeviceKeyStore, ClientStorage>();
 
 interface StoredDeviceKeys {
   id: 'current';
   deviceId: string;
   wrappingKey: CryptoKey;
   masterKeyEnvelope: EncryptedEnvelope;
+  /**
+   * Opaque mutation identity used for exact CAS across structured-cloned
+   * CryptoKeys, whose object identity is not stable across storage reads.
+   */
+  generation?: string;
   version?: 2;
   instanceId?: string;
 }
@@ -34,6 +41,11 @@ export interface ProvisionedKeys {
   deviceId: string;
   masterKey: Uint8Array<ArrayBuffer>;
   recoveryKit: string;
+}
+
+export interface PairingKeyInstallation {
+  readonly deviceId: string;
+  readonly snapshot: PairingKeySnapshot;
 }
 
 export class VaultKeyMismatchError extends Error {
@@ -68,13 +80,86 @@ function fingerprintKey(instanceId: string): string {
   return `${VAULT_KEY_FINGERPRINT_PREFIX}${encodeURIComponent(instanceId)}`;
 }
 
+export function deviceKeyFingerprintKey(instanceId: string): string {
+  return fingerprintKey(instanceId);
+}
+
+export function deviceKeyStoreStorage(keyStore: DeviceKeyStore): ClientStorage {
+  const storage = deviceKeyStoreBackings.get(keyStore);
+  if (!storage) throw new Error('Device key store is not initialized');
+  return storage;
+}
+
+function validDeviceId(value: unknown): value is string {
+  return typeof value === 'string' && VALID_DEVICE_ID.test(value);
+}
+
+function sameStoredKeys(
+  left: StoredDeviceKeys | null,
+  right: StoredDeviceKeys | null,
+): boolean {
+  if (left === null || right === null) return left === right;
+  const leftEnvelope = left.masterKeyEnvelope;
+  const rightEnvelope = right.masterKeyEnvelope;
+  return left.id === right.id
+    && left.version === right.version
+    && left.instanceId === right.instanceId
+    && left.deviceId === right.deviceId
+    && left.generation === right.generation
+    && leftEnvelope.version === rightEnvelope.version
+    && leftEnvelope.algorithm === rightEnvelope.algorithm
+    && leftEnvelope.keyId === rightEnvelope.keyId
+    && leftEnvelope.iv === rightEnvelope.iv
+    && leftEnvelope.ciphertext === rightEnvelope.ciphertext;
+}
+
+export function pairingKeySnapshotsEqual(
+  left: PairingKeySnapshot,
+  right: PairingKeySnapshot,
+): boolean {
+  return sameStoredKeys(left.storedKeys, right.storedKeys)
+    && left.fingerprint === right.fingerprint;
+}
+
 export class DeviceKeyStore {
-  constructor(private readonly storage: ClientStorage) {}
+  constructor(private readonly storage: ClientStorage) {
+    deviceKeyStoreBackings.set(this, storage);
+  }
 
   async getDeviceId(): Promise<string> {
-    let deviceId = await this.storage.get<string>(DEVICE_ID_KEY);
+    if (this.storage.transact) {
+      let deviceId = '';
+      await this.storage.transact(
+        [DEVICE_ID_KEY, DEVICE_KEYS_KEY],
+        transaction => {
+          const current = transaction.get<unknown>(DEVICE_ID_KEY);
+          if (current !== null && !validDeviceId(current)) {
+            throw new Error('Stored device identity is invalid');
+          }
+          const storedKeys = transaction.get<StoredDeviceKeys>(DEVICE_KEYS_KEY);
+          if (storedKeys && !validDeviceId(storedKeys.deviceId)) {
+            throw new Error('Stored device key identity is invalid');
+          }
+          deviceId = current
+            ?? storedKeys?.deviceId
+            ?? globalThis.crypto.randomUUID();
+          transaction.set(DEVICE_ID_KEY, deviceId);
+        },
+      );
+      return deviceId;
+    }
+
+    const currentDeviceId = await this.storage.get<unknown>(DEVICE_ID_KEY);
+    if (currentDeviceId !== null && !validDeviceId(currentDeviceId)) {
+      throw new Error('Stored device identity is invalid');
+    }
+    let deviceId: string | null = currentDeviceId;
     if (!deviceId) {
-      deviceId = globalThis.crypto.randomUUID();
+      const storedKeys = await this.storage.get<StoredDeviceKeys>(DEVICE_KEYS_KEY);
+      if (storedKeys && !validDeviceId(storedKeys.deviceId)) {
+        throw new Error('Stored device key identity is invalid');
+      }
+      deviceId = storedKeys?.deviceId ?? globalThis.crypto.randomUUID();
       await this.storage.set(DEVICE_ID_KEY, deviceId);
     }
     return deviceId;
@@ -84,26 +169,63 @@ export class DeviceKeyStore {
     masterKey: Uint8Array<ArrayBuffer>,
     instanceId: string,
     existingDeviceId?: string,
-  ): Promise<string> {
+  ): Promise<PairingKeyInstallation> {
+    if (!this.storage.transact) {
+      throw new Error('Device key persistence requires atomic client storage transactions');
+    }
     const deviceId = existingDeviceId ?? await this.getDeviceId();
     const wrappingKey = await generateDeviceWrappingKey();
     const masterKeyEnvelope = await wrapMasterKeyForDevice(masterKey, wrappingKey, deviceId, instanceId);
-    await this.storage.set(fingerprintKey(instanceId), await masterKeyFingerprint(masterKey));
-    await this.storage.set<StoredDeviceKeys>(DEVICE_KEYS_KEY, {
+    const fingerprintStorageKey = fingerprintKey(instanceId);
+    const fingerprint = await masterKeyFingerprint(masterKey);
+    const storedKeys: StoredDeviceKeys = {
       id: 'current',
       version: 2,
       instanceId,
       deviceId,
+      generation: globalThis.crypto.randomUUID(),
       wrappingKey,
       masterKeyEnvelope,
-    });
-    return deviceId;
+    };
+    await this.storage.transact(
+      [DEVICE_ID_KEY, DEVICE_KEYS_KEY, fingerprintStorageKey],
+      transaction => {
+        const currentDeviceId = transaction.get<unknown>(DEVICE_ID_KEY);
+        const currentKeys = transaction.get<StoredDeviceKeys>(DEVICE_KEYS_KEY);
+        const repairsLegacyIdentity = currentDeviceId === null
+          && Boolean(existingDeviceId)
+          && currentKeys?.deviceId === deviceId
+          && !currentKeys.instanceId;
+        if (
+          (currentDeviceId !== deviceId && !repairsLegacyIdentity)
+          || (
+            existingDeviceId
+              ? !currentKeys
+                || currentKeys.deviceId !== deviceId
+                || Boolean(currentKeys.instanceId)
+              : currentKeys !== null
+          )
+        ) {
+          throw new Error('Device access changed while storing the vault key');
+        }
+        transaction.set(DEVICE_ID_KEY, deviceId);
+        transaction.set(fingerprintStorageKey, fingerprint);
+        transaction.set(DEVICE_KEYS_KEY, storedKeys);
+      },
+    );
+    return {
+      deviceId,
+      snapshot: { storedKeys, fingerprint },
+    };
   }
 
   private async persistCompatibleMasterKey(
     masterKey: Uint8Array<ArrayBuffer>,
     instanceId: string,
-  ): Promise<string> {
+  ): Promise<PairingKeyInstallation> {
+    if (!this.storage.transact) {
+      throw new Error('Device key persistence requires atomic client storage transactions');
+    }
     const existing = await this.storage.get<StoredDeviceKeys>(DEVICE_KEYS_KEY);
     if (existing) {
       if (existing.instanceId && existing.instanceId !== instanceId) {
@@ -117,49 +239,97 @@ export class DeviceKeyStore {
       );
       if (!sameKey(storedMasterKey,masterKey)) throw new VaultKeyMismatchError();
       if (!existing.instanceId) {
-        await this.persistMasterKey(masterKey, instanceId, existing.deviceId);
+        return this.persistMasterKey(masterKey, instanceId, existing.deviceId);
       } else {
-        await this.storage.set(fingerprintKey(instanceId), await masterKeyFingerprint(masterKey));
+        const key = fingerprintKey(instanceId);
+        const fingerprint = await masterKeyFingerprint(masterKey);
+        const storedKeys = existing.generation
+          ? existing
+          : { ...existing, generation: globalThis.crypto.randomUUID() };
+        await this.storage.transact([DEVICE_KEYS_KEY, key], transaction => {
+          const current = transaction.get<StoredDeviceKeys>(DEVICE_KEYS_KEY);
+          if (!sameStoredKeys(current, existing)) {
+            throw new Error('Device access changed while storing the vault fingerprint');
+          }
+          transaction.set(DEVICE_KEYS_KEY, storedKeys);
+          transaction.set(key, fingerprint);
+        });
+        return {
+          deviceId: existing.deviceId,
+          snapshot: { storedKeys, fingerprint },
+        };
       }
-      return existing.deviceId;
     }
     return this.persistMasterKey(masterKey, instanceId);
+  }
+
+  async installPairedMasterKey(
+    masterKey: Uint8Array<ArrayBuffer>,
+    instanceId: string,
+  ): Promise<PairingKeyInstallation> {
+    return this.persistCompatibleMasterKey(masterKey, instanceId);
   }
 
   async persistPairedMasterKey(
     masterKey: Uint8Array<ArrayBuffer>,
     instanceId: string,
   ): Promise<string> {
-    return this.persistCompatibleMasterKey(masterKey, instanceId);
+    return (await this.installPairedMasterKey(masterKey, instanceId)).deviceId;
   }
 
   async snapshotPairingAccess(instanceId: string): Promise<PairingKeySnapshot> {
+    const key = fingerprintKey(instanceId);
+    if (this.storage.transact) {
+      let snapshot: PairingKeySnapshot | undefined;
+      await this.storage.transact([DEVICE_KEYS_KEY, key], transaction => {
+        snapshot = {
+          storedKeys: transaction.get<StoredDeviceKeys>(DEVICE_KEYS_KEY),
+          fingerprint: transaction.get<string>(key),
+        };
+      });
+      return snapshot!;
+    }
     return {
       storedKeys: await this.storage.get<StoredDeviceKeys>(DEVICE_KEYS_KEY),
-      fingerprint: await this.storage.get<string>(fingerprintKey(instanceId)),
+      fingerprint: await this.storage.get<string>(key),
     };
   }
 
-  async restorePairingAccess(snapshot: PairingKeySnapshot, instanceId: string): Promise<void> {
-    const outcomes = await Promise.allSettled([
-      snapshot.storedKeys
-        ? this.storage.set(DEVICE_KEYS_KEY, snapshot.storedKeys)
-        : this.storage.delete(DEVICE_KEYS_KEY),
-      snapshot.fingerprint
-        ? this.storage.set(fingerprintKey(instanceId), snapshot.fingerprint)
-        : this.storage.delete(fingerprintKey(instanceId)),
-    ]);
-    const failures = outcomes
-      .filter((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected')
-      .map(outcome => outcome.reason);
-    if (failures.length) throw new AggregateError(failures, 'Failed to restore prior device key state');
+  async restorePairingAccess(
+    snapshot: PairingKeySnapshot,
+    instanceId: string,
+    expectedCurrent?: PairingKeySnapshot,
+  ): Promise<void> {
+    const key = fingerprintKey(instanceId);
+    if (!this.storage.transact) {
+      throw new Error('Device key rollback requires atomic client storage transactions');
+    }
+    await this.storage.transact([DEVICE_KEYS_KEY, key], transaction => {
+      const current = {
+        storedKeys: transaction.get<StoredDeviceKeys>(DEVICE_KEYS_KEY),
+        fingerprint: transaction.get<string>(key),
+      };
+      if (
+        expectedCurrent
+        && !pairingKeySnapshotsEqual(current, expectedCurrent)
+      ) {
+        throw new Error('Device key state changed while pairing rollback was pending');
+      }
+      if (snapshot.storedKeys) transaction.set(DEVICE_KEYS_KEY, snapshot.storedKeys);
+      else transaction.delete(DEVICE_KEYS_KEY);
+      if (snapshot.fingerprint) transaction.set(key, snapshot.fingerprint);
+      else transaction.delete(key);
+    });
   }
 
   async provisionFirstDevice(instanceId: string): Promise<ProvisionedKeys> {
+    if (!this.storage.transact) {
+      throw new Error('Device key persistence requires atomic client storage transactions');
+    }
     const existing = await this.storage.get<StoredDeviceKeys>(DEVICE_KEYS_KEY);
     if (existing) throw new Error('This device already has encryption keys');
     const masterKey = generateMasterKey();
-    const deviceId = await this.persistMasterKey(masterKey, instanceId);
+    const { deviceId } = await this.persistMasterKey(masterKey, instanceId);
     const recoveryKit = exportRecoveryKit(await createRecoveryKit(masterKey, instanceId));
     return { deviceId, masterKey, recoveryKit };
   }
@@ -195,8 +365,16 @@ export class DeviceKeyStore {
   }
 
   async clearDevice():Promise<void> {
-    await this.storage.delete(DEVICE_KEYS_KEY);
-    await this.storage.delete(DEVICE_ID_KEY);
+    if (!this.storage.transact) {
+      throw new Error('Device key clearing requires atomic client storage transactions');
+    }
+    await this.storage.transact(
+      [DEVICE_KEYS_KEY, DEVICE_ID_KEY],
+      transaction => {
+        transaction.delete(DEVICE_KEYS_KEY);
+        transaction.delete(DEVICE_ID_KEY);
+      },
+    );
   }
 
   async restoreDeviceFromRecovery(

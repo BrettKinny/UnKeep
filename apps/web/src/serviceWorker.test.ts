@@ -14,4 +14,19 @@ describe('service worker', () => {
       /if \(url\.pathname\.startsWith\('\/api\/'\)\) \{\s*event\.respondWith\(fetch\(event\.request\)\);\s*return;\s*\}/
     );
   });
+
+  it('handles share-target POST bodies locally before other requests', () => {
+    expect(source).toContain("url.pathname === '/share' && event.request.method === 'POST'");
+    expect(source).toContain('redirectSharedPost(event.request, worker.location.origin)');
+    expect(source).not.toContain('request.formData()');
+    expect(source.indexOf("url.pathname === '/share'")).toBeLessThan(
+      source.indexOf("event.request.method !== 'GET'"),
+    );
+  });
+
+  it('never stores navigation query strings as cache keys', () => {
+    expect(source).toContain('const cacheKey = new Request(`${requestUrl.origin}${requestUrl.pathname}`)');
+    expect(source).toContain('cache.put(cacheKey, response.clone())');
+    expect(source).toContain('return await caches.match(cacheKey)');
+  });
 });

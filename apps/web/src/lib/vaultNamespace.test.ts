@@ -264,6 +264,13 @@ describe('vault namespace initialization', () => {
         await backing.set(key, value);
       },
       delete: (key: string) => backing.delete(key),
+      transact: async (keys, change) => {
+        if (interrupt && keys.includes(scopedAttachmentKey)) {
+          interrupt = false;
+          throw new Error('attachment migration interrupted');
+        }
+        await backing.transact(keys, change);
+      },
     };
 
     await expect(initializeVaultAdapter(namespace, true, storage, adapterHarness().factory))

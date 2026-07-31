@@ -1,6 +1,6 @@
 {
   "name": "@unkeep/core",
-  "version": "0.1.0",
+  "version": "0.2.0-rc.1",
   "description": "UnKeep domain types, validation, migrations, and client-side cryptography",
   "license": "MIT",
   "repository": {
@@ -32,6 +32,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./experimental": {
+      "types": "./dist/experimental.d.ts",
+      "import": "./dist/experimental.js",
+      "default": "./dist/experimental.js"
     }
   },
   "scripts": {
@@ -46,9 +51,10 @@
     "node": ">=20"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "devDependencies": {
-    "typescript": "^5.7.0"
+    "typescript": "^5.9.3"
   }
 }

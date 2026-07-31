@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { StorageAdapter } from '@unkeep/core';
+import type { StorageAdapter } from '@unkeep/core/experimental';
 import { applyRemoteNoteTombstone } from './remoteTombstone';
 
 describe('applyRemoteNoteTombstone', () => {

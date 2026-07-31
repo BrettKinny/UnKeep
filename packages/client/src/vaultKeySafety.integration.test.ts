@@ -20,6 +20,7 @@ test('rejects pairing a different vault key before replacing the stored session'
     const owner = await ownerKeys.provisionFirstDevice(relayStatus.instanceId);
     const claimed = await new RelayClient(relay.endpoint).claimSetup(
       relay.setupToken,
+      relayStatus.instanceId,
       owner.deviceId,
       'Pairing owner',
     );
@@ -66,6 +67,7 @@ test('allows pairing when the device already stores the byte-identical vault key
     const owner = await ownerKeys.provisionFirstDevice(relayStatus.instanceId);
     const claimed = await new RelayClient(relay.endpoint).claimSetup(
       relay.setupToken,
+      relayStatus.instanceId,
       owner.deviceId,
       'Pairing owner',
     );

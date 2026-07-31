@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { StorageAdapter } from '@unkeep/core';
+  import type { StorageAdapter } from '@unkeep/core/experimental';
   import { adapters, getAdapter } from '$lib/adapterRegistry';
   import { saveConfig } from '$lib/adapterConfig';
   import { noteStore } from '$lib/noteStore.svelte';

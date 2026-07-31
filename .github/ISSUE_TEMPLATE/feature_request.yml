@@ -1,0 +1,38 @@
+name: Feature request
+description: Propose a focused improvement to the supported product
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What human, terminal, agent, or self-hosting workflow is difficult today?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the user-visible result rather than only an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Security and compatibility considerations
+      description: Note effects on plaintext, keys, pairing, sync, public APIs, migrations, or automation.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Primary area
+      options:
+        - Web/PWA
+        - CLI/agent workflow
+        - Encrypted sync
+        - Pairing/recovery
+        - Self-hosting/operations
+        - Documentation
+    validations:
+      required: true

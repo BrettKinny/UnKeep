@@ -1,5 +1,12 @@
 import { describe, it, expect, vi } from 'vitest';
 import { deflateRawSync } from 'node:zlib';
+import {
+  MAX_CHECKLIST_ITEMS,
+  MAX_NOTE_ATTACHMENTS,
+  MAX_NOTE_LABELS,
+  MAX_NOTE_TEXT_LENGTH,
+  MAX_NOTE_TITLE_LENGTH,
+} from '@unkeep/core';
 import { MAX_ATTACHMENT_SIZE } from './attachments';
 
 // Mock nanoid before importing the module
@@ -11,7 +18,13 @@ vi.mock('nanoid', () => {
 });
 
 // Import after mock setup
-const { parseKeepFiles } = await import('./keepImporter.js');
+const {
+  MAX_KEEP_IMPORT_BYTES,
+  MAX_KEEP_IMPORT_FILES,
+  MAX_KEEP_ATTACHMENT_REFERENCES,
+  MAX_KEEP_JSON_SIZE,
+  parseKeepFiles,
+} = await import('./keepImporter.js');
 
 function makeFile(name: string, content: object): File {
   return new File([JSON.stringify(content)], name, { type: 'application/json' });
@@ -153,6 +166,58 @@ describe('parseKeepFiles', () => {
     expect(notes).toHaveLength(1);
   });
 
+  it('rejects excessive raw file counts and aggregate bytes before reading input', async () => {
+    const unread = makeFile('unread.json', { textContent: 'must not be read' });
+    const text = vi.fn(async () => { throw new Error('must not read'); });
+    Object.defineProperty(unread, 'text', { value: text });
+
+    await expect(parseKeepFiles(
+      Array.from({ length: MAX_KEEP_IMPORT_FILES + 1 }, () => unread),
+    )).rejects.toThrow(`The limit is ${MAX_KEEP_IMPORT_FILES}`);
+    expect(text).not.toHaveBeenCalled();
+
+    const first = new File([], 'first.bin');
+    const second = new File([], 'second.bin');
+    Object.defineProperty(first, 'size', { value: Math.floor(MAX_KEEP_IMPORT_BYTES / 2) + 1 });
+    Object.defineProperty(second, 'size', { value: Math.floor(MAX_KEEP_IMPORT_BYTES / 2) + 1 });
+    await expect(parseKeepFiles([first, second])).rejects.toThrow('512 MiB file limit');
+  });
+
+  it('rejects an oversized Keep JSON file before allocating its text', async () => {
+    const oversized = makeFile('large.json', { textContent: 'small fixture' });
+    const text = vi.fn(async () => { throw new Error('must not read'); });
+    Object.defineProperty(oversized, 'size', { value: MAX_KEEP_JSON_SIZE + 1 });
+    Object.defineProperty(oversized, 'text', { value: text });
+
+    await expect(parseKeepFiles([oversized])).rejects.toThrow(
+      'Note JSON files must be 4 MiB or smaller',
+    );
+    expect(text).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['title', { title: 'x'.repeat(MAX_NOTE_TITLE_LENGTH + 1) }, 'oversized title'],
+    ['aggregate text', { textContent: 'x'.repeat(MAX_NOTE_TEXT_LENGTH + 1) }, 'note text limit'],
+    ['checklist', {
+      listContent: Array.from(
+        { length: MAX_CHECKLIST_ITEMS + 1 },
+        () => ({ text: '', isChecked: false }),
+      ),
+    }, 'too many checklist items'],
+    ['labels', {
+      labels: Array.from({ length: MAX_NOTE_LABELS + 1 }, () => ({ name: 'label' })),
+    }, 'too many labels'],
+    ['attachments', {
+      attachments: Array.from(
+        { length: MAX_NOTE_ATTACHMENTS + 1 },
+        () => ({ filePath: 'shared.bin' }),
+      ),
+    }, 'too many attachments'],
+  ])('rejects a Keep note beyond the %s limit', async (_field, value, message) => {
+    await expect(parseKeepFiles([makeFile('bounded.json', value)]))
+      .rejects.toThrow(message);
+  });
+
   it('rejects an incomplete import when a Keep note references missing media', async () => {
     const files = [makeFile('Photo note.json', {
       title: 'Photo note',
@@ -176,6 +241,43 @@ describe('parseKeepFiles', () => {
 
     await expect(parseKeepFiles([noteFile, media])).rejects.toThrow(
       'large.mov is too large. Attachments must be 25 MB or smaller.',
+    );
+  });
+
+  it('reads a repeatedly referenced media file only once', async () => {
+    const noteFile = makeFile('Photo note.json', {
+      attachments: [
+        { filePath: 'shared.png', mimetype: 'image/png' },
+        { filePath: 'shared.png', mimetype: 'image/png' },
+      ],
+    });
+    const media = new File([new Uint8Array([1, 2, 3])], 'shared.png', { type: 'image/png' });
+    const originalArrayBuffer = media.arrayBuffer.bind(media);
+    const arrayBuffer = vi.fn(() => originalArrayBuffer());
+    Object.defineProperty(media, 'arrayBuffer', { value: arrayBuffer });
+
+    const result = await parseKeepFiles([noteFile, media]);
+
+    expect(result.attachments).toHaveLength(2);
+    expect(arrayBuffer).toHaveBeenCalledOnce();
+    expect(result.attachments[0].bytes).toBe(result.attachments[1].bytes);
+  });
+
+  it('bounds attachment references across the complete import', async () => {
+    const referencesPerNote = MAX_NOTE_ATTACHMENTS;
+    const notes = Array.from(
+      { length: Math.floor(MAX_KEEP_ATTACHMENT_REFERENCES / referencesPerNote) + 1 },
+      (_, noteIndex) => makeFile(`note-${noteIndex}.json`, {
+        attachments: Array.from(
+          { length: referencesPerNote },
+          () => ({ filePath: 'shared.bin', mimetype: 'application/octet-stream' }),
+        ),
+      }),
+    );
+    const media = new File([new Uint8Array([1])], 'shared.bin');
+
+    await expect(parseKeepFiles([...notes, media])).rejects.toThrow(
+      `The limit is ${MAX_KEEP_ATTACHMENT_REFERENCES}`,
     );
   });
 
@@ -305,6 +407,45 @@ describe('parseKeepZip', () => {
     expect(notes[0].content).toBe('From zip');
   });
 
+  it('rejects an oversized archive before reading it into memory', async () => {
+    const archive = buildZip(entries);
+    const arrayBuffer = vi.fn(() => File.prototype.arrayBuffer.call(archive));
+    Object.defineProperty(archive, 'size', { value: 256 * 1024 * 1024 + 1 });
+    Object.defineProperty(archive, 'arrayBuffer', { value: arrayBuffer });
+
+    await expect(parseKeepZip(archive)).rejects.toThrow(
+      'Google Takeout ZIP is too large. Archives must be 256 MiB or smaller.',
+    );
+    expect(arrayBuffer).not.toHaveBeenCalled();
+  });
+
+  it('does not inflate compressed entries belonging to other Takeout products', async () => {
+    const { notes } = await parseKeepZip(buildZip([
+      entries[0],
+      {
+        name: 'Takeout/Drive/unrelated.bin',
+        content: new Uint8Array([1, 2, 3]),
+        compressed: true,
+        declaredUncompressedSize: MAX_ATTACHMENT_SIZE + 1,
+      },
+    ]));
+
+    expect(notes).toHaveLength(1);
+    expect(notes[0].content).toBe('From zip');
+  });
+
+  it('rejects a Keep entry with an unsafe declared compression ratio', async () => {
+    const archive = buildZip([{
+      name: 'Takeout/Keep/repetitive.json',
+      content: JSON.stringify({ textContent: 'a'.repeat(100_000) }),
+      compressed: true,
+    }]);
+
+    await expect(parseKeepZip(archive)).rejects.toThrow(
+      'Google Takeout ZIP entry Takeout/Keep/repetitive.json has an unsafe compression ratio.',
+    );
+  });
+
   it('associates referenced Takeout images with their note and preserves the bytes', async () => {
     const imageBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
     const { notes, attachments } = await parseKeepZip(buildZip([
@@ -361,6 +502,19 @@ describe('parseKeepZip', () => {
 
     await expect(parseKeepZip(archive)).rejects.toThrow(
       'Invalid Google Takeout ZIP entry Takeout/Keep/photo.png: declared 4 bytes but extracted 3',
+    );
+  });
+
+  it('stops inflating as soon as output exceeds the declared size', async () => {
+    const archive = buildZip([{
+      name: 'Takeout/Keep/expanding.json',
+      content: new Uint8Array(1024).fill(1),
+      compressed: true,
+      declaredUncompressedSize: 4,
+    }]);
+
+    await expect(parseKeepZip(archive)).rejects.toThrow(
+      'Invalid Google Takeout ZIP entry Takeout/Keep/expanding.json: extracted data exceeds its declared size',
     );
   });
 

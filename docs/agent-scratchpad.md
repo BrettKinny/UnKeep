@@ -3,13 +3,17 @@
 UnKeep is two things sharing one encrypted vault:
 
 1. **A self-hosted Google Keep replacement** — the PWA you open in a browser.
-2. **A scratchpad for AI agents and scripts** — the same notes, reachable from any terminal through the `unkeep` CLI with nothing but three environment variables.
+2. **A scratchpad for AI agents and scripts** — the same notes, reachable from any terminal through the `unkeep` CLI with a small environment bundle.
 
-Anything an agent writes shows up as a card in the browser on the next sync, and anything you jot down on your phone is one `unkeep get` away inside a coding session. Notes are encrypted client-side in both directions; the relay only ever stores ciphertext.
+Anything an agent writes shows up as a card in the browser on the next sync,
+and anything you jot down on your phone is one `unkeep get` away inside a
+coding session. Notes are encrypted client-side in both directions. The relay
+stores ciphertext plus the credential hashes, record relationships, revisions,
+device IDs, and timing metadata needed to authorize and synchronize it.
 
 ## Provision an agent
 
-Agents never pair interactively. Instead, an already-paired human device mints a **service credential** and hands the agent a three-variable bundle.
+Agents never pair interactively. Instead, an already-paired human device mints a **service credential** and hands the agent a four-field bundle.
 
 One-time setup on your own machine (interactive):
 
@@ -17,15 +21,28 @@ One-time setup on your own machine (interactive):
 pnpm install && pnpm build                           # builds core, client, and the CLI
 alias unkeep="node /path/to/UnKeep/apps/cli/dist/bin.js"
 
-unkeep --endpoint https://unkeep.example.com login   # approve the code on a paired device
+unkeep --endpoint https://unkeep.example.com login   # compare the fingerprint, then approve
 ```
 
-No checkout handy? The Docker image bundles the CLI, so `docker compose exec -it unkeep unkeep login --endpoint http://127.0.0.1:3000` works too (config written inside the container is lost when it is recreated — fine for minting bundles, wrong for daily use).
-
-Then mint a bundle per agent or environment:
+No checkout handy? The Docker image provides an isolated client service:
 
 ```sh
-unkeep provision --name "claude-code laptop"
+docker compose --env-file .env run --rm --no-deps \
+  unkeep-cli login --endpoint http://unkeep:3000
+```
+
+Its `unkeep-cli-config` volume persists a plaintext note snapshot, the device
+credential, and the raw vault key without mounting them into the relay
+container. Protect that volume like a browser profile. The mode-`0600` `.env` from the self-hosting setup is needed
+for Compose interpolation. `--no-deps` assumes the relay is already running;
+omit it only when Compose should start and wait for that dependency. Do not log
+in through `docker compose exec unkeep`.
+
+Then mint a bundle per agent or environment. Read-only is the safe default:
+
+```sh
+unkeep provision --name "review bot"
+unkeep provision --name "claude-code laptop" --scope read-write
 ```
 
 This prints:
@@ -34,9 +51,18 @@ This prints:
 UNKEEP_ENDPOINT=https://unkeep.example.com
 UNKEEP_CREDENTIAL=<service credential>
 UNKEEP_VAULT_KEY=<base64url vault key>
+UNKEEP_SCOPE=read-only
 ```
 
-Export those three variables in the agent's environment (a devcontainer, a CI job, a Claude Code environment, a cron script) and every `unkeep` command works non-interactively — no config file, no browser, no pairing. Add `--json` to `provision` to get the bundle as a single JSON object instead.
+Export the three connection secrets in the agent's environment (a devcontainer,
+a CI job, a Claude Code environment, a cron script) and retain
+`UNKEEP_SCOPE` alongside them as explicit authorization metadata. The
+authorized `unkeep` commands work non-interactively with no config file,
+browser, or pairing. Add `--json` to `provision` to get the same deterministic
+four-field bundle as a single JSON object. The scope value is the relay's
+server-confirmed result, not merely the requested CLI flag.
+
+`read-only` credentials can list, get, sync, and download attachments, but relay writes and every credential/device/pairing administration endpoint reject them. `read-write` credentials can also put/delete notes and upload/delete attachments. Neither scope is an encryption boundary: both bundles contain `UNKEEP_VAULT_KEY`, decrypt the entire vault, and can retain plaintext. Label-scoped credentials are not possible in the current design because labels and note contents are encrypted from the relay.
 
 Manage access with:
 
@@ -48,12 +74,21 @@ unkeep credentials revoke <id>    # takes effect on the credential's next reques
 ### Security notes
 
 - The bundle's `UNKEEP_VAULT_KEY` **decrypts the whole vault**. Treat the bundle like a password: keep it in a secret store, never commit it, and mint one per agent so revocation is targeted.
-- Revoking a service credential blocks relay access but cannot un-share the vault key. If a bundle leaks, rotate what it protects.
+- Prefer the default `read-only` scope for review, search, indexing, and backup jobs. Grant `--scope read-write` only to agents that must edit the vault.
+- Revoking a service credential blocks future relay access but cannot un-share
+  the vault key or erase copied plaintext. UnKeep has no in-place master-key
+  rotation: after a bundle leak, contain the affected environment, revoke the
+  credential, preserve a safe export, create a new vault with new credentials,
+  and re-import only the data you still trust.
 - Give agents their own vault (a second UnKeep container is cheap) if they should not read your personal notes.
 
 ## The scratchpad workflow
 
-Every command syncs with the relay first, so agents always operate on current state. All commands support `--json` for stable, machine-readable output on stdout; errors go to stderr with a non-zero exit code.
+Note and clipboard commands sync with the relay before operating, so agents use
+current note state. Administrative, setup, and help commands perform only the
+requests relevant to that command. All commands support `--json` for stable,
+machine-readable output on stdout; errors go to stderr with a non-zero exit
+code.
 
 ```sh
 # Jot something down (ID is generated and printed)
@@ -96,6 +131,23 @@ unkeep paste <attachment-id>   # or a specific one
 
 Attachments also appear on the Clipboard note in the PWA.
 
+When using the Compose client, explicitly mount only a dedicated transfer
+directory. Upload through a read-only mount and grant write access only when
+downloading:
+
+```sh
+install -d -m 700 transfer
+docker compose --env-file .env run --rm --no-deps \
+  --volume "$PWD/transfer:/transfer:ro" --workdir /transfer \
+  unkeep-cli clip ./build.log
+docker compose --env-file .env run --rm --no-deps \
+  --volume "$PWD/transfer:/transfer:rw" --workdir /transfer \
+  unkeep-cli paste
+```
+
+Do not expose a home directory or repository to the client container merely to
+transfer one file.
+
 ## Drop-in agent instructions
 
 Paste this into a project's `CLAUDE.md` / `AGENTS.md` to teach an agent the scratchpad (assumes the bundle is in the environment and `unkeep` is on `PATH`):
@@ -128,5 +180,10 @@ Flags override environment variables, which override the config file written by 
 | `--credential <token>` | `UNKEEP_CREDENTIAL` | Device or service credential |
 | `--vault-key <key>` | `UNKEEP_VAULT_KEY` | Base64/base64url/hex vault key |
 | `--config-dir <path>` | — | Override the config directory |
+
+An endpoint is bound to its credential and vault key. If an override selects a
+different origin from the saved profile, supply all three `UNKEEP_*` connection
+values together; an endpoint-only override fails before transmitting a saved
+bearer credential.
 
 HTTPS is required for public endpoints; plain HTTP is accepted for localhost, private ranges, and container networks (e.g. an agent sandbox talking to `http://unkeep:3000` on the same Docker network).

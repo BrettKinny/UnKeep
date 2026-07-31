@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 
-const SETUP_TOKEN = 'playwright-setup-token';
+const SETUP_TOKEN = 'playwright-setup-token-0000000001';
 const CONTROL_URL = 'http://127.0.0.1:4174';
 const NOTE_TITLE = 'Browser persistence';
 const EDITED_TITLE = 'Browser persistence edited';
@@ -169,7 +169,7 @@ test.describe.serial('UnKeep browser vault', () => {
         buffer: Buffer.from(legacyKit),
       });
       await recoveryPage.getByRole('button', { name: 'Associate kit with this relay' }).click();
-      await recoveryPage.getByLabel('Operator recovery token').fill('playwright-recovery-token');
+      await recoveryPage.getByLabel('Operator recovery token').fill('playwright-recovery-token-00000001');
       await recoveryPage.getByRole('button', { name: 'Recover access' }).click();
       await expect(recoveryPage.getByRole('button', { name: 'Create a new note' })).toBeVisible();
     } finally {
@@ -308,7 +308,9 @@ test.describe.serial('UnKeep browser vault', () => {
   test('durably saves a received Quick Send snapshot', async () => {
     await page.getByRole('button', { name: `Edit note: ${EDITED_TITLE}` }).click();
     const editor = page.getByRole('dialog', { name: 'Edit note' });
-    await editor.getByRole('button', { name: 'Quick Send — copy share link' }).click();
+    await editor.getByRole('button', {
+      name: 'Quick Send — copy unencrypted snapshot link',
+    }).click();
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('/recv#');
     const quickSendUrl = await page.evaluate(() => navigator.clipboard.readText());
     await editor.getByRole('button', { name: 'Close' }).click();
