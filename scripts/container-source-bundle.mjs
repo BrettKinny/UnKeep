@@ -179,20 +179,46 @@ export function parseDockerfileBase(
   const fromInstructions = dockerfile
     .split(/\r?\n/)
     .filter(line => /^\s*FROM(?:\s|$)/i.test(line));
-  const bases = fromInstructions.map(line => {
-    const match =
-      /^\s*FROM\s+(node:22-alpine@sha256:[0-9a-f]{64})(?:\s+AS\s+[A-Za-z0-9_.-]+)?\s*$/i
-        .exec(line);
-    return match?.[1];
-  });
+  const licensePlatformArgs = dockerfile
+    .split(/\r?\n/)
+    .filter(line => /^\s*ARG\s+NODE_LICENSE_PLATFORM(?:=|\s|$)/i.test(line));
+  const licenseCopies = dockerfile
+    .split(/\r?\n/)
+    .filter(line => /^\s*COPY\s+--from=node-license(?:\s|$)/i.test(line));
+  const basePattern = '(node:22-alpine@sha256:[0-9a-f]{64})';
+  const licenseStage = new RegExp(
+    '^\\s*FROM\\s+--platform=\\$\\{NODE_LICENSE_PLATFORM\\}\\s+'
+    + `${basePattern}`
+    + '\\s+AS\\s+node-license\\s*$',
+    'i',
+  ).exec(fromInstructions[0] ?? '');
+  const buildStage = new RegExp(
+    `^\\s*FROM\\s+${basePattern}\\s+AS\\s+build\\s*$`,
+    'i',
+  ).exec(fromInstructions[1] ?? '');
+  const runtimeStage = new RegExp(
+    `^\\s*FROM\\s+${basePattern}\\s*$`,
+    'i',
+  ).exec(fromInstructions[2] ?? '');
+  const bases = [
+    licenseStage?.[1],
+    buildStage?.[1],
+    runtimeStage?.[1],
+  ];
   if (
-    fromInstructions.length !== 2
+    licensePlatformArgs.length !== 1
+    || !/^\s*ARG\s+NODE_LICENSE_PLATFORM=linux\/amd64\s*$/i
+      .test(licensePlatformArgs[0])
+    || licenseCopies.length !== 1
+    || !/^\s*COPY\s+--from=node-license\s+\/usr\/local\/LICENSE\s+\/usr\/local\/LICENSE\s*$/i
+      .test(licenseCopies[0])
+    || fromInstructions.length !== 3
     || bases.some(base => !base)
-    || bases[0] !== bases[1]
+    || new Set(bases).size !== 1
   ) {
     fail(
-      'Dockerfile must contain exactly two stages using one identical '
-      + 'digest-pinned node:22-alpine base',
+      'Dockerfile must contain the controlled Node license, build, and runtime '
+      + 'stages using one identical digest-pinned node:22-alpine base',
     );
   }
   return bases[0];
@@ -209,7 +235,7 @@ export function platformImageReference(indexReference, platformDigest) {
   return `${match[1]}@${digest}`;
 }
 
-function inspectPlatform(baseImage, platform) {
+function inspectPlatform(baseImage, platform, inspectNodeLicense = false) {
   const installed = run('docker', [
     'run',
     '--rm',
@@ -240,11 +266,30 @@ function inspectPlatform(baseImage, platform) {
     baseImage,
     '/usr/local/bin/node',
   ]).trim().split(/\s+/)[0];
+  const nodeLicenseSha256 = inspectNodeLicense
+    ? run('docker', [
+      'run',
+      '--rm',
+      '--platform',
+      platform,
+      '--entrypoint',
+      'sha256sum',
+      baseImage,
+      '/usr/local/LICENSE',
+    ]).trim().split(/\s+/)[0]
+    : undefined;
   validateToken(nodeVersion, /^v\d+\.\d+\.\d+$/, 'Node runtime version');
   validateSha256(nodeSha256, `${platform} Node runtime SHA-256`);
+  if (inspectNodeLicense) {
+    validateSha256(
+      nodeLicenseSha256,
+      `${platform} Node runtime license SHA-256`,
+    );
+  }
   return {
     nodeVersion,
     nodeSha256,
+    nodeLicenseSha256,
     installedDatabase: installed,
     packages: parseInstalledDatabase(installed),
   };
@@ -440,6 +485,7 @@ function bundleLicenseTexts(
   );
   return {
     mapping: 'CONTAINER-LICENSES.json',
+    nodeLicenseSha256: sha256File(nodeLicensePath),
     spdxLicenseListCommit: SPDX_LICENSE_LIST_COMMIT,
   };
 }
@@ -942,7 +988,10 @@ async function buildBundle(options) {
     if (muslRuntimeSha256 !== amd64.nodeSha256) {
       fail('The pinned base image Node binary differs from its x64-musl input');
     }
-    const licenseEvidence = bundleLicenseTexts(
+    const {
+      nodeLicenseSha256,
+      ...licenseEvidence
+    } = bundleLicenseTexts(
       temporaryRoot,
       bundleRoot,
       amd64.packages,
@@ -981,6 +1030,7 @@ async function buildBundle(options) {
         amd64RuntimeSha256: amd64.nodeSha256,
         arm64BuildInput: nodeSourceName,
         arm64RuntimeSha256: arm64.nodeSha256,
+        licenseSha256: nodeLicenseSha256,
         dockerRecipeRepository: DOCKER_NODE_REPOSITORY,
         dockerRecipeCommit: DOCKER_NODE_RECIPE_COMMIT,
       },
@@ -1157,6 +1207,19 @@ export function compareRuntimeCorrespondence(
   if (runtimeInventory?.nodeSha256 !== expectedNodeSha256) {
     fail(
       `Staged ${architecture} Node binary differs from `
+      + 'the corresponding-source inventory',
+    );
+  }
+  validateSha256(
+    sourceInventory.node?.licenseSha256,
+    'source Node runtime license SHA-256',
+  );
+  if (
+    runtimeInventory?.nodeLicenseSha256
+      !== sourceInventory.node.licenseSha256
+  ) {
+    fail(
+      `Staged ${architecture} Node runtime license differs from `
       + 'the corresponding-source inventory',
     );
   }
@@ -1345,6 +1408,10 @@ export function verifyBundle(options) {
         `source ${architecture} Node runtime SHA-256`,
       );
     }
+    validateSha256(
+      sourceInventory.node.licenseSha256,
+      'source Node runtime license SHA-256',
+    );
     if (
       sourceInventory.licenses?.mapping !== 'CONTAINER-LICENSES.json'
       || sourceInventory.licenses?.spdxLicenseListCommit
@@ -1372,6 +1439,12 @@ export function verifyBundle(options) {
       if (!expected.has(path)) {
         fail(`Container license mapping references an unbundled file: ${path}`);
       }
+    }
+    if (
+      expected.get(licenseMapping.node.licenseText)?.sha256
+        !== sourceInventory.node.licenseSha256
+    ) {
+      fail('Container Node license digest does not match the source inventory');
     }
   } finally {
     rmSync(extractionRoot, { recursive: true, force: true });
@@ -1422,6 +1495,7 @@ export function bindBundle(options) {
     const runtimeInventory = inspectPlatform(
       `${imageRepository}@${digest}`,
       `linux/${architecture}`,
+      true,
     );
     compareRuntimeCorrespondence(
       verified.sourceInventory,

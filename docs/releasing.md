@@ -285,7 +285,10 @@ The unprivileged `container-sources` job checks out the validated release SHA
 and reads the two runtime architectures from the exact digest-pinned
 `node:22-alpine` OCI index. It requires the amd64 and arm64 installed Alpine
 package inventories to have identical package, version, license, source-origin,
-and embedded aports-commit identities. It then produces:
+and embedded aports-commit identities. The Dockerfile also copies the Node
+runtime license from the pinned amd64 archive into both final platforms because
+the upstream arm64 source-built image does not install that file. It then
+produces:
 
 - `unkeep-<version>-container-sources.tar.gz`, containing the raw OCI
   descriptors and installed-package databases, the exact Docker Node recipe,
