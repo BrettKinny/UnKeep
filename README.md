@@ -181,12 +181,11 @@ UnKeep is a pnpm monorepo with five main workspaces:
 
 ```text
 UnKeep/
-├── packages/core/          Domain types, crypto, validation, and legacy adapters
+├── packages/core/          Domain types, crypto, validation, and local working copy
 │   └── src/
 │       ├── types.ts        Note, checklist, color, and attachment types
 │       ├── crypto.ts       AES-GCM envelopes, key wrapping, recovery kits
-│       ├── adapter.ts      Legacy StorageAdapter interface
-│       └── adapters/       IndexedDB, local Markdown, Git, and S3 adapters
+│       └── adapters/local.ts IndexedDB working copy and durable local outbox
 │
 ├── packages/client/        Framework-independent encrypted relay client
 │   └── src/
@@ -348,7 +347,7 @@ semver-compatible minor releases may still contain breaking changes.
 | Deep package imports, `apps/web` modules, `apps/server` modules, and the server test harness | Internal; no compatibility promise |
 | Raw `/api/v1` request/response shapes other than status | Internal wire implementation; use `@unkeep/client` or the CLI |
 | `@unkeep/cli` package-root imports | No exports; use the `unkeep` executable |
-| Legacy Git, S3, local Markdown, local-only adapter, and adapter-oriented OAuth exports from `@unkeep/core` | Experimental; not part of the supported product workflow |
+| `@unkeep/core/experimental` working-copy exports | Internal migration surface; no compatibility promise |
 
 ## Recovery, backups, and security boundaries
 
@@ -358,12 +357,6 @@ semver-compatible minor releases may still contain breaking changes.
 - Revoking a device recursively revokes its known paired descendants, their service credentials, and pending approvals. Pre-schema-v7 devices have unknown lineage; the emergency revoke-all API contains every credential before operator recovery. Neither operation can erase keys or notes already copied to a device.
 - Back up the complete `/data` volume, the recovery kit, and the operator recovery token. Keep the latter two separate. A relay backup alone is ciphertext, and a recovery kit is not a backup of current note data.
 - Quick Send uses compression and base64url encoding, **not encryption**. The fragment is not sent in the HTTP request, but anyone who receives or captures the complete URL can read the snapshot.
-
-## Legacy adapter code
-
-`packages/core/src/adapters/` still contains the earlier local-only, File System Access, Git, and S3 storage experiments. `apps/web/src/lib/components/SetupWizard.svelte` and `adapterRegistry.ts` also remain in the tree.
-
-Those choices are **not wired into the current web route or supported onboarding flow**. The current product always uses a local IndexedDB working copy plus the encrypted UnKeep relay. The local adapter is reused internally for that working copy, but there is no live UI for selecting Git, S3, local Markdown, or a relay-free local-only mode. Their exports live under `@unkeep/core/experimental`, outside the supported package-root API, and have no compatibility promise.
 
 ## Current limitations and remaining work
 
@@ -386,7 +379,7 @@ Those choices are **not wired into the current web route or supported onboarding
   `@unkeep/cli` under npm's `next` dist-tag. Pin an exact prerelease version;
   the supported `0.x` boundary is the one documented above and the raw relay
   protocol remains internal.
-- The legacy Git, S3, File System Access, and selectable local-only paths require product integration and current encryption/sync semantics before they can be considered supported.
+- The browser working copy remains an internal IndexedDB implementation while its old adapter seam is retired; alternate storage backends are not part of the supported product plan.
 
 ## Deployment settings
 

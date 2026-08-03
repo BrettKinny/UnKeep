@@ -282,6 +282,8 @@ Before tagging:
   exact protected `main` SHA and wait for it to pass before creating a tag;
 - update the changelog and public documentation;
 - verify all manifests and the CLI report the intended `X.Y.Z-rc.N` version;
+- run `pnpm release:check` to catch stale prerelease references in the release
+  documentation and self-hosting examples;
 - regenerate `THIRD_PARTY_NOTICES.md` with `pnpm notices` and verify it with
   `pnpm notices:check`;
 - complete the base-image compliance review. The image preserves Node's
@@ -542,7 +544,7 @@ uses next-RC-only recovery.
    candidate:
 
    ```sh
-   repaired_version=0.2.0-rc.2
+   repaired_version="${next_version:?set the next unused RC}"
    for package in @unkeep/core @unkeep/client @unkeep/cli; do
      npm dist-tag add \
        --registry=https://registry.npmjs.org/ \

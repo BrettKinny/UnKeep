@@ -13,8 +13,9 @@ or terminal output.
 UnKeep is a single-user, self-hosted notes vault used across trusted devices,
 terminals, and agents. It is not a multi-user collaboration system. The
 supported path is the local IndexedDB working copy plus `EncryptedSync` and the
-SQLite relay. Legacy Git, S3, local Markdown, and selectable-adapter code is
-experimental.
+SQLite relay. The browser working-copy implementation remains behind an explicit
+experimental subpath during its migration away from the old adapter seam; alternate
+backends and selectable storage are not supported.
 
 ## Change discipline
 

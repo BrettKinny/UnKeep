@@ -29,4 +29,12 @@ describe('service worker', () => {
     expect(source).toContain('cache.put(cacheKey, response.clone())');
     expect(source).toContain('return await caches.match(cacheKey)');
   });
+
+  it('does not cache Vite development modules while ignoring URL queries', () => {
+    expect(source).toContain("url.pathname.startsWith('/src/')");
+    expect(source).toContain("url.pathname.startsWith('/@vite/')");
+    expect(source.indexOf("url.pathname.startsWith('/src/')")).toBeLessThan(
+      source.indexOf("url.pathname.startsWith('/api/')"),
+    );
+  });
 });

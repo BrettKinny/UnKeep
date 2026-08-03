@@ -8,12 +8,6 @@ export type {
   ServiceCredentialScope,
   RelayChange,
   RelayClientOptions,
-  RelayAttachmentStageRequest,
-  RelayAttachmentStageReceipt,
-  RelayCompoundAttachment,
-  RelayCompoundNoteRequest,
-  RelayCompoundAttachmentRevision,
-  RelayCompoundNoteReceipt,
 } from './relay.js';
 export { RelayClient, RelayHttpError, RecordConflictError, cleanRelayEndpoint } from './relay.js';
 export { RelaySessionStore } from './session.js';

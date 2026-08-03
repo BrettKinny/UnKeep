@@ -4,7 +4,6 @@ import type {
   AdapterConfig,
   ValidationResult,
   SyncResult,
-  ConfigField,
 } from '../adapter.js';
 import { validateNoteId } from '../validation.js';
 import { normalizeNoteRecord } from '../noteMigrations.js';
@@ -275,7 +274,7 @@ export class LocalOnlyAdapter implements DurableNoteStorageAdapter {
   id = 'local';
   displayName = 'Local Only';
   description = 'Store notes in your browser. No sync, no account needed.';
-  configSchema: ConfigField[] = [];
+  configSchema = [];
 
   private db: IDBDatabase | null = null;
 

@@ -38,6 +38,16 @@ worker.addEventListener('fetch', (event) => {
 
   if (event.request.method !== 'GET') return;
 
+  // Vite serves a Svelte component and its scoped CSS from the same pathname
+  // with different queries. The production build never exposes these paths,
+  // and cache matching with ignoreSearch would conflate them during local dev.
+  if (
+    url.pathname.startsWith('/src/')
+    || url.pathname.startsWith('/@vite/')
+    || url.pathname.startsWith('/@id/')
+    || url.pathname.startsWith('/node_modules/.vite/')
+  ) return;
+
   // API state must always come from the relay. Replaying cached setup,
   // credential, pairing, or sync responses would be both stale and unsafe.
   if (url.pathname.startsWith('/api/')) {
