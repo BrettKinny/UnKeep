@@ -8,7 +8,10 @@ Because UnKeep is still `0.x`, minor releases may include breaking changes.
 
 ## [Unreleased]
 
-No changes yet.
+- Removed the unreachable selectable-adapter, OAuth, and legacy storage
+  experiments from the first public package surface. The supported browser
+  working copy remains available only through its internal experimental
+  subpath during migration.
 
 ## [0.2.0-rc.1] - 2026-07-30
 

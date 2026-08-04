@@ -52,8 +52,9 @@ than a real vault or credential.
 - Maintain compatibility deliberately. Public packages and CLI behavior are
   `0.x`, while raw relay routes and deep imports are internal.
 - The current product path is IndexedDB plus `EncryptedSync` and the UnKeep
-  relay. Legacy Git, S3, local Markdown, and selectable-adapter code is
-  experimental and should not be expanded without an accepted design.
+  relay. The browser working-copy implementation is an internal migration
+  surface; do not reintroduce selectable storage backends without an accepted
+  design.
 - Describe security guarantees using the boundaries in
   [THREAT_MODEL.md](THREAT_MODEL.md).
 

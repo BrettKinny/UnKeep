@@ -1,24 +1,16 @@
 /**
- * Unsupported storage and OAuth experiments retained for the web client's
- * local working copy, migration, and prototype work.
- *
- * These exports are not part of the supported encrypted-relay product API and
- * may change or disappear during the 0.x line.
+ * Internal browser working-copy implementation retained behind an explicit
+ * subpath while the supported web client migrates away from the old adapter
+ * seam. This is not part of the package-root API and has no compatibility
+ * guarantee.
  */
 export type {
   AdapterConfig,
   ValidationResult,
   SyncResult,
   ConfigField,
-  OAuthProviderConfig,
-  OAuthTokens,
   StorageAdapter,
 } from './adapter.js';
-export {
-  generateCodeVerifier,
-  generateCodeChallenge,
-  generateState,
-} from './oauth.js';
 export {
   LEGACY_LOCAL_DATABASE_NAME,
   LOCAL_DATABASE_VERSION,
@@ -35,6 +27,3 @@ export type {
   NoteCreationClaim,
   PendingNoteSync,
 } from './adapters/local.js';
-export { LocalMarkdownAdapter } from './adapters/local-markdown.js';
-export { GitAdapter } from './adapters/git.js';
-export { S3Adapter } from './adapters/s3.js';

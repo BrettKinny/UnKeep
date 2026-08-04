@@ -181,13 +181,13 @@ try {
   writeFileSync(
     join(consumerDirectory, 'smoke.mjs'),
     `import * as core from '@unkeep/core';
-import { LocalOnlyAdapter, generateCodeVerifier } from '@unkeep/core/experimental';
+import { LocalOnlyAdapter } from '@unkeep/core/experimental';
 import { cleanRelayEndpoint, MemoryClientStorage } from '@unkeep/client';
 
 const key = core.generateMasterKey();
 if (!(key instanceof Uint8Array) || key.byteLength !== 32) throw new Error('core import failed');
-if ('LocalOnlyAdapter' in core || 'generateCodeVerifier' in core) throw new Error('experimental core API leaked from package root');
-if (typeof LocalOnlyAdapter !== 'function' || generateCodeVerifier().length < 43) throw new Error('core experimental import failed');
+if ('LocalOnlyAdapter' in core) throw new Error('experimental core API leaked from package root');
+if (typeof LocalOnlyAdapter !== 'function') throw new Error('core experimental import failed');
 if (cleanRelayEndpoint('https://notes.example.com/path') !== 'https://notes.example.com') throw new Error('client import failed');
 const storage = new MemoryClientStorage();
 await storage.set('ready', true);
