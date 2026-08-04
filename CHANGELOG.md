@@ -126,9 +126,9 @@ collaboration.
   intent, credential-aware exact replay, conflict-aware note merging, fresh
   identities when an old credential still reserves a stage, and
   final-note-before-delete cleanup after interruption.
-- Isolated npm trusted-publisher OIDC from the image-attestation job with a
-  separate protected release environment and a structural workflow regression
-  test.
+- Narrowed the first release to the self-hosted container and immutable GitHub
+  prerelease; npm packages remain build- and smoke-tested validation artifacts
+  for a future distribution release.
 - Added public vulnerability-reporting guidance and an explicit threat model.
 
 ### Known limitations

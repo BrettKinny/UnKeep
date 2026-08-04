@@ -51,73 +51,34 @@ function jobPermissions(block) {
   return permissions;
 }
 
-test('only publish_npm can mint the npm trusted-publisher identity', () => {
+test('the release workflow has no npm publishing identity or publication job', () => {
   const jobs = workflowJobs(workflow);
-  const publishNpm = jobs.get('publish_npm');
   const promoteImage = jobs.get('promote_image');
-  assert.ok(publishNpm, 'publish_npm job must exist');
   assert.ok(promoteImage, 'promote_image job must exist');
+  assert.equal(jobs.has('publish_npm'), false);
 
   const npmEnvironmentJobs = [...jobs]
     .filter(([, block]) => jobEnvironment(block) === 'release-npm')
     .map(([name]) => name);
-  assert.deepEqual(npmEnvironmentJobs, ['publish_npm']);
+  assert.deepEqual(npmEnvironmentJobs, []);
 
   const oidcJobs = [...jobs]
     .filter(([, block]) => jobPermissions(block).get('id-token') === 'write')
     .map(([name]) => name)
     .sort();
-  assert.deepEqual(oidcJobs, ['promote_image', 'publish_npm']);
-
-  const npmOidcJobs = oidcJobs.filter(
-    name => jobEnvironment(jobs.get(name)) === 'release-npm',
-  );
-  assert.deepEqual(npmOidcJobs, ['publish_npm']);
+  assert.deepEqual(oidcJobs, ['promote_image']);
   assert.equal(jobEnvironment(promoteImage), 'release');
-
-  assert.deepEqual(
-    Object.fromEntries(jobPermissions(publishNpm)),
-    { contents: 'read', 'id-token': 'write' },
-  );
-  assert.match(
-    publishNpm,
-    /\$\{\{ vars\.UNKEEP_NPM_RELEASE_GUARD \}\}/,
-  );
-  assert.match(publishNpm, /BrettKinny\/UnKeep:release-npm:v1/);
-  assert.match(
-    publishNpm,
-    /\$\{\{ vars\.UNKEEP_CONTAINER_COMPLIANCE_GUARD \}\}/,
-  );
-  assert.doesNotMatch(publishNpm, /UNKEEP_RELEASE_GUARD/);
-
-  assert.match(
-    publishNpm,
-    /STAGED_RELEASE_ATTEMPT: \$\{\{ needs\.stage_container\.outputs\.release_attempt \}\}/,
-  );
-  assert.match(
-    publishNpm,
-    /\$STAGED_RELEASE_ATTEMPT" != "\$GITHUB_RUN_ID:\$GITHUB_RUN_ATTEMPT/,
-  );
-  assert.match(publishNpm, /^      - promote_image$/m);
-  assert.match(publishNpm, /^      - stage_container$/m);
+  assert.doesNotMatch(workflow, /npm publish[\s\S]*--provenance/);
+  assert.doesNotMatch(workflow, /UNKEEP_NPM_RELEASE_GUARD|release-npm/);
 });
 
-test('release documentation configures the isolated npm identity', () => {
-  assert.match(
-    releasingGuide,
-    /\| Environment \| `release-npm` \|/,
-  );
-  assert.match(
-    releasingGuide,
-    /UNKEEP_NPM_RELEASE_GUARD[\s\S]*BrettKinny\/UnKeep:release-npm:v1/,
-  );
-  assert.match(
-    releasingGuide,
-    /only job with both `environment: release-npm` and `id-token: write`/,
-  );
+test('release documentation explicitly defers npm publication', () => {
+  assert.match(releasingGuide, /npm publication is deferred/);
+  assert.match(releasingGuide, /validation-only/);
+  assert.doesNotMatch(releasingGuide, /UNKEEP_NPM_RELEASE_GUARD|release-npm/);
 });
 
-test('npm publication treats every tarball as an explicit local path', () => {
+test('npm validation treats every tarball as an explicit local path', () => {
   for (const name of ['core', 'client', 'cli']) {
     assert.match(
       workflow,
@@ -125,23 +86,7 @@ test('npm publication treats every tarball as an explicit local path', () => {
         `npm publish [^\\n]*"\\./release-assets/unkeep-${name}-`
         + '\\$VERSION\\.tgz"',
       ),
-      `dry-run publication must use a local ${name} tarball path`,
-    );
-    assert.match(
-      workflow,
-      new RegExp(
-        `publish_package @unkeep/${name} `
-        + `"\\./npm-artifacts/unkeep-${name}-\\$VERSION\\.tgz"`,
-      ),
-      `trusted publication must use a local ${name} tarball path`,
-    );
-    assert.match(
-      releasingGuide,
-      new RegExp(
-        `\\./release-assets/unkeep-${name}-`
-        + '0\\.0\\.0-bootstrap\\.0\\.tgz',
-      ),
-      `bootstrap documentation must use a local ${name} tarball path`,
+      `dry-run validation must use a local ${name} tarball path`,
     );
   }
 });
@@ -152,7 +97,6 @@ test('every external write requires the manually reviewed immutable-release guar
     'stage_container',
     'draft_release',
     'promote_image',
-    'publish_npm',
     'finalize_release',
   ];
 
@@ -192,7 +136,7 @@ test('every external write requires the manually reviewed immutable-release guar
 
 test('registry transitions bind release title and body to the validated source', () => {
   const jobs = workflowJobs(workflow);
-  for (const name of ['promote_image', 'publish_npm', 'finalize_release']) {
+  for (const name of ['promote_image', 'finalize_release']) {
     const block = jobs.get(name);
     assert.ok(block, `${name} job must exist`);
     assert.match(
@@ -215,13 +159,6 @@ test('registry transitions bind release title and body to the validated source',
     promoteImage.indexOf('immediate-prepromotion-release-metadata.json')
       < promoteImage.indexOf('docker buildx imagetools create'),
     'release metadata must be rechecked immediately before image promotion',
-  );
-
-  const publishNpm = jobs.get('publish_npm');
-  assert.match(
-    publishNpm,
-    /publish_package\(\)[\s\S]*immediate-prenpm-release-metadata\.json[\s\S]*npm publish/,
-    'each package publication must recheck exact release metadata',
   );
 
   const finalizeRelease = jobs.get('finalize_release');
@@ -306,7 +243,6 @@ test('source bytes are bound out of band before every publication boundary', () 
   for (const name of [
     'draft_release',
     'promote_image',
-    'publish_npm',
     'finalize_release',
   ]) {
     const block = jobs.get(name);
@@ -334,7 +270,6 @@ test('container compliance review sentinel is pinned to the exact base digest', 
     'stage_container',
     'draft_release',
     'promote_image',
-    'publish_npm',
     'finalize_release',
   ]) {
     const block = jobs.get(name);

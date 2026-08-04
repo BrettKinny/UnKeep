@@ -334,9 +334,10 @@ rather than scripting raw relay requests.
 ### Package and compatibility boundary
 
 The public packages are ESM and require Node.js 20 or newer when used in Node.
-Release-candidate tags publish them to npm under the `next` dist-tag through the
-protected release workflow. Because the current versions are `0.x`,
-semver-compatible minor releases may still contain breaking changes.
+The release workflow packs and smoke-tests them as validation artifacts, but
+this container-first release does not publish them to npm. Because the current
+versions are `0.x`, semver-compatible minor releases may still contain breaking
+changes.
 
 | Surface | Compatibility status |
 | --- | --- |
@@ -375,9 +376,8 @@ semver-compatible minor releases may still contain breaking changes.
   server.
 - Markdown preview intentionally implements a safe subset, not full CommonMark or GitHub Flavored Markdown.
 - The web and CLI enforce a 25 MiB per-file limit. The relay defaults to the same limit; raising `UNKEEP_MAX_ATTACHMENT_SIZE` alone does not raise the client limits.
-- Release candidates publish `@unkeep/core`, `@unkeep/client`, and
-  `@unkeep/cli` under npm's `next` dist-tag. Pin an exact prerelease version;
-  the supported `0.x` boundary is the one documented above and the raw relay
+- The public package surfaces are validated but are not yet distributed through
+  npm. This release supports the self-hosted container path; the raw relay
   protocol remains internal.
 - The browser working copy remains an internal IndexedDB implementation while its old adapter seam is retired; alternate storage backends are not part of the supported product plan.
 
