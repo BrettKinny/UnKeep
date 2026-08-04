@@ -31,5 +31,5 @@ backends and selectable storage are not supported.
   workflow.
 
 Before handing off a change, run the relevant subset of `pnpm check`,
-`pnpm lint`, `pnpm test`, `pnpm smoke:packages`, and `pnpm test:e2e`, and state
+`pnpm lint`, `pnpm test`, and `pnpm test:e2e`, and state
 exactly what was and was not verified.

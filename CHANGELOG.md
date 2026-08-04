@@ -9,7 +9,7 @@ Because UnKeep is still `0.x`, minor releases may include breaking changes.
 ## [Unreleased]
 
 - Removed the unreachable selectable-adapter, OAuth, and legacy storage
-  experiments from the first public package surface. The supported browser
+  experiments from the planned package surface. The supported browser
   working copy remains available only through its internal experimental
   subpath during migration.
 
@@ -126,9 +126,9 @@ collaboration.
   intent, credential-aware exact replay, conflict-aware note merging, fresh
   identities when an old credential still reserves a stage, and
   final-note-before-delete cleanup after interruption.
-- Narrowed the first release to the self-hosted container and immutable GitHub
-  prerelease; npm packages remain build- and smoke-tested validation artifacts
-  for a future distribution release.
+- Narrowed the first release to one `linux/amd64` self-hosted container and a
+  compact GitHub prerelease. The workspace packages are private and npm
+  publication and arm64 images are out of scope.
 - Added public vulnerability-reporting guidance and an explicit threat model.
 
 ### Known limitations

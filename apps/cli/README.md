@@ -2,14 +2,9 @@
 
 The command-line client for [UnKeep](https://github.com/BrettKinny/UnKeep).
 
-## Install
+## Run
 
-Install the exact public preview version:
-
-```sh
-npm install --global @unkeep/cli@0.2.0-rc.1
-unkeep --version
-```
+The CLI ships inside the UnKeep container and is not published to npm.
 
 The UnKeep image also provides a separate one-shot Compose client whose key
 volume is isolated from the relay:
@@ -29,7 +24,7 @@ automatically.
 From a source checkout, run `pnpm build:packages`, then execute
 `node apps/cli/dist/bin.js`.
 
-The CLI is ESM and requires Node.js 20 or newer.
+The CLI is ESM and requires Node.js 22.13 or newer when run from source.
 
 ## Authenticate
 
@@ -163,5 +158,5 @@ of silently claiming success.
 
 The documented executable commands, options, and `--json` output are the
 intended public interface during the `0.x` line; minor releases may still
-contain breaking changes. The package deliberately has no package-root exports;
+contain breaking changes. The workspace deliberately has no package-root exports;
 use the `unkeep` executable rather than importing it as a library.

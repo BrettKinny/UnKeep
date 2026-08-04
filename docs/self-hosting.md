@@ -77,20 +77,9 @@ CLI or maintenance command. The source repository ignores `.env`;
 a standalone deployment directory does not. Never commit or casually back up
 this file, and do not keep it with both the recovery kit and server backup.
 
-The first pull is pinned to the release's recorded multi-architecture digest;
-the mutable registry version tag is never executed. Operators with GitHub CLI
-can additionally run the following after downloading the assets and before the
-`mv` and `docker compose` commands to verify the release is immutable and the
-local files match its attestations:
-
-```sh
-gh release verify v0.2.0-rc.1 --repo BrettKinny/UnKeep
-gh release verify-asset v0.2.0-rc.1 \
-  compose.release.yaml --repo BrettKinny/UnKeep
-gh release verify-asset v0.2.0-rc.1 \
-  unkeep-0.2.0-rc.1-image-digest.txt --repo BrettKinny/UnKeep
-gh release verify-asset v0.2.0-rc.1 SHA256SUMS --repo BrettKinny/UnKeep
-```
+The first pull is pinned to the release's recorded amd64 image digest; the
+mutable registry version tag is never executed. The initial preview does not
+provide an arm64 image.
 
 Keep the digest pin in the mode-`0600` `.env` when recreating the service. To
 audit and build source instead, clone the exact tag and use the repository's

@@ -31,7 +31,7 @@ prefer reasoned consensus, but consensus does not require unanimity. The lead
 maintainer has final merge and release authority.
 
 Changes to encryption, pairing, recovery, storage migrations, protocol
-semantics, public package APIs, licensing, or the threat model should be
+semantics, CLI compatibility, licensing, or the threat model should be
 discussed before implementation and may require an ADR. Security fixes may be
 developed privately until coordinated disclosure is safe.
 

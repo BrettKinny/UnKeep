@@ -59,7 +59,7 @@ repository ignores `.env`, but a standalone deployment directory is not
 automatically protected from backup or sharing. Never commit it or store it
 with both the recovery kit and server backup.
 
-The first pull is pinned to the multi-architecture digest recorded by the same
+The first pull is pinned to the amd64 image digest recorded by the same
 release, rather than executing the mutable registry version tag. Keep that
 `UNKEEP_IMAGE` line when recreating the service. See
 [docs/self-hosting.md](docs/self-hosting.md) for provenance checks and the
@@ -154,7 +154,6 @@ pnpm test         # test core, client, CLI, web, and server
 pnpm check        # build libraries, then type-check the CLI and web app
 pnpm lint         # lint the web app
 pnpm notices:check # verify the generated production dependency notices
-pnpm smoke:packages # pack and install the public packages in a clean local consumer
 pnpm test:e2e     # build and exercise critical browser flows with Playwright
 pnpm preview      # preview the static PWA without the relay API
 ```
@@ -239,9 +238,8 @@ An already connected browser loads its local session, wrapped vault key, notes, 
 ## CLI
 
 The Docker image bundles `unkeep` for use through the isolated
-`unkeep-cli` Compose service. `@unkeep/cli` is also a public release artifact.
-Install the exact preview version with
-`npm install --global @unkeep/cli@0.2.0-rc.1`. To run from a source checkout:
+`unkeep-cli` Compose service. The CLI is not published to npm. To run it from a
+source checkout:
 
 ```sh
 pnpm --filter @unkeep/core build
@@ -252,13 +250,6 @@ node apps/cli/dist/bin.js --help
 node apps/cli/dist/bin.js --endpoint https://notes.example.com login
 ```
 
-`pnpm smoke:packages` provides the release-artifact check: it packs
-`@unkeep/core`, `@unkeep/client`, and `@unkeep/cli`, installs all three
-tarballs into a fresh temporary npm project without registry access, imports
-the supported core and client package roots, verifies that the CLI package
-declares no exports, proves every internal runtime dependency is pinned to the
-same exact release version, and runs the installed `unkeep --version` binary.
-
 `login` prints an eight-character pairing code and a four-group security
 fingerprint. In the unlocked web client's device menu, review the request and
 compare every fingerprint character with the terminal before approving. Cancel
@@ -267,7 +258,7 @@ and any unfinished finalization marker in
 `$XDG_CONFIG_HOME/unkeep/config.json` or `~/.config/unkeep/config.json` with
 mode `0600`; a later command safely retries an interrupted finalization.
 
-Examples after pairing with an installed package (replace `unkeep` with `node apps/cli/dist/bin.js` when running from the checkout):
+Examples after pairing through the container (replace `unkeep` with `node apps/cli/dist/bin.js` when running from the checkout):
 
 ```sh
 unkeep list --label work
@@ -331,18 +322,16 @@ of a new live attachment through the legacy record route fails with HTTP 428
 `compound_mutation_required`; use `EncryptedSync`, `RelayClient`, or the CLI
 rather than scripting raw relay requests.
 
-### Package and compatibility boundary
+### Compatibility boundary
 
-The public packages are ESM and require Node.js 20 or newer when used in Node.
-The release workflow packs and smoke-tests them as validation artifacts, but
-this container-first release does not publish them to npm. Because the current
-versions are `0.x`, semver-compatible minor releases may still contain breaking
-changes.
+The core, client, and CLI workspaces are private implementation packages. They
+are built together with Node.js 22.13 or newer and are not published to npm.
+The supported distribution is the self-hosted container. Because UnKeep is
+still `0.x`, minor releases may contain breaking changes.
 
 | Surface | Compatibility status |
 | --- | --- |
-| `@unkeep/core` package-root types, validation, migrations, Markdown, and cryptography exports | Intended public `0.x` API |
-| `@unkeep/client` package-root relay, session, pairing, key, and encrypted-sync exports | Intended public `0.x` API |
+| `@unkeep/core` and `@unkeep/client` workspace exports | Internal implementation API |
 | Documented `unkeep` commands, flags, and `--json` output | Intended public `0.x` CLI |
 | `GET /api/v1/status` | Supported operational health/protocol check |
 | Deep package imports, `apps/web` modules, `apps/server` modules, and the server test harness | Internal; no compatibility promise |
@@ -376,8 +365,8 @@ changes.
   server.
 - Markdown preview intentionally implements a safe subset, not full CommonMark or GitHub Flavored Markdown.
 - The web and CLI enforce a 25 MiB per-file limit. The relay defaults to the same limit; raising `UNKEEP_MAX_ATTACHMENT_SIZE` alone does not raise the client limits.
-- The public package surfaces are validated but are not yet distributed through
-  npm. This release supports the self-hosted container path; the raw relay
+- The workspace packages are internal and are not distributed through npm.
+  This release supports the self-hosted container path; the raw relay
   protocol remains internal.
 - The browser working copy remains an internal IndexedDB implementation while its old adapter seam is retired; alternate storage backends are not part of the supported product plan.
 

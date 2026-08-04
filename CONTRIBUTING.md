@@ -30,7 +30,6 @@ pnpm check
 pnpm lint
 pnpm notices:check
 pnpm test
-pnpm smoke:packages
 pnpm test:e2e
 ```
 
@@ -49,8 +48,8 @@ than a real vault or credential.
 - Preserve offline opening for an already initialized browser.
 - Keep `unkeep --json` deterministic and machine-readable; send diagnostics to
   stderr and retain meaningful non-zero exit codes.
-- Maintain compatibility deliberately. Public packages and CLI behavior are
-  `0.x`, while raw relay routes and deep imports are internal.
+- Maintain compatibility deliberately. CLI behavior is `0.x`; workspace
+  packages, raw relay routes, and deep imports are internal.
 - The current product path is IndexedDB plus `EncryptedSync` and the UnKeep
   relay. The browser working-copy implementation is an internal migration
   surface; do not reintroduce selectable storage backends without an accepted

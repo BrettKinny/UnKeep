@@ -173,8 +173,7 @@ test('runtime and container smoke fixtures satisfy administrative token startup 
   const fixtureFiles = [
     ['apps/server/test/harness.mjs', 1],
     ['e2e/start-relay.mjs', 2],
-    ['.github/workflows/ci.yml', 2],
-    ['.github/workflows/release.yml', 2],
+    ['scripts/container-smoke.sh', 2],
     ['.claude/skills/verify/SKILL.md', 2],
   ];
 
