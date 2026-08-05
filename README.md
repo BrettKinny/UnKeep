@@ -160,19 +160,19 @@ pnpm preview      # preview the static PWA without the relay API
 
 ## Implemented product
 
-- **Notes and checklists** — titles, bodies, checklist conversion and editing, labels, pinning, archiving, 11 colors, a masonry card grid, and safe clickable HTTP(S), `www.`, and email links in rendered note text.
+- **Notes and checklists** — titles, bodies, checklist conversion and editing, labels, pinning, recoverable Trash, 11 colors, a masonry card grid, and safe clickable HTTP(S), `www.`, and email links in rendered note text.
 - **Local-first editing** — note writes go to IndexedDB first, with a 500 ms editor debounce and queued retries when the relay is unavailable.
 - **Search** — client-side matching across titles, bodies, checklist items, and labels.
 - **Attachments** — image previews and downloadable general files up to 25 MiB each. Bytes are saved durably in IndexedDB before upload and encrypted separately from note metadata.
 - **Encrypted sync** — AES-256-GCM note and attachment envelopes, atomic note-plus-new-attachment publication, revision cursors, tombstones, optimistic revision conflict protection, durable idempotent replay after a lost mutation response, device pairing, device revocation, and restricted service credentials.
 - **Recovery** — authenticated recovery-kit v2 binds the vault key to its relay instance; a separate operator token restores relay authorization after every device is lost.
 - **Markdown preview** — a safe rendered subset covering headings, paragraphs, emphasis, strong text, inline and fenced code, ordered and unordered lists, line breaks, and absolute HTTP(S) links.
-- **Google Keep import** — Takeout ZIPs, or selected JSON and media files, import titles, text, checklists, labels, colors, timestamps, pin/archive state, and referenced media. Trashed Keep notes are skipped; note records commit in one local transaction, failed staging rolls back, and a durable journal finalizes or removes an import interrupted by tab termination on the next startup.
+- **Google Keep import** — Takeout ZIPs, or selected JSON and media files, import titles, text, checklists, labels, colors, timestamps, pin state, legacy archive metadata, and referenced media. Previously archived Keep notes appear with regular notes; trashed Keep notes are skipped. Note records commit in one local transaction, failed staging rolls back, and a durable journal finalizes or removes an import interrupted by tab termination on the next startup.
 - **Complete vault export and restore** — the web UI downloads one JSON file containing every currently loaded note and the bytes for every attachment. Export refuses corrupt or silently partial attachment data, and the import dialog validates the complete format, preserves collisions as copies, and uses the same transactional restore path.
 - **Structured Quick Send** — a URL-fragment snapshot carries a note's title, body, checklist, labels, color, and small attachments that fit the payload budget; the receiver previews it and explicitly saves it to their vault. Existing text-only links remain readable.
 - **Share sheet integration** — Android/Chrome normally POSTs into the installed PWA's active service worker, which converts the content to a local URL fragment; iOS uses the documented fragment-based Shortcut. Both paths show a preview and require confirmation before a durable vault save. If the Android worker is unavailable, the relay rejects the network fallback but the plaintext has already crossed the reverse-proxy boundary; see the threat model.
 - **Installable and offline-capable PWA** — SvelteKit builds and registers a versioned service worker from `apps/web/src/service-worker.ts`. It precaches the generated application shell, falls back to that shell for offline navigation, caches same-origin assets, and never caches `/api` responses.
-- **CLI and agent workflows** — pair a terminal, list/get/put/delete notes, sync a local CLI snapshot, provision revocable agent credentials, and move files through an encrypted clipboard note.
+- **CLI and agent workflows** — pair a terminal, list/get/put notes, move notes through recoverable Trash, restore or permanently delete them, sync a local CLI snapshot, provision revocable agent credentials, and move files through an encrypted clipboard note.
 
 ## Architecture
 

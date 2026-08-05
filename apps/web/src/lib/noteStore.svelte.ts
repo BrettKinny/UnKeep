@@ -295,17 +295,17 @@ export class NoteStore {
 
   activeNotes = $derived(
     this.filteredNotes
-      .filter(n => !n.archived)
+      .filter(n => n.trashedAt === undefined)
       .sort((a, b) => {
         if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
         return b.updatedAt - a.updatedAt;
       })
   );
 
-  archivedNotes = $derived(
+  trashedNotes = $derived(
     this.filteredNotes
-      .filter(n => n.archived)
-      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .filter(n => n.trashedAt !== undefined)
+      .sort((a, b) => (b.trashedAt ?? 0) - (a.trashedAt ?? 0) || b.updatedAt - a.updatedAt)
   );
 
   pinnedNotes = $derived(this.activeNotes.filter(n => n.pinned));
@@ -1201,6 +1201,7 @@ export class NoteStore {
     try {
       pendingSync = await durableNoteAdapter(target.adapter).saveNoteWithPendingSync({
         ...note,
+        trashedAt: undefined,
         deleted: true,
         updatedAt: Date.now(),
       });
@@ -1255,6 +1256,47 @@ export class NoteStore {
     }, DELETE_UNDO_MS);
     pendingDeleteUndos.set(token, pending);
     return token;
+  }
+
+  async trashNote(id: string): Promise<boolean> {
+    const target = this.captureMutationTarget();
+    const activeNote = this.notes.find(note => note.id === id);
+    if (!activeNote || !target.adapter || activeNote.trashedAt !== undefined) return false;
+    saveQueue.cancel(id);
+    const trashed = this.portableNote({
+      ...activeNote,
+      archived: false,
+      trashedAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    if (!await this.persistNote(trashed, {}, target)) return false;
+    if (!target.context.isCurrent()) return true;
+    const current = this.notes.find(note => note.id === id);
+    if (current) Object.assign(current, trashed);
+    return true;
+  }
+
+  async restoreTrashedNote(id: string): Promise<boolean> {
+    const target = this.captureMutationTarget();
+    const activeNote = this.notes.find(note => note.id === id);
+    if (!activeNote || !target.adapter || activeNote.trashedAt === undefined) return false;
+    saveQueue.cancel(id);
+    const restored = this.portableNote({
+      ...activeNote,
+      trashedAt: undefined,
+      updatedAt: Date.now(),
+    });
+    if (!await this.persistNote(restored, {}, target)) return false;
+    if (!target.context.isCurrent()) return true;
+    const current = this.notes.find(note => note.id === id);
+    if (current) Object.assign(current, restored);
+    return true;
+  }
+
+  async permanentlyDeleteNote(id: string): Promise<boolean> {
+    const note = this.notes.find(candidate => candidate.id === id);
+    if (!note || note.trashedAt === undefined) return false;
+    return (await this.deleteNote(id)) !== null;
   }
 
   async undoDelete(token: DeleteUndoToken): Promise<void> {
@@ -1326,15 +1368,6 @@ export class NoteStore {
     const note = this.notes.find(n => n.id === id);
     if (note) {
       note.pinned = !note.pinned;
-      note.updatedAt = Date.now();
-      this.persistNote(note);
-    }
-  }
-
-  toggleArchive(id: string) {
-    const note = this.notes.find(n => n.id === id);
-    if (note) {
-      note.archived = !note.archived;
       note.updatedAt = Date.now();
       this.persistNote(note);
     }

@@ -13,7 +13,8 @@ Commands:
   put [id] [content]    Create or update a note (reads content from stdin when
                         omitted; omit the ID to create a note with a generated
                         ID, printed on success)
-  delete <id>           Delete a note
+  delete <id>           Move a note to Trash
+  restore <id>          Restore a note from Trash
   sync                   Pull remote changes into local CLI state
   clip <file>            Encrypt and upload a file to the clipboard
   paste [id]             Download the latest clip (or a specific attachment ID)
@@ -41,15 +42,17 @@ Provision options:
 
 List options:
   --label <label>        Require a label (repeatable)
-  --archived[=true|false]
   -q, --search <text>    Search title, content, and labels
+  --trash                List trashed notes instead of active notes
+
+Delete options:
+  --permanent            Permanently delete a note already in Trash
 
 Put options:
   --id <id>              Note ID (alternative to the positional ID)
   --content <text>       Note body
   --title <title>        Note title
   --label <label>        Set labels (repeatable; comma-separated values accepted)
-  --archived[=true|false]
   --pinned[=true|false]
 
 Clipboard options:

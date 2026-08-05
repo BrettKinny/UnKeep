@@ -40,7 +40,7 @@ test('round-trips an encrypted note through the SDK sync interface',async()=>{
     const reader=new EncryptedSync(session,masterKey,new MemoryClientStorage());
     await writer.push(note('sdk-note','encrypted hello'));
     const pulled=await reader.pull();
-    expect(pulled.notes).toEqual([{...note('sdk-note','encrypted hello'),schemaVersion:1}]);
+    expect(pulled.notes).toEqual([{...note('sdk-note','encrypted hello'),schemaVersion:2}]);
     expect(pulled.cursor).toBeGreaterThan(0);
   } finally {await relay.stop()}
 });
@@ -70,11 +70,47 @@ test('atomically round-trips a note with a new encrypted attachment and durably 
     expect(await writer.completeCompoundCommit(handle)).toBe(true);
 
     const pulled=await reader.pull();
-    expect(pulled.notes).toEqual([{...bundledNote,schemaVersion:1}]);
+    expect(pulled.notes).toEqual([{...bundledNote,schemaVersion:2}]);
     expect(pulled.attachments).toEqual([{noteId:bundledNote.id,attachment,bytes}]);
     await expect(writer.push({...bundledNote,content:'updated',updatedAt:2}))
       .resolves.toEqual(expect.any(Number));
     await expect(writer.deleteAttachment(bundledNote.id,attachment)).resolves.toBeUndefined();
+  } finally {await relay.stop()}
+});
+
+test('keeps trashed notes and attachments recoverable until a permanent tombstone is pushed',async()=>{
+  const relay=await startTestServer();
+  try {
+    const session=await claim(relay);
+    const {masterKey}=await new DeviceKeyStore(new MemoryClientStorage()).provisionFirstDevice(session.instanceId);
+    const writer=new EncryptedSync(session,masterKey,new MemoryClientStorage());
+    const reader=new EncryptedSync(session,masterKey,new MemoryClientStorage());
+    const attachment:NoteAttachment={
+      id:'trash-attachment',
+      name:'recoverable.txt',
+      mimeType:'text/plain',
+      size:11,
+    };
+    const bytes=new TextEncoder().encode('recoverable');
+    const original=note('trash-note','keep until explicit deletion',[attachment]);
+    await commitAttachments(writer,original,[{attachment,bytes}]);
+    const trashed={...original,trashedAt:2,updatedAt:2};
+    await writer.push(trashed);
+
+    const recoverable=await reader.pull();
+    expect(recoverable.deletedIds).toEqual([]);
+    expect(recoverable.notes).toEqual([{...trashed,schemaVersion:2}]);
+    expect(recoverable.attachments).toEqual([{noteId:original.id,attachment,bytes}]);
+    await reader.acknowledge(recoverable.cursor,recoverable.revisions);
+
+    await writer.push({...trashed,trashedAt:undefined,deleted:true,updatedAt:3});
+    const deleted=await reader.pull();
+    expect(deleted.notes).toEqual([]);
+    expect(deleted.deletedIds).toEqual([original.id]);
+    expect(deleted.deletedAttachments).toContainEqual({
+      noteId:original.id,
+      attachmentId:attachment.id,
+    });
   } finally {await relay.stop()}
 });
 
@@ -87,7 +123,7 @@ test('does not advance the durable cursor until the caller acknowledges applied 
     await writer.push(note('retryable-note','must survive a failed local apply'));
 
     const first=await reader.pull();
-    expect(first.notes).toEqual([{...note('retryable-note','must survive a failed local apply'),schemaVersion:1}]);
+    expect(first.notes).toEqual([{...note('retryable-note','must survive a failed local apply'),schemaVersion:2}]);
     expect(await reader.getCursor()).toBe(0);
 
     // Simulate the caller crashing before it durably applies the first result.
@@ -132,7 +168,7 @@ test('durably quarantines a poison note without wedging later records and recove
       revision:poisoned.revision,
       reason:'note_invalid_or_undecryptable' as const,
     };
-    expect(pulled.notes).toEqual([{...note('after-poison','later records still flow'),schemaVersion:1}]);
+    expect(pulled.notes).toEqual([{...note('after-poison','later records still flow'),schemaVersion:2}]);
     expect(pulled.quarantined).toEqual([expectedQuarantine]);
     expect(await reader.getQuarantinedRecords()).toEqual([expectedQuarantine]);
     const stored=await storage.get<unknown>(`unkeep-sync-quarantine:${encodeURIComponent(session.instanceId)}`);
@@ -161,7 +197,7 @@ test('durably quarantines a poison note without wedging later records and recove
       deviceId:session.deviceId,
     });
     const recovered=await restarted.pull();
-    expect(recovered.notes).toEqual([{...repaired,schemaVersion:1}]);
+    expect(recovered.notes).toEqual([{...repaired,schemaVersion:2}]);
     expect(recovered.quarantined).toEqual([]);
     expect(await restarted.getQuarantinedRecords()).toEqual([]);
     await restarted.acknowledge(recovered.cursor,recovered.revisions);
@@ -355,7 +391,7 @@ test('rescans and backfills revisions when migrating a legacy nonzero cursor',as
     const migrated=new EncryptedSync(session,masterKey,legacyStorage);
     expect(await migrated.getCursor()).toBe(0);
     const replayed=await migrated.pull();
-    expect(replayed.notes).toEqual([{...note('legacy-note','remote version'),schemaVersion:1}]);
+    expect(replayed.notes).toEqual([{...note('legacy-note','remote version'),schemaVersion:2}]);
     await migrated.acknowledge(replayed.cursor,replayed.revisions);
 
     const restarted=new EncryptedSync(session,masterKey,legacyStorage);

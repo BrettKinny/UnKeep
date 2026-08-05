@@ -103,7 +103,7 @@ describe('local database upgrades', () => {
       content: 'Legacy',
       createdAt: 1,
       updatedAt: 2,
-      schemaVersion: 1,
+      schemaVersion: 2,
       pinned: false,
       archived: false,
     });
@@ -195,14 +195,14 @@ describe('LocalOnlyAdapter schema boundaries', () => {
       const saving = adapter.saveNoteWithPendingSync(value, { beforeAttachments });
 
       expect(db.transaction).toHaveBeenCalledWith(['notes', 'pending-sync'], 'readwrite');
-      expect(noteWrites).toEqual([expect.objectContaining({ ...value, schemaVersion: 1 })]);
+      expect(noteWrites).toEqual([expect.objectContaining({ ...value, schemaVersion: 2 })]);
       expect(pendingWrites).toEqual([{
         id: value.id,
         token: expect.any(String),
-        note: expect.objectContaining({ ...value, schemaVersion: 1 }),
+        note: expect.objectContaining({ ...value, schemaVersion: 2 }),
         beforeAttachments: expect.objectContaining({
           ...beforeAttachments,
-          schemaVersion: 1,
+          schemaVersion: 2,
         }),
       }]);
       transaction.onabort?.({} as Event);
@@ -568,9 +568,9 @@ describe('LocalOnlyAdapter schema boundaries', () => {
         archived: false,
       });
 
-      expect(writes[0]).toMatchObject({ schemaVersion: 1, id: 'new-note' });
+      expect(writes[0]).toMatchObject({ schemaVersion: 2, id: 'new-note' });
       await expect(adapter.getNote('legacy-note')).resolves.toEqual({
-        schemaVersion: 1,
+        schemaVersion: 2,
         id: 'legacy-note',
         content: 'Legacy',
         createdAt: 1,
@@ -621,7 +621,7 @@ describe('LocalOnlyAdapter schema boundaries', () => {
 
       expect(db.transaction).toHaveBeenCalledTimes(1);
       expect(writes).toHaveLength(2);
-      expect(writes.every(note => note.schemaVersion === 1)).toBe(true);
+      expect(writes.every(note => note.schemaVersion === 2)).toBe(true);
     } finally {
       vi.unstubAllGlobals();
     }

@@ -283,6 +283,12 @@ which is not included in the HTTP request.
   at the advertised maximum.
 - A relay operator can delete the database or serve an old backup. Keep and
   test independent backups and exports.
+- Trash is retention, not deletion. A note with `trashedAt` remains a live
+  encrypted record, its attachment ciphertext is retained indefinitely, it
+  continues to consume relay quota, and any client or agent with the vault key
+  can still decrypt it. Web and CLI delete actions move notes to Trash first.
+  Only an explicit permanent delete of a note already in Trash creates the
+  tombstone and cascades attachment deletion.
 - Tombstones and revocation are application-level state, not proof of secure
   erasure from SSDs, backups, logs, browser storage, or other devices.
 - The relay limits the total serialized encrypted-envelope bytes, total record
