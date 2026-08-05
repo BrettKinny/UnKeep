@@ -28,8 +28,10 @@ describe('component accessibility contracts', () => {
     const source = componentSource('NoteCard');
 
     expect(source).toMatch(
-      /class="note-actions pointer-events-auto relative z-20[^"]*"/,
+      /class="note-actions relative z-20[^"]*"/,
     );
+    expect(source).toContain('class:pointer-events-none={!actionsVisible}');
+    expect(source).toContain('class:pointer-events-auto={actionsVisible}');
     expect(source).not.toMatch(/class="pointer-events-none relative z-0"/);
   });
 

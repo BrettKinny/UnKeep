@@ -208,7 +208,7 @@ test.describe.serial('UnKeep browser vault', () => {
 
     const card = page.getByRole('button', { name: `Edit note: ${MODAL_DELETE_TITLE}` });
     await expect(card).toBeVisible();
-    await card.click();
+    await card.click({ position: { x: 8, y: 8 } });
 
     const editor = page.getByRole('dialog', { name: 'Edit note' });
     await editor.getByRole('button', { name: 'Delete' }).click();
