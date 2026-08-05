@@ -24,6 +24,15 @@ describe('component accessibility contracts', () => {
     );
   });
 
+  it('keeps note actions above the full-card edit target for pointer input', () => {
+    const source = componentSource('NoteCard');
+
+    expect(source).toMatch(
+      /class="note-actions pointer-events-auto relative z-20[^"]*"/,
+    );
+    expect(source).not.toMatch(/class="pointer-events-none relative z-0"/);
+  });
+
   it('gives note creation controls native button and label semantics', () => {
     const source = componentSource('NoteInput');
 
