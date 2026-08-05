@@ -10,13 +10,13 @@ import {
 
 describe('@unkeep/core public schema API', () => {
   it('exports supported note normalization', () => {
-    expect(CURRENT_NOTE_SCHEMA_VERSION).toBe(1);
+    expect(CURRENT_NOTE_SCHEMA_VERSION).toBe(2);
     expect(normalizeNoteRecord({
       id: 'legacy',
       content: '',
       createdAt: 1,
       updatedAt: 1,
-    })).toMatchObject({ schemaVersion: 1, pinned: false, archived: false });
+    })).toMatchObject({ schemaVersion: 2, pinned: false, archived: false });
   });
 
   it('keeps local adapter database naming on the experimental surface', () => {

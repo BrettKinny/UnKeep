@@ -67,6 +67,7 @@ describe('normalizeNoteRecord', () => {
         url: 'javascript:alert(document.domain)',
         injected: true,
       }],
+      trashedAt: 300,
       deleted: false,
       injected: '<script>alert(1)</script>',
     })).toEqual({
@@ -87,6 +88,7 @@ describe('normalizeNoteRecord', () => {
         mimeType: 'text/plain',
         size: 7,
       }],
+      trashedAt: 300,
       deleted: false,
     });
   });
@@ -98,6 +100,7 @@ describe('normalizeNoteRecord', () => {
     ['labels', { labels: ['valid', 42] }],
     ['images', { images: [{ id: 'attachment-one', name: 'file', mimeType: 'text/plain', size: -1 }] }],
     ['deleted', { deleted: 'yes' }],
+    ['trashedAt', { trashedAt: -1 }],
   ])('rejects malformed optional %s', (_field, invalid) => {
     expect(() => normalizeNoteRecord({
       id: 'invalid-note',
@@ -106,6 +109,17 @@ describe('normalizeNoteRecord', () => {
       updatedAt: 200,
       ...invalid,
     })).toThrow('Invalid note record');
+  });
+
+  it('rejects a permanent tombstone that also claims to be recoverable', () => {
+    expect(() => normalizeNoteRecord({
+      id: 'ambiguous-deletion',
+      content: '',
+      createdAt: 100,
+      updatedAt: 200,
+      trashedAt: 150,
+      deleted: true,
+    })).toThrow('permanently deleted notes cannot remain in Trash');
   });
 
   it.each([

@@ -19,7 +19,7 @@
 </script>
 
 <span class="flex items-center gap-2">
-  <span class="text-xs {statusConfig.color} flex items-center gap-1" title={statusConfig.label}>
+  <span class="flex min-h-10 items-center gap-1 text-xs {statusConfig.color}" title={statusConfig.label} role="status" aria-live="polite">
     {#if noteStore.syncStatus === 'syncing'}
       <svg class="h-4 w-4 animate-spin sm:h-3 sm:w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
     {:else if noteStore.syncStatus === 'synced'}
@@ -29,7 +29,7 @@
     {:else if noteStore.syncStatus === 'offline'}
       <svg class="h-4 w-4 sm:h-3 sm:w-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 3l18 18M9.36 5.36A7 7 0 0119.06 11a4.5 4.5 0 012.13 7.53M6.16 6.16A7 7 0 004.94 11 4.5 4.5 0 006.5 19.5h9.09"/></svg>
     {/if}
-    <span class="sr-only sm:not-sr-only">{statusConfig.label}</span>
+    <span class:sr-only={noteStore.syncStatus === 'synced' || noteStore.syncStatus === 'syncing'}>{statusConfig.label}</span>
     {#if noteStore.syncStatus === 'error'}
       <button
         class="ml-1 underline hover:text-on-surface cursor-pointer"

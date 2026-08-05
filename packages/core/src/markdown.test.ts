@@ -41,6 +41,13 @@ describe('noteToMarkdown', () => {
     expect(md).toContain('deleted: true');
   });
 
+  it('roundtrips recoverable Trash state', () => {
+    const original = makeNote({ trashedAt: 1700000002000 });
+    const markdown = noteToMarkdown(original);
+    expect(markdown).toContain('trashedAt: 1700000002000');
+    expect(markdownToNote(markdown).trashedAt).toBe(1700000002000);
+  });
+
   it('omits deleted when not set', () => {
     const md = noteToMarkdown(makeNote());
     expect(md).not.toContain('deleted:');

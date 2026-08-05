@@ -200,6 +200,25 @@ test.describe.serial('UnKeep browser vault', () => {
     await expect(page.getByText(EDITED_CONTENT, { exact: true })).toBeVisible();
   });
 
+  test('moves a note through the recoverable Trash view and restores it', async () => {
+    const editButton = page.getByRole('button', { name: `Edit note: ${EDITED_TITLE}` });
+    const card = editButton.locator('..');
+    await card.hover();
+    await card.getByRole('button', { name: 'Move to Trash' }).click();
+    await expect(editButton).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'Open UnKeep menu' }).click();
+    await page.getByRole('menuitem', { name: 'Trash' }).click();
+    await expect(page.getByRole('heading', { name: 'Trash' })).toBeVisible();
+    await expect(page.getByRole('checkbox', { name: 'Select note' })).toBeVisible();
+    const trashedCard = page.getByRole('button', { name: `View trashed note: ${EDITED_TITLE}` }).locator('..');
+    await trashedCard.getByRole('button', { name: 'Restore note' }).click();
+    await expect(page.getByText('Trash is empty')).toBeVisible();
+
+    await page.getByRole('button', { name: 'Back to notes' }).click();
+    await expect(page.getByRole('button', { name: `Edit note: ${EDITED_TITLE}` })).toBeVisible();
+  });
+
   test('keeps an attached image visible after reload', async () => {
     await page.getByRole('button', { name: `Edit note: ${EDITED_TITLE}` }).click();
     const editor = page.getByRole('dialog', { name: 'Edit note' });
@@ -223,7 +242,8 @@ test.describe.serial('UnKeep browser vault', () => {
   });
 
   test('imports a Google Keep note with its referenced image and reloads the decoded bytes', async () => {
-    await page.getByRole('button', { name: 'Import from Keep' }).click();
+    await page.getByRole('button', { name: 'Open UnKeep menu' }).click();
+    await page.getByRole('menuitem', { name: 'Import notes…' }).click();
     const importer = page.getByRole('dialog', { name: 'Import notes' });
     await importer.locator('#keep-import-files').setInputFiles([
       {

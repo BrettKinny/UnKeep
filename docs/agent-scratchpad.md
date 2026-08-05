@@ -108,15 +108,22 @@ unkeep get 4f7c2d9e-…            # just the content
 # Update in place (same ID overwrites)
 unkeep put 4f7c2d9e-… --content "fixed: alignment bug in the parser"
 
-# Clean up after yourself
+# Move it to Trash (recoverable)
 unkeep delete 4f7c2d9e-…
+
+# Review or restore trashed notes
+unkeep list --trash
+unkeep restore 4f7c2d9e-…
+
+# Permanently delete a note that is already in Trash
+unkeep delete 4f7c2d9e-… --permanent
 ```
 
 Useful conventions:
 
 - **Label your scratch.** `--label scratch` (or a per-agent label like `--label claude`) keeps agent noise filterable in the browser, and `unkeep list --label claude` gives the agent its own view.
 - **Stable IDs for well-known notes.** IDs are free-form (`[a-zA-Z0-9_-]`), so a recurring note like `unkeep put todo-agent --content "…"` acts as a named mailbox both sides know how to find.
-- **Archive instead of delete** (`--archived`) when a human might still want to review the note.
+- **Delete is recoverable by default.** `unkeep delete` moves a note to Trash. Use `--permanent` only after reviewing the note in Trash; permanent deletion cannot be undone.
 
 ## Moving files
 
@@ -163,7 +170,9 @@ to read notes they leave for you.
 - `unkeep get <id> --json` — read one
 - `unkeep put --title <t> --content <c> --label claude` — create (prints the new ID)
 - `unkeep put <id> --content <c>` — update
-- `unkeep delete <id>` — remove notes you no longer need
+- `unkeep delete <id>` — move a note to Trash
+- `unkeep list --trash` / `unkeep restore <id>` — review or recover trashed notes
+- `unkeep delete <id> --permanent` — permanently delete a note already in Trash
 - `unkeep clip <file>` / `unkeep paste` — move files in and out
 
 Label everything you create with `claude` so it is easy to filter. Check the

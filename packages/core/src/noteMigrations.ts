@@ -1,7 +1,7 @@
 import type { ChecklistItem, Note, NoteAttachment, NoteColor } from './types.js';
 import { isValidNoteId } from './validation.js';
 
-export const CURRENT_NOTE_SCHEMA_VERSION = 1;
+export const CURRENT_NOTE_SCHEMA_VERSION = 2;
 export const MAX_NOTE_TITLE_LENGTH = 10_000;
 export const MAX_NOTE_CONTENT_LENGTH = 1_000_000;
 export const MAX_NOTE_TEXT_LENGTH = 1_000_000;
@@ -71,6 +71,14 @@ function optionalString(
 function optionalBoolean(value: unknown, field: string): boolean | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== 'boolean') throw new Error(`Invalid note record: ${field} must be a boolean`);
+  return value;
+}
+
+function optionalTimestamp(value: unknown, field: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new Error(`Invalid note record: ${field} must be a non-negative finite number`);
+  }
   return value;
 }
 
@@ -164,7 +172,11 @@ export function normalizeNoteRecord(value: unknown): Note {
   const checkboxes = normalizeChecklistItems(value.checkboxes);
   const labels = normalizeLabels(value.labels);
   const images = normalizeAttachments(value.images);
+  const trashedAt = optionalTimestamp(value.trashedAt, 'trashedAt');
   const deleted = optionalBoolean(value.deleted, 'deleted');
+  if (deleted && trashedAt !== undefined) {
+    throw new Error('Invalid note record: permanently deleted notes cannot remain in Trash');
+  }
   const textLength = (value.content as string).length
     + (title?.length ?? 0)
     + (checkboxes?.reduce((total, item) => total + item.text.length, 0) ?? 0)
@@ -193,6 +205,7 @@ export function normalizeNoteRecord(value: unknown): Note {
   if (Object.hasOwn(value, 'checkboxes')) note.checkboxes = checkboxes;
   if (Object.hasOwn(value, 'labels')) note.labels = labels;
   if (Object.hasOwn(value, 'images')) note.images = images;
+  if (Object.hasOwn(value, 'trashedAt')) note.trashedAt = trashedAt;
   if (Object.hasOwn(value, 'deleted')) note.deleted = deleted;
   return note;
 }

@@ -13,6 +13,8 @@ export interface Note {
   labels?: string[];
   /** Stored as `images` for compatibility with existing notes, but may contain any file type. */
   images?: NoteAttachment[];
+  /** Recoverable Trash state. The note and its attachments remain live until permanently deleted. */
+  trashedAt?: number;
   deleted?: boolean; // soft delete tombstone
 }
 

@@ -1,7 +1,7 @@
 import type { ServiceCredentialScope } from '@unkeep/client';
 import type { ConfigFlags } from './config.js';
 
-export type CommandName = 'login' | 'provision' | 'credentials' | 'list' | 'get' | 'put' | 'delete' | 'sync' | 'clip' | 'paste';
+export type CommandName = 'login' | 'provision' | 'credentials' | 'list' | 'get' | 'put' | 'delete' | 'restore' | 'sync' | 'clip' | 'paste';
 
 export interface ParsedArguments extends ConfigFlags {
   command?: CommandName;
@@ -12,7 +12,6 @@ export interface ParsedArguments extends ConfigFlags {
   name?: string;
   scope?: ServiceCredentialScope;
   labels: string[];
-  archived?: boolean;
   pinned?: boolean;
   search?: string;
   id?: string;
@@ -20,10 +19,12 @@ export interface ParsedArguments extends ConfigFlags {
   content?: string;
   listClips: boolean;
   force: boolean;
+  trash: boolean;
+  permanent: boolean;
   positionals: string[];
 }
 
-const commands = new Set<CommandName>(['login', 'provision', 'credentials', 'list', 'get', 'put', 'delete', 'sync', 'clip', 'paste']);
+const commands = new Set<CommandName>(['login', 'provision', 'credentials', 'list', 'get', 'put', 'delete', 'restore', 'sync', 'clip', 'paste']);
 
 function booleanValue(option: string, value: string | undefined): boolean {
   if (value === undefined || value === '') return true;
@@ -44,6 +45,8 @@ export function parseArguments(arguments_: readonly string[]): ParsedArguments {
     version: false,
     listClips: false,
     force: false,
+    trash: false,
+    permanent: false,
     labels: [],
     positionals: [],
   };
@@ -91,8 +94,8 @@ export function parseArguments(arguments_: readonly string[]): ParsedArguments {
       case '--content': result.content = takeValue(); break;
       case '--list': result.listClips = booleanValue(option, inlineValue); break;
       case '--force': result.force = booleanValue(option, inlineValue); break;
-      case '--archived': result.archived = booleanValue(option, inlineValue); break;
-      case '--no-archived': result.archived = false; break;
+      case '--trash': result.trash = booleanValue(option, inlineValue); break;
+      case '--permanent': result.permanent = booleanValue(option, inlineValue); break;
       case '--pinned': result.pinned = booleanValue(option, inlineValue); break;
       case '--no-pinned': result.pinned = false; break;
       case '--json': result.json = booleanValue(option, inlineValue); break;

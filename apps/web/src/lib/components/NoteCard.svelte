@@ -9,7 +9,21 @@
   import LinkedText from './LinkedText.svelte';
   import PinIcon from './PinIcon.svelte';
 
-  let { note, onEdit }: { note: Note; onEdit: (note: Note) => void } = $props();
+  let {
+    note,
+    onEdit,
+    trashed = false,
+    selected = false,
+    onSelect,
+    onPermanentDelete,
+  }: {
+    note: Note;
+    onEdit: (note: Note) => void;
+    trashed?: boolean;
+    selected?: boolean;
+    onSelect?: (note: Note, selected: boolean) => void;
+    onPermanentDelete?: (note: Note) => void;
+  } = $props();
 
   let showActions = $state(false);
   let showColorPicker = $state(false);
@@ -22,7 +36,7 @@
       || note.content.trim()
       || note.checkboxes?.find(item => item.text.trim())?.text.trim()
       || 'Untitled';
-    return `Edit note: ${summary.slice(0, 80)}`;
+    return `${trashed ? 'View trashed note' : 'Edit note'}: ${summary.slice(0, 80)}`;
   });
 
   function bgColor() {
@@ -30,14 +44,13 @@
   }
 
   async function handleDelete() {
-    const deleted = await noteStore.deleteNote(note.id);
-    if (deleted) {
-      toastStore.show('Note deleted', {
+    if (await noteStore.trashNote(note.id)) {
+      toastStore.show('Moved to Trash', {
         action: {
           label: 'Undo',
-          fn: () => noteStore.undoDelete(deleted),
+          fn: () => void noteStore.restoreTrashedNote(note.id),
         },
-        timeout: 3000,
+        timeout: 5000,
       });
     }
   }
@@ -52,7 +65,9 @@
 </script>
 
 <article
-  class="rounded-lg border border-border p-3 cursor-pointer transition-shadow duration-100 hover:shadow-md relative group break-inside-avoid mb-3 overflow-hidden"
+  class="rounded-lg border border-border p-3 cursor-pointer transition-[box-shadow,border-color] duration-100 hover:shadow-md relative group break-inside-avoid mb-3 overflow-hidden"
+  class:ring-2={selected}
+  class:ring-primary={selected}
   style="background-color: {bgColor()}"
   onmouseenter={() => showActions = true}
   onmouseleave={() => { showActions = false; showColorPicker = false; }}
@@ -64,8 +79,24 @@
     onclick={() => onEdit(note)}
   ></button>
 
-  <div class="pointer-events-none relative z-0">
-  {#if note.pinned}
+  {#if trashed}
+    <label
+      class="pointer-events-auto absolute left-2 top-2 z-30 grid h-8 w-8 cursor-pointer place-items-center rounded-full bg-surface/90 shadow-sm"
+      title={selected ? 'Deselect note' : 'Select note'}
+    >
+      <input
+        type="checkbox"
+        class="h-4 w-4 accent-primary"
+        checked={selected}
+        aria-label={selected ? 'Deselect note' : 'Select note'}
+        onclick={(event) => event.stopPropagation()}
+        onchange={(event) => onSelect?.(note, event.currentTarget.checked)}
+      />
+    </label>
+  {/if}
+
+  <div class="pointer-events-none relative z-20">
+  {#if note.pinned && !trashed}
     <div class="absolute top-2 right-2 text-on-surface-muted" title="Pinned">
       <PinIcon filled />
     </div>
@@ -131,9 +162,31 @@
   <!-- Action buttons - show on hover, focus-within, or touch devices -->
   <div
     class="note-actions pointer-events-auto relative z-20 flex items-center gap-1 mt-2 pt-2 border-t border-border/50 transition-opacity duration-150"
-    class:opacity-0={!actionsVisible}
-    class:opacity-100={actionsVisible}
+    class:opacity-0={!actionsVisible && !trashed}
+    class:opacity-100={actionsVisible || trashed}
   >
+    {#if trashed}
+      <button
+        type="button"
+        onclick={(e) => { e.stopPropagation(); void noteStore.restoreTrashedNote(note.id); }}
+        class="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-on-surface-muted hover:bg-black/10 hover:text-on-surface dark:hover:bg-white/10"
+        title="Restore note"
+        aria-label="Restore note"
+      >
+        <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 12a9 9 0 101.9-5.5M3 4v6h6"/></svg>
+        Restore
+      </button>
+      <button
+        type="button"
+        onclick={(e) => { e.stopPropagation(); onPermanentDelete?.(note); }}
+        class="ml-auto flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-danger hover:bg-danger/10"
+        title="Delete forever"
+        aria-label="Delete forever"
+      >
+        <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+        Delete forever
+      </button>
+    {:else}
     <button
       type="button"
       onclick={(e) => { e.stopPropagation(); noteStore.togglePin(note.id); }}
@@ -142,15 +195,6 @@
       aria-label={note.pinned ? 'Unpin' : 'Pin'}
     >
       <PinIcon filled={note.pinned} />
-    </button>
-    <button
-      type="button"
-      onclick={(e) => { e.stopPropagation(); noteStore.toggleArchive(note.id); }}
-      class="p-2 rounded-full hover:bg-black/10 dark:hover:bg-white/10 text-on-surface-muted hover:text-on-surface transition-colors"
-      title={note.archived ? 'Unarchive' : 'Archive'}
-      aria-label={note.archived ? 'Unarchive' : 'Archive'}
-    >
-      <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/></svg>
     </button>
     <button
       type="button"
@@ -174,11 +218,12 @@
       type="button"
       onclick={(e) => { e.stopPropagation(); handleDelete(); }}
       class="p-2 rounded-full hover:bg-black/10 dark:hover:bg-white/10 text-danger transition-colors ml-auto"
-      title="Delete"
-      aria-label="Delete"
+      title="Move to Trash"
+      aria-label="Move to Trash"
     >
       <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
     </button>
+    {/if}
   </div>
   {#if showColorPicker}
     <div class="pointer-events-auto absolute left-0 bottom-full mb-1 z-30">

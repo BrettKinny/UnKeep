@@ -149,7 +149,10 @@ function isNote(value: unknown): value is Note {
       || (Array.isArray(value.labels)
         && value.labels.length <= MAX_NOTE_LABELS
         && value.labels.every(label => typeof label === 'string')))
+    && (value.trashedAt === undefined
+      || (typeof value.trashedAt === 'number' && Number.isFinite(value.trashedAt) && value.trashedAt >= 0))
     && (value.deleted === undefined || typeof value.deleted === 'boolean')
+    && !(value.deleted === true && value.trashedAt !== undefined)
     && (value.images === undefined
       || (Array.isArray(value.images)
         && value.images.length <= MAX_NOTE_ATTACHMENTS

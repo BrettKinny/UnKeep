@@ -49,7 +49,7 @@ describe('vault export', () => {
     expect(parsed.exportedAt).toBe('2023-11-14T22:13:20.000Z');
     expect(parsed.notes).toEqual([{
       ...note,
-      schemaVersion: 1,
+      schemaVersion: 2,
       images: [{
         id: attachment.id,
         name: attachment.name,
