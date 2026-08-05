@@ -102,6 +102,18 @@ describe('component accessibility contracts', () => {
     expect(source).toContain('<label for="edit-note-labels"');
   });
 
+  it('offers note deletion with Undo from the expanded editor', () => {
+    const source = componentSource('NoteEditor');
+
+    expect(source).toContain('async function handleDelete()');
+    expect(source).toContain('await noteStore.deleteNote(note.id)');
+    expect(source).toContain("toastStore.show('Note deleted'");
+    expect(source).toContain('fn: () => noteStore.undoDelete(deleted)');
+    expect(source).toMatch(
+      /<button\s+type="button"[^>]*onclick=\{handleDelete\}[^>]*aria-label="Delete"/s,
+    );
+  });
+
   it('labels Quick Send as an unencrypted snapshot before it is copied', () => {
     const source = componentSource('NoteEditor');
 
