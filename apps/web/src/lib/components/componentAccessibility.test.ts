@@ -102,7 +102,7 @@ describe('component accessibility contracts', () => {
   it('focuses, traps Tab within, and restores focus from the note editor dialog', () => {
     const source = componentSource('NoteEditor');
 
-    expect(source).toContain("import { onMount } from 'svelte';");
+    expect(source).toMatch(/import \{[^}]*onMount[^}]*\} from 'svelte';/);
     expect(source).toContain('bind:this={dialogEl}');
     expect(source).toMatch(/if \(event\.key === 'Tab'[^)]*\)/);
     expect(source).toContain('previouslyFocused.focus()');
@@ -125,12 +125,15 @@ describe('component accessibility contracts', () => {
     expect(source).toContain('disabled={deleting}');
   });
 
-  it('labels Quick Send as an unencrypted snapshot before it is copied', () => {
+  it('labels outbound sharing and warns that fallback destinations receive plaintext', () => {
     const source = componentSource('NoteEditor');
 
-    expect(source).toContain(
-      'aria-label="Quick Send — copy unencrypted snapshot link"',
-    );
+    expect(source).toContain('aria-label="Share note"');
+    expect(source).toContain('aria-haspopup="menu"');
+    expect(source).toContain('role="menu"');
+    expect(source).toContain('The destination receives plaintext.');
+    expect(source).toContain('Copy as Markdown');
+    expect(source).toContain('Open in Obsidian');
     expect(source).toContain(
       'Unencrypted Quick Send snapshot copied; anyone with the link can read it',
     );

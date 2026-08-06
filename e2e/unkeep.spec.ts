@@ -354,8 +354,9 @@ test.describe.serial('UnKeep browser vault', () => {
   test('durably saves a received Quick Send snapshot', async () => {
     await page.getByRole('button', { name: `Edit note: ${EDITED_TITLE}` }).click();
     const editor = page.getByRole('dialog', { name: 'Edit note' });
-    await editor.getByRole('button', {
-      name: 'Quick Send — copy unencrypted snapshot link',
+    await editor.getByRole('button', { name: 'Share note' }).click();
+    await editor.getByRole('menuitem', {
+      name: 'Copy unencrypted Quick Send link',
     }).click();
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('/recv#');
     const quickSendUrl = await page.evaluate(() => navigator.clipboard.readText());

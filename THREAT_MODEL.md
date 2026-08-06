@@ -215,6 +215,17 @@ immutable relay ID so a live unreachable upload is not retained.
 
 ## Sharing
 
+Outbound sharing creates a plaintext Markdown snapshot and hands it to an
+operating-system share target selected by the user. If native Web Share is not
+available or fails, the UI offers explicit clipboard, Markdown download,
+Obsidian custom-protocol, and legacy Quick Send actions. These destinations are
+outside the vault's cryptographic boundary. Clipboard managers, target apps,
+download folders, backups, and operating-system telemetry may retain the
+plaintext. The Obsidian handoff puts the note body on the clipboard and only a
+sanitized note name in the custom-protocol URL; it refuses to open Obsidian if
+the clipboard write fails. Markdown and plain-text exports list attachment
+names but do not copy attachment bytes.
+
 Quick Send creates a copy, not shared access or collaboration. Its payload is
 encoded and compressed, not encrypted. Anyone or any software that obtains the
 complete URL can read it, and there is no recipient identity, expiry, or

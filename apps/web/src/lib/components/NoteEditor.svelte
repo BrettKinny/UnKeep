@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import type { Note } from '@unkeep/core';
   import { noteStore } from '$lib/noteStore.svelte';
   import { toastStore } from '$lib/toast.svelte';
@@ -7,6 +7,13 @@
   import { colorMap } from '$lib/colors';
   import { hasLocalAttachmentUrl, isImageAttachment } from '$lib/attachments';
   import { parseMarkdown, type MarkdownInline } from '$lib/markdown';
+  import {
+    downloadNoteMarkdown,
+    noteShareTitle,
+    noteToShareMarkdown,
+    noteToShareText,
+    obsidianNewNoteUrl,
+  } from '$lib/noteShare';
   import AttachmentChip from './AttachmentChip.svelte';
   import ColorPicker from './ColorPicker.svelte';
   import PinIcon from './PinIcon.svelte';
@@ -28,10 +35,12 @@
       content = note.content;
       title = note.title ?? '';
       labelsText = (note.labels ?? []).join(', ');
+      showShareMenu = false;
       lastNoteId = note.id;
     }
   });
   let showColorPicker = $state(false);
+  let showShareMenu = $state(false);
   let showMarkdown = $state(false);
   $effect(() => {
     if (readOnly && !note.checkboxes) showMarkdown = true;
@@ -39,6 +48,8 @@
   let deleting = $state(false);
   let markdownBlocks = $derived(parseMarkdown(content));
   let dialogEl: HTMLDivElement | undefined = $state();
+  let shareButtonEl: HTMLButtonElement | undefined = $state();
+  let shareMenuEl: HTMLDivElement | undefined = $state();
 
   onMount(() => {
     const previouslyFocused = document.activeElement;
@@ -111,6 +122,11 @@
   function handleDialogKeydown(event: KeyboardEvent) {
     if (event.key === 'Escape') {
       event.preventDefault();
+      if (showShareMenu) {
+        showShareMenu = false;
+        shareButtonEl?.focus();
+        return;
+      }
       onClose();
       return;
     }
@@ -133,6 +149,77 @@
 
   function handleBackdropClick(event: MouseEvent) {
     if (event.target === event.currentTarget) onClose();
+  }
+
+  async function openShareMenu() {
+    showShareMenu = true;
+    await tick();
+    shareMenuEl?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+  }
+
+  function closeShareMenu() {
+    showShareMenu = false;
+    shareButtonEl?.focus();
+  }
+
+  async function handleShare() {
+    if (typeof navigator.share !== 'function') {
+      await openShareMenu();
+      return;
+    }
+    try {
+      await navigator.share({
+        title: noteShareTitle(note),
+        text: noteToShareMarkdown(note),
+      });
+    } catch (error) {
+      if (error && typeof error === 'object' && 'name' in error && error.name === 'AbortError') return;
+      await openShareMenu();
+      toastStore.show('Native sharing is unavailable here; choose another send option');
+    }
+  }
+
+  async function copyShareValue(value: string, message: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      closeShareMenu();
+      toastStore.show(message);
+    } catch {
+      toastStore.show('Clipboard access is unavailable; download the Markdown file instead');
+    }
+  }
+
+  async function handleOpenInObsidian() {
+    try {
+      await navigator.clipboard.writeText(noteToShareMarkdown(note));
+      closeShareMenu();
+      toastStore.show('Markdown copied; opening Obsidian…');
+      window.location.href = obsidianNewNoteUrl(note);
+    } catch {
+      toastStore.show('Clipboard access is required to send this note to Obsidian');
+    }
+  }
+
+  function handleDownloadMarkdown() {
+    try {
+      downloadNoteMarkdown(note);
+      closeShareMenu();
+      toastStore.show('Markdown note downloaded');
+    } catch (error) {
+      toastStore.show(error instanceof Error ? error.message : 'Could not download the note');
+    }
+  }
+
+  async function handleQuickSend() {
+    try {
+      const encoded = await encodeQuickSendNote(await noteStore.prepareQuickSend(note));
+      const url = getShareUrl(encoded);
+      await navigator.clipboard.writeText(url);
+      closeShareMenu();
+      toastStore.show('Unencrypted Quick Send snapshot copied; anyone with the link can read it');
+    } catch (error) {
+      toastStore.show(error instanceof Error ? error.message : 'Could not create share link');
+    }
   }
 
   function handleCheckboxKeydown(e: KeyboardEvent, index: number) {
@@ -394,24 +481,66 @@
       >
         <PinIcon filled={note.pinned} />
       </button>
+      <div class="relative">
+        <button
+          bind:this={shareButtonEl}
+          onclick={() => void handleShare()}
+          class="p-2 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors {showShareMenu ? 'bg-black/10' : ''}"
+          title="Share note"
+          aria-label="Share note"
+          aria-haspopup="menu"
+          aria-expanded={showShareMenu}
+        >
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z"/></svg>
+        </button>
+        {#if showShareMenu}
+          <div
+            bind:this={shareMenuEl}
+            class="absolute bottom-full right-0 z-30 mb-2 w-64 max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-border bg-surface text-on-surface shadow-xl"
+            role="menu"
+            aria-label="Share note options"
+          >
+            <div class="border-b border-border bg-surface-dim px-3 py-2.5">
+              <p class="text-sm font-medium">Send a Markdown copy</p>
+              <p class="mt-0.5 text-xs text-on-surface-muted">The destination receives plaintext.</p>
+            </div>
+            <div class="grid p-1.5 text-sm">
+              <button
+                type="button"
+                role="menuitem"
+                class="rounded-lg px-3 py-2 text-left hover:bg-surface-dim focus:bg-surface-dim"
+                onclick={() => void handleOpenInObsidian()}
+              >Open in Obsidian</button>
+              <button
+                type="button"
+                role="menuitem"
+                class="rounded-lg px-3 py-2 text-left hover:bg-surface-dim focus:bg-surface-dim"
+                onclick={() => void copyShareValue(noteToShareMarkdown(note), 'Markdown copied')}
+              >Copy as Markdown</button>
+              <button
+                type="button"
+                role="menuitem"
+                class="rounded-lg px-3 py-2 text-left hover:bg-surface-dim focus:bg-surface-dim"
+                onclick={() => void copyShareValue(noteToShareText(note), 'Plain text copied')}
+              >Copy as plain text</button>
+              <button
+                type="button"
+                role="menuitem"
+                class="rounded-lg px-3 py-2 text-left hover:bg-surface-dim focus:bg-surface-dim"
+                onclick={handleDownloadMarkdown}
+              >Download .md</button>
+              <div class="my-1 border-t border-border"></div>
+              <button
+                type="button"
+                role="menuitem"
+                class="rounded-lg px-3 py-2 text-left text-on-surface-muted hover:bg-surface-dim focus:bg-surface-dim"
+                onclick={() => void handleQuickSend()}
+              >Copy unencrypted Quick Send link</button>
+            </div>
+          </div>
+        {/if}
+      </div>
       <button
-        onclick={async () => {
-          try {
-            const encoded = await encodeQuickSendNote(await noteStore.prepareQuickSend(note));
-            const url = getShareUrl(encoded);
-            await navigator.clipboard.writeText(url);
-            toastStore.show('Unencrypted Quick Send snapshot copied; anyone with the link can read it');
-          } catch (error) {
-            toastStore.show(error instanceof Error ? error.message : 'Could not create share link');
-          }
-        }}
-        class="p-2 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors"
-        title="Quick Send — copy unencrypted snapshot link"
-        aria-label="Quick Send — copy unencrypted snapshot link"
-      >
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z"/></svg>
-      </button>
-<button
         type="button"
         onclick={handleDelete}
         disabled={deleting}
