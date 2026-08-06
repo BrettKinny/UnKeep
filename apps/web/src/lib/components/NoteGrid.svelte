@@ -2,20 +2,33 @@
   import type { Note } from '@unkeep/core';
   import NoteCard from './NoteCard.svelte';
 
-  let { pinnedNotes, unpinnedNotes, onEdit, emptyMessage }: {
+  let {
+    pinnedNotes,
+    unpinnedNotes,
+    onEdit,
+    emptyMessage,
+    trashed = false,
+    selectedIds,
+    onSelect,
+    onPermanentDelete,
+  }: {
     pinnedNotes: Note[];
     unpinnedNotes: Note[];
     onEdit: (note: Note) => void;
     emptyMessage?: string;
+    trashed?: boolean;
+    selectedIds?: Set<string>;
+    onSelect?: (note: Note, selected: boolean) => void;
+    onPermanentDelete?: (note: Note) => void;
   } = $props();
 </script>
 
 {#if pinnedNotes.length > 0}
   <div class="mb-6">
     <h2 class="text-xs font-semibold text-on-surface-muted uppercase tracking-wide mb-3 px-1">Pinned</h2>
-    <div class="columns-1 gap-4 sm:columns-2 lg:columns-3 xl:columns-4 2xl:columns-5">
+    <div class="note-columns">
       {#each pinnedNotes as note (note.id)}
-        <NoteCard {note} {onEdit} />
+        <NoteCard {note} {onEdit} {trashed} selected={selectedIds?.has(note.id)} {onSelect} {onPermanentDelete} />
       {/each}
     </div>
   </div>
@@ -25,12 +38,19 @@
   {#if pinnedNotes.length > 0}
     <h2 class="text-xs font-semibold text-on-surface-muted uppercase tracking-wide mb-3 px-1">Others</h2>
   {/if}
-  <div class="columns-1 gap-4 sm:columns-2 lg:columns-3 xl:columns-4 2xl:columns-5">
+  <div class="note-columns">
     {#each unpinnedNotes as note (note.id)}
-      <NoteCard {note} {onEdit} />
+      <NoteCard {note} {onEdit} {trashed} selected={selectedIds?.has(note.id)} {onSelect} {onPermanentDelete} />
     {/each}
   </div>
 {/if}
+
+<style>
+  .note-columns {
+    column-gap: 1rem;
+    column-width: 14.75rem;
+  }
+</style>
 
 {#if pinnedNotes.length === 0 && unpinnedNotes.length === 0}
   <div class="text-center py-16 text-on-surface-muted">

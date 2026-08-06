@@ -41,7 +41,7 @@ UnKeep is dual-purpose: a self-hosted Keep-style PWA for humans, and a scratchpa
 
 - `packages/core` — Pure TypeScript domain library: note types, validation and migrations, Markdown conversion, and context-bound AES-256-GCM envelopes. It also retains legacy `StorageAdapter` experiments (IndexedDB, local Markdown, Git, and S3), which are not supported product backends. Built with `tsc` to `dist/`.
 - `packages/client` — Headless client SDK: `RelayClient`, `EncryptedSync`, device key store, pairing. Runs in Node and the browser.
-- `apps/cli` — The `unkeep` binary: `login`, `provision` (mints agent env bundles), `credentials`, `list`, `get`, `put`, `delete`, `sync`, `clip`, `paste`. Auth from flags, `UNKEEP_*` env vars, or the config file; `--json` for stable machine output.
+- `apps/cli` — The `unkeep` binary: `login`, `provision` (mints agent env bundles), `credentials`, `list`, `get`, `put`, recoverable `delete`, `restore`, `sync`, `clip`, `paste`. Auth from flags, `UNKEEP_*` env vars, or the config file; `--json` for stable machine output.
 - `apps/web` — SvelteKit SPA (`adapter-static`, outputs to `apps/web/build/`). Consumes `@unkeep/core` and `@unkeep/client` as workspace dependencies.
 - `apps/server` — Zero-dependency Node 22.13+ relay: SQLite-backed sync API plus static PWA host. It stores ciphertext, credential hashes, record metadata, and temporary pairing state.
 

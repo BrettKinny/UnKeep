@@ -54,6 +54,9 @@ let NoteStore: new (readVaultResources?: () => TestVaultResources) => {
   updateNote(id: string, updates: Partial<Omit<Note, 'id' | 'createdAt'>>): void;
   addAttachment(noteId: string, file: File): Promise<void>;
   removeAttachment(noteId: string, attachmentId: string): Promise<void>;
+  trashNote(noteId: string): Promise<boolean>;
+  restoreTrashedNote(noteId: string): Promise<boolean>;
+  permanentlyDeleteNote(noteId: string): Promise<boolean>;
   deleteNote(noteId: string): Promise<unknown | null>;
   undoDelete(token: unknown): Promise<void>;
   sync(): Promise<void>;
@@ -1869,6 +1872,36 @@ describe('NoteStore vault lifecycle', () => {
     await expect(newAttachments.pendingUploads()).resolves.toEqual([]);
     expect(store.notes).toEqual([expect.objectContaining({ content: 'new vault', images: [expect.objectContaining(attachment)] })]);
     expect(localValues.get(newResources.pendingKey)).toBeUndefined();
+  });
+
+  it('keeps trashed note content and attachment bytes recoverable until explicit deletion', async () => {
+    const attachment = { id: 'trash-image', name: 'trash.png', mimeType: 'image/png', size: 3 };
+    const original = { ...note('trash-note', 'recover me'), archived: true, images: [attachment] };
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'trash');
+    const bytes = new Uint8Array([1, 2, 3]);
+    await attachments.save(original.id, attachment, bytes);
+    const adapter = new TestAdapter([original]);
+    const store = new NoteStore(() => resources('trash', attachments));
+    await store.initWithAdapter(adapter, {});
+
+    await expect(store.permanentlyDeleteNote(original.id)).resolves.toBe(false);
+    await expect(adapter.getNote(original.id)).resolves.toEqual(original);
+
+    await expect(store.trashNote(original.id)).resolves.toBe(true);
+    await expect(adapter.getNote(original.id)).resolves.toMatchObject({
+      content: original.content,
+      archived: false,
+      trashedAt: expect.any(Number),
+      images: [attachment],
+    });
+    await expect(attachments.get(original.id, attachment.id)).resolves.toEqual({ attachment, bytes });
+    await expect(attachments.pendingDeletes()).resolves.toEqual([]);
+
+    await expect(store.restoreTrashedNote(original.id)).resolves.toBe(true);
+    const restored = await adapter.getNote(original.id);
+    expect(restored.trashedAt).toBeUndefined();
+    expect(restored.content).toBe(original.content);
+    await expect(attachments.get(original.id, attachment.id)).resolves.toEqual({ attachment, bytes });
   });
 
   it('finishes a deferred delete in its origin vault without mutating the same position in a new vault', async () => {

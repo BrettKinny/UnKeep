@@ -19,7 +19,7 @@
   import PinIcon from './PinIcon.svelte';
   import LinkedText from './LinkedText.svelte';
 
-  let { note, onClose }: { note: Note; onClose: () => void } = $props();
+  let { note, onClose, readOnly = false }: { note: Note; onClose: () => void; readOnly?: boolean } = $props();
 
   // svelte-ignore state_referenced_locally
   let content = $state(note.content);
@@ -42,6 +42,9 @@
   let showColorPicker = $state(false);
   let showShareMenu = $state(false);
   let showMarkdown = $state(false);
+  $effect(() => {
+    if (readOnly && !note.checkboxes) showMarkdown = true;
+  });
   let deleting = $state(false);
   let markdownBlocks = $derived(parseMarkdown(content));
   let dialogEl: HTMLDivElement | undefined = $state();
@@ -63,27 +66,33 @@
   }
 
   function handleContentChange() {
+    if (readOnly) return;
     noteStore.updateNote(note.id, { content });
   }
 
   function handleTitleChange() {
+    if (readOnly) return;
     noteStore.updateNote(note.id, { title });
   }
 
   function handleLabelsChange() {
+    if (readOnly) return;
     const labels = [...new Set(labelsText.split(',').map(label => label.trim()).filter(Boolean))];
     noteStore.updateNote(note.id, { labels });
   }
 
   function handleCheckboxToggle(itemId: string, checked: boolean) {
+    if (readOnly) return;
     noteStore.updateChecklistItem(note.id, itemId, { checked });
   }
 
   function handleCheckboxText(itemId: string, text: string) {
+    if (readOnly) return;
     noteStore.updateChecklistItem(note.id, itemId, { text });
   }
 
   function handleAddCheckboxItem() {
+    if (readOnly) return;
     noteStore.addChecklistItem(note.id, '');
   }
 
@@ -95,15 +104,15 @@
     if (deleting) return;
     deleting = true;
     try {
-      const deleted = await noteStore.deleteNote(note.id);
-      if (!deleted) return;
+      const noteId = note.id;
+      if (!await noteStore.trashNote(noteId)) return;
       onClose();
-      toastStore.show('Note deleted', {
+      toastStore.show('Moved to Trash', {
         action: {
           label: 'Undo',
-          fn: () => noteStore.undoDelete(deleted),
+          fn: () => void noteStore.restoreTrashedNote(noteId),
         },
-        timeout: 3000,
+        timeout: 5000,
       });
     } finally {
       deleting = false;
@@ -269,7 +278,7 @@
     style="background-color: {bgColor()}"
     role="dialog"
     aria-modal="true"
-    aria-label="Edit note"
+    aria-label={readOnly ? 'View trashed note' : 'Edit note'}
     tabindex="-1"
   >
     <!-- Content -->
@@ -279,6 +288,7 @@
         id="edit-note-title"
         bind:value={title}
         oninput={handleTitleChange}
+        readonly={readOnly}
         class="w-full mb-3 bg-transparent text-lg font-semibold text-on-surface outline-none"
         placeholder="Title"
       />
@@ -288,7 +298,7 @@
             {#if isImageAttachment(attachment) && hasLocalAttachmentUrl(attachment)}
               <figure class="group/attachment relative overflow-hidden rounded">
                 <img src={attachment.url} alt={attachment.name} class="w-full max-h-48 object-cover" />
-                <button
+                {#if !readOnly}<button
                   type="button"
                   class="absolute right-2 top-2 grid h-8 w-8 place-items-center rounded-full bg-black/65 text-white opacity-80 hover:opacity-100 focus:opacity-100"
                   aria-label={`Remove ${attachment.name}`}
@@ -296,7 +306,7 @@
                   onclick={() => void noteStore.removeAttachment(note.id, attachment.id)}
                 >
                   <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18L18 6M6 6l12 12"/></svg>
-                </button>
+                </button>{/if}
               </figure>
             {/if}
           {/each}
@@ -307,7 +317,7 @@
           {#each note.images.filter(attachment => !isImageAttachment(attachment)) as attachment}
             <AttachmentChip
               {attachment}
-              onRemove={() => void noteStore.removeAttachment(note.id, attachment.id)}
+              onRemove={readOnly ? undefined : () => void noteStore.removeAttachment(note.id, attachment.id)}
             />
           {/each}
         </div>
@@ -320,6 +330,7 @@
                 type="checkbox"
                 aria-label={`Mark ${item.text || 'checklist item'} ${item.checked ? 'incomplete' : 'complete'}`}
                 checked={item.checked}
+                disabled={readOnly}
                 onchange={() => handleCheckboxToggle(item.id, !item.checked)}
                 class="w-4 h-4 rounded"
               />
@@ -327,25 +338,26 @@
                 type="text"
                 aria-label="Checklist item"
                 value={item.text}
+                readonly={readOnly}
                 oninput={(e) => handleCheckboxText(item.id, e.currentTarget.value)}
                 onkeydown={(e) => handleCheckboxKeydown(e, i)}
                 class="flex-1 bg-transparent text-on-surface outline-none checklist-input"
                 placeholder="List item"
               />
-              <button
+              {#if !readOnly}<button
                 onclick={() => handleRemoveCheckboxItem(item.id)}
                 class="p-1 text-on-surface-muted hover:text-danger opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100 transition-opacity"
                 aria-label="Remove item"
               >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12"/></svg>
-              </button>
+              </button>{/if}
             </li>
           {/each}
-          <li>
+          {#if !readOnly}<li>
             <button onclick={handleAddCheckboxItem} class="text-sm text-on-surface-muted hover:text-on-surface">
               + Add item
             </button>
-          </li>
+          </li>{/if}
         </ul>
       {:else if showMarkdown}
         <div class="min-h-[200px] text-on-surface">
@@ -390,6 +402,7 @@
           id="edit-note-content"
           bind:value={content}
           oninput={handleContentChange}
+          readonly={readOnly}
           class="w-full min-h-[200px] bg-transparent text-on-surface resize-none outline-none"
           placeholder="Note content..."
         ></textarea>
@@ -399,6 +412,7 @@
         id="edit-note-labels"
         bind:value={labelsText}
         onchange={handleLabelsChange}
+        readonly={readOnly}
         class="w-full mt-4 bg-transparent text-base sm:text-sm text-on-surface-muted outline-none"
         placeholder="Labels, separated by commas"
       />
@@ -406,7 +420,7 @@
 
     <!-- Toolbar -->
     <div class="flex items-center gap-1 p-3 border-t border-border/30">
-      <label
+      {#if !readOnly}<label
         class="p-2 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors cursor-pointer"
         title="Add attachment"
         aria-label="Add attachment"
@@ -531,11 +545,12 @@
         onclick={handleDelete}
         disabled={deleting}
         class="p-2 rounded-full hover:bg-black/10 text-danger transition-colors"
-        title="Delete"
-        aria-label="Delete"
+        title="Move to Trash"
+        aria-label="Move to Trash"
       >
         <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
       </button>
+      {/if}
       <span class="flex-1"></span>
       <button
         onclick={onClose}

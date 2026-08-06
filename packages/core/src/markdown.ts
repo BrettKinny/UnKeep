@@ -9,6 +9,7 @@ export function noteToMarkdown(note: Note): string {
     `pinned: ${note.pinned}`,
     `archived: ${note.archived}`,
     note.color ? `color: ${note.color}` : null,
+    note.trashedAt !== undefined ? `trashedAt: ${note.trashedAt}` : null,
     note.deleted ? `deleted: ${note.deleted}` : null,
     note.checkboxes ? `checkboxes: ${JSON.stringify(note.checkboxes)}` : null,
     '---',
@@ -42,6 +43,9 @@ export function markdownToNote(content: string): Note {
     pinned: getVal('pinned') === 'true',
     archived: getVal('archived') === 'true',
     color: (getVal('color') as Note['color']) || undefined,
+    trashedAt: getVal('trashedAt') === undefined
+      ? undefined
+      : Number(getVal('trashedAt')),
     deleted: getVal('deleted') === 'true' ? true : undefined,
     checkboxes,
     content: body,

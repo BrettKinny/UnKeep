@@ -201,7 +201,31 @@ test.describe.serial('UnKeep browser vault', () => {
     await expect(page.getByText(EDITED_CONTENT, { exact: true })).toBeVisible();
   });
 
-  test('deletes and restores a note from the expanded editor', async () => {
+  test('moves a note through the recoverable Trash view and restores it', async () => {
+    const editButton = page.getByRole('button', { name: `Edit note: ${EDITED_TITLE}` });
+    const card = editButton.locator('..');
+    await card.hover();
+    await card.getByRole('button', { name: 'Move to Trash' }).click();
+    await expect(editButton).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'Open UnKeep menu' }).click();
+    await page.getByRole('menuitem', { name: 'Trash' }).click();
+    await expect(page.getByRole('heading', { name: 'Trash' })).toBeVisible();
+    await expect(page.getByRole('checkbox', { name: 'Select note' })).toBeVisible();
+    const trashedCard = page.getByRole('button', { name: `View trashed note: ${EDITED_TITLE}` }).locator('..');
+    await trashedCard.getByRole('button', { name: 'Restore note' }).click();
+    await expect(page.getByText('Trash is empty')).toBeVisible();
+
+    await page.getByRole('button', { name: 'Back to notes' }).click();
+    await expect(page.getByRole('button', { name: `Edit note: ${EDITED_TITLE}` })).toBeVisible();
+    const staleUndo = page.getByRole('button', { name: 'Undo' });
+    if (await staleUndo.count()) {
+      await staleUndo.last().click();
+      await expect(staleUndo).toHaveCount(0);
+    }
+  });
+
+  test('moves and restores a note from the expanded editor', async () => {
     await page.getByRole('button', { name: 'Create a new note' }).click();
     await page.getByLabel('Note title').fill(MODAL_DELETE_TITLE);
     await page.getByRole('button', { name: 'Close' }).click();
@@ -211,12 +235,13 @@ test.describe.serial('UnKeep browser vault', () => {
     await card.click({ position: { x: 8, y: 8 } });
 
     const editor = page.getByRole('dialog', { name: 'Edit note' });
-    await editor.getByRole('button', { name: 'Delete' }).click();
+    await editor.getByRole('button', { name: 'Move to Trash' }).click();
     await expect(editor).not.toBeVisible();
     await expect(card).toHaveCount(0);
-    await expect(page.getByText('Note deleted', { exact: true })).toBeVisible();
+    const movedToast = page.getByText('Moved to Trash', { exact: true }).last().locator('..');
+    await expect(movedToast).toBeVisible();
 
-    await page.getByRole('button', { name: 'Undo' }).click();
+    await movedToast.getByRole('button', { name: 'Undo' }).click();
     await expect(card).toBeVisible();
   });
 
@@ -243,7 +268,8 @@ test.describe.serial('UnKeep browser vault', () => {
   });
 
   test('imports a Google Keep note with its referenced image and reloads the decoded bytes', async () => {
-    await page.getByRole('button', { name: 'Import from Keep' }).click();
+    await page.getByRole('button', { name: 'Open UnKeep menu' }).click();
+    await page.getByRole('menuitem', { name: 'Import notes…' }).click();
     const importer = page.getByRole('dialog', { name: 'Import notes' });
     await importer.locator('#keep-import-files').setInputFiles([
       {

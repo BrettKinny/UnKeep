@@ -175,15 +175,15 @@ test('uses env-only auth for put, list, get, sync, filters, and stable JSON', as
   expect(JSON.parse(result.stdout).content).toBe('encrypted hello');
 
   result = await invoke([
-    'put', 'archived-note', 'hidden text', '--label', 'work,old', '--archived', '--json',
+    'put', 'second-note', 'hidden text', '--label', 'work,old', '--json',
   ], context.environment, { now: () => 200 });
   expect(result.code).toBe(0);
-  result = await invoke(['list', '--archived', '--label', 'old', '-q', 'hidden', '--json'], context.environment);
-  expect(JSON.parse(result.stdout).map((note: { id: string }) => note.id)).toEqual(['archived-note']);
+  result = await invoke(['list', '--label', 'old', '-q', 'hidden', '--json'], context.environment);
+  expect(JSON.parse(result.stdout).map((note: { id: string }) => note.id)).toEqual(['second-note']);
 
   const second = new EncryptedSync(context.session, context.masterKey, new MemoryClientStorage());
   const pulled = await second.pull();
-  expect(pulled.notes.map(note => note.id).sort()).toEqual(['archived-note', 'cli-note']);
+  expect(pulled.notes.map(note => note.id).sort()).toEqual(['cli-note', 'second-note']);
 });
 
 test('surfaces durable poison-note quarantine on JSON and implicit sync commands', async () => {
@@ -279,7 +279,7 @@ test('escapes terminal controls in interactive human output without changing JSO
   expect(JSON.parse(result.stdout).content).toBe(hostileContent);
 });
 
-test('creates notes with generated IDs and deletes them with tombstones', async () => {
+test('creates notes and applies the recoverable Trash lifecycle before permanent deletion', async () => {
   const context = await testContext();
   let result = await invoke(['put', '--content', 'scratch entry', '--json'], context.environment, { now: () => 400 });
   expect(result.code).toBe(0);
@@ -316,15 +316,18 @@ test('creates notes with generated IDs and deletes them with tombstones', async 
   expect(result.stderr).toContain(`${MAX_STDIN_CONTENT_LENGTH}-character note limit`);
 
   result = await invoke(['delete', created.id, '--json'], context.environment, { now: () => 402 });
-  expect(result).toEqual({ code: 0, stdout: `${JSON.stringify({ id: created.id, deleted: true })}\n`, stderr: '' });
+  expect(result).toEqual({ code: 0, stdout: `${JSON.stringify({ id: created.id, trashed: true, trashedAt: 402 })}\n`, stderr: '' });
 
   result = await invoke(['get', created.id], context.environment);
+  expect(result).toEqual({ code: 0, stdout: 'scratch entry\n', stderr: '' });
+
+  result = await invoke(['put', created.id, 'must not mutate trash'], context.environment);
   expect(result.code).toBe(1);
-  expect(result.stderr).toContain(`Note not found: ${created.id}`);
+  expect(result.stderr).toContain('restore it before editing');
 
   result = await invoke(['delete', created.id], context.environment);
   expect(result.code).toBe(1);
-  expect(result.stderr).toContain(`Note not found: ${created.id}`);
+  expect(result.stderr).toContain('already in Trash');
 
   result = await invoke(['list', '--json'], context.environment);
   expect(JSON.parse(result.stdout).map((note: { id: string }) => note.id)).toEqual([
@@ -332,11 +335,42 @@ test('creates notes with generated IDs and deletes them with tombstones', async 
     pipedId,
   ]);
 
-  // Another device sees the tombstone, not the deleted note.
+  result = await invoke(['list', '--trash', '--json'], context.environment);
+  expect(JSON.parse(result.stdout)).toEqual([
+    expect.objectContaining({ id: created.id, trashedAt: 402 }),
+  ]);
+
+  result = await invoke(['delete', created.id, '--permanent', '--json'], context.environment, { now: () => 403 });
+  expect(result).toEqual({
+    code: 0,
+    stdout: `${JSON.stringify({ id: created.id, deleted: true, permanent: true })}\n`,
+    stderr: '',
+  });
+
+  // Another device sees only the final tombstone, not the recoverable payload.
   const second = new EncryptedSync(context.session, context.masterKey, new MemoryClientStorage());
   const pulled = await second.pull();
   expect(pulled.notes.map(note => note.id)).toEqual([pipedId, 'split-unicode']);
   expect(pulled.deletedIds).toContain(created.id);
+});
+
+test('restores a trashed note and refuses permanent deletion of an active note', async () => {
+  const context = await testContext();
+  await invoke(['put', 'restore-me', 'recoverable'], context.environment, { now: () => 500 });
+  await invoke(['delete', 'restore-me'], context.environment, { now: () => 501 });
+
+  let result = await invoke(['restore', 'restore-me', '--json'], context.environment, { now: () => 502 });
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    id: 'restore-me',
+    content: 'recoverable',
+    updatedAt: 502,
+  });
+  expect(JSON.parse(result.stdout)).not.toHaveProperty('trashedAt');
+
+  result = await invoke(['delete', 'restore-me', '--permanent'], context.environment);
+  expect(result.code).toBe(1);
+  expect(result.stderr).toContain('requires the note to be in Trash');
 });
 
 test('round-trips the valid __proto__ note ID without corrupting the local cache', async () => {
@@ -381,7 +415,7 @@ test('round-trips the valid __proto__ note ID without corrupting the local cache
   });
   expect(result).toEqual({
     code: 0,
-    stdout: `${JSON.stringify({ id: '__proto__', deleted: true })}\n`,
+    stdout: `${JSON.stringify({ id: '__proto__', trashed: true, trashedAt: 426 })}\n`,
     stderr: '',
   });
 

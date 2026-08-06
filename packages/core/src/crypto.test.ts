@@ -64,7 +64,7 @@ describe('E2EE envelopes', () => {
 
     await expect(decryptNote(envelope, masterKey, { ownerId: 'owner-1', noteId: note.id })).resolves.toEqual({
       ...note,
-      schemaVersion: 1,
+      schemaVersion: 2,
     });
     await expect(decryptNote(envelope, masterKey, { ownerId: 'owner-2', noteId: note.id })).rejects.toThrow();
   });
@@ -94,7 +94,7 @@ describe('E2EE envelopes', () => {
 
     await expect(decryptNote(envelope, masterKey, context)).resolves.toEqual({
       ...note,
-      schemaVersion: 1,
+      schemaVersion: 2,
       images: [{
         id: 'attachment-1',
         name: 'payload.txt',
