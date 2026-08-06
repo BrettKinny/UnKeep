@@ -1958,6 +1958,32 @@ describe('NoteStore vault lifecycle', () => {
     expect(localValues.get(newResources.pendingKey)).toBeUndefined();
   });
 
+  it('requeues a pending edit when durable deletion fails', async () => {
+    vi.useFakeTimers();
+    const original = note('failed-delete', 'original content');
+    const adapter = new TestAdapter([original]);
+    const store = new NoteStore(() => resources('failed-delete'));
+    await store.initWithAdapter(adapter, {});
+    store.updateNote(original.id, { content: 'edited before delete' });
+    adapter.failNextSave = true;
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    try {
+      await expect(store.deleteNote(original.id)).resolves.toBeNull();
+      await vi.advanceTimersByTimeAsync(501);
+    } finally {
+      logged.mockRestore();
+      vi.useRealTimers();
+    }
+
+    const stored = await adapter.getNote(original.id);
+    expect(stored).toMatchObject({ content: 'edited before delete' });
+    expect(stored).not.toHaveProperty('deleted');
+    expect(store.notes).toEqual([
+      expect.objectContaining({ id: original.id, content: 'edited before delete' }),
+    ]);
+  });
+
   it('finishes a deferred Undo durably in its origin vault without inserting into the new vault', async () => {
     const backing = new MemoryClientStorage();
     const readStarted = deferred<void>();

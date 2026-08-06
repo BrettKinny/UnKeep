@@ -9,6 +9,7 @@ const EDITED_CONTENT = 'This edit must survive a full reload.';
 const IMAGE_NAME = 'playwright-pixel.png';
 const KEEP_IMPORT_TITLE = 'Google Keep image import';
 const KEEP_IMPORT_IMAGE = 'keep-referenced-pixel.png';
+const MODAL_DELETE_TITLE = 'Delete from expanded note';
 const IMAGE_BYTES = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6qAAAAABJRU5ErkJggg==',
   'base64',
@@ -217,6 +218,31 @@ test.describe.serial('UnKeep browser vault', () => {
 
     await page.getByRole('button', { name: 'Back to notes' }).click();
     await expect(page.getByRole('button', { name: `Edit note: ${EDITED_TITLE}` })).toBeVisible();
+    const staleUndo = page.getByRole('button', { name: 'Undo' });
+    if (await staleUndo.count()) {
+      await staleUndo.last().click();
+      await expect(staleUndo).toHaveCount(0);
+    }
+  });
+
+  test('moves and restores a note from the expanded editor', async () => {
+    await page.getByRole('button', { name: 'Create a new note' }).click();
+    await page.getByLabel('Note title').fill(MODAL_DELETE_TITLE);
+    await page.getByRole('button', { name: 'Close' }).click();
+
+    const card = page.getByRole('button', { name: `Edit note: ${MODAL_DELETE_TITLE}` });
+    await expect(card).toBeVisible();
+    await card.click({ position: { x: 8, y: 8 } });
+
+    const editor = page.getByRole('dialog', { name: 'Edit note' });
+    await editor.getByRole('button', { name: 'Move to Trash' }).click();
+    await expect(editor).not.toBeVisible();
+    await expect(card).toHaveCount(0);
+    const movedToast = page.getByText('Moved to Trash', { exact: true }).last().locator('..');
+    await expect(movedToast).toBeVisible();
+
+    await movedToast.getByRole('button', { name: 'Undo' }).click();
+    await expect(card).toBeVisible();
   });
 
   test('keeps an attached image visible after reload', async () => {

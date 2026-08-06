@@ -161,9 +161,11 @@
 
   <!-- Action buttons - show on hover, focus-within, or touch devices -->
   <div
-    class="note-actions pointer-events-auto relative z-20 flex items-center gap-1 mt-2 pt-2 border-t border-border/50 transition-opacity duration-150"
+    class="note-actions relative z-20 flex items-center gap-1 mt-2 pt-2 border-t border-border/50 transition-opacity duration-150"
     class:opacity-0={!actionsVisible && !trashed}
     class:opacity-100={actionsVisible || trashed}
+    class:pointer-events-none={!actionsVisible && !trashed}
+    class:pointer-events-auto={actionsVisible || trashed}
   >
     {#if trashed}
       <button
@@ -246,6 +248,7 @@
   @media (hover: none) {
     .note-actions {
       opacity: 1 !important;
+      pointer-events: auto !important;
     }
   }
 </style>
