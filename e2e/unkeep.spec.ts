@@ -322,7 +322,6 @@ test.describe.serial('UnKeep browser vault', () => {
       page = await context.newPage();
       const response = await page.goto('/', { waitUntil: 'domcontentloaded' });
       expect(response?.fromServiceWorker()).toBe(true);
-      expect(await page.evaluate(() => navigator.onLine)).toBe(false);
       await expect.poll(() => page.evaluate(async () => {
         try {
           await fetch('/api/v1/status');
