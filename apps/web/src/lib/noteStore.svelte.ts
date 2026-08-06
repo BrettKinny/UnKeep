@@ -1194,6 +1194,9 @@ export class NoteStore {
         const stored = await target.attachments.get(id, attachment.id);
         if (stored) await target.attachments.save(id, stored.attachment, stored.bytes, { pendingUpload: true });
       }
+      if (target.context.isCurrent() && this.notes.some(current => current.id === id)) {
+        this.debouncedSave(activeNote);
+      }
       if (target.context.isCurrent()) toastStore.show('Failed to delete note');
       return null;
     }
@@ -1211,6 +1214,9 @@ export class NoteStore {
         await target.attachments.cancelDelete(id, attachment.id);
         const stored = await target.attachments.get(id, attachment.id);
         if (stored) await target.attachments.save(id, stored.attachment, stored.bytes, { pendingUpload: true });
+      }
+      if (target.context.isCurrent() && this.notes.some(current => current.id === id)) {
+        this.debouncedSave(activeNote);
       }
       if (target.context.isCurrent()) toastStore.show('Failed to delete note');
       return null;

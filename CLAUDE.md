@@ -39,7 +39,7 @@ UnKeep is dual-purpose: a self-hosted Keep-style PWA for humans, and a scratchpa
 
 **pnpm monorepo** with five workspaces:
 
-- `packages/core` — Pure TypeScript domain library: note types, validation and migrations, Markdown conversion, and context-bound AES-256-GCM envelopes. Its experimental subpath retains only the browser working-copy implementation during migration away from the old adapter seam. Built with `tsc` to `dist/`.
+- `packages/core` — Pure TypeScript domain library: note types, validation and migrations, Markdown conversion, and context-bound AES-256-GCM envelopes. It also retains legacy `StorageAdapter` experiments (IndexedDB, local Markdown, Git, and S3), which are not supported product backends. Built with `tsc` to `dist/`.
 - `packages/client` — Headless client SDK: `RelayClient`, `EncryptedSync`, device key store, pairing. Runs in Node and the browser.
 - `apps/cli` — The `unkeep` binary: `login`, `provision` (mints agent env bundles), `credentials`, `list`, `get`, `put`, recoverable `delete`, `restore`, `sync`, `clip`, `paste`. Auth from flags, `UNKEEP_*` env vars, or the config file; `--json` for stable machine output.
 - `apps/web` — SvelteKit SPA (`adapter-static`, outputs to `apps/web/build/`). Consumes `@unkeep/core` and `@unkeep/client` as workspace dependencies.
@@ -51,7 +51,7 @@ UnKeep is dual-purpose: a self-hosted Keep-style PWA for humans, and a scratchpa
 - **`noteStore`** (`apps/web/src/lib/noteStore.svelte.ts`) — singleton class-based store and sync orchestrator. It commits debounced edits to the local IndexedDB working copy, durably tracks pending work, and sends encrypted records through `EncryptedSync`.
 - **Encrypted relay client** (`packages/client`) — owns relay transport, optimistic revisions, mutation replay, cursor acknowledgement, device sessions, and pairing. Web and CLI clients must durably apply a pull before acknowledging its cursor.
 - **Device and recovery crypto** (`packages/core/src/crypto.ts`) — context-bound AES-256-GCM envelopes, per-device wrapping, and relay-bound recovery kits implemented with Web Crypto. The relay never receives the vault master key in the supported flow.
-- **Sharing** — Quick Send carries an encoded, unencrypted snapshot in a URL fragment. Installed share-target handling converts operating-system shares into a local draft; `/recv` previews and requires confirmation before persistence.
-- **Working-copy migration** — the IndexedDB working-copy implementation remains behind `@unkeep/core/experimental` while the supported web path migrates away from the old adapter seam. Do not reintroduce selectable storage options without an accepted design.
+- **Sharing** — Outbound note sharing sends a plaintext Markdown snapshot through native Web Share, with explicit Obsidian, clipboard, download, and legacy Quick Send fallbacks when native sharing is unavailable. Quick Send carries an encoded, unencrypted snapshot in a URL fragment. Installed share-target handling converts operating-system shares into a local draft; `/recv` previews and requires confirmation before persistence.
+- **Legacy adapters** — `packages/core/src/adapters/`, `adapterRegistry.ts`, and the old setup wizard remain experimental code. They are not wired into current onboarding and must not be described as supported storage options.
 - **TailwindCSS v4** — configured through Vite plugin (`@tailwindcss/vite`), styles in `apps/web/src/app.css`.
 - **Security boundary** — encryption protects contents from an honest-but-curious relay, not an actively compromised host serving modified PWA code. Read `THREAT_MODEL.md` before changing pairing, rendering, recovery, or authorization.
