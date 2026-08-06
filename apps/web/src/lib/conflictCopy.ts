@@ -18,6 +18,7 @@ export function createConflictCopy(
     updatedAt: now,
     pinned: false,
     archived: false,
+    trashedAt: undefined,
     deleted: undefined,
     ...(note.labels ? { labels: [...note.labels] } : {}),
     ...(note.checkboxes ? { checkboxes: note.checkboxes.map(item => ({ ...item })) } : {}),

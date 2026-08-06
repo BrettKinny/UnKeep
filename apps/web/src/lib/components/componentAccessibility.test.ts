@@ -24,6 +24,25 @@ describe('component accessibility contracts', () => {
     );
   });
 
+  it('keeps note actions above the full-card edit target for pointer input', () => {
+    const source = componentSource('NoteCard');
+
+    expect(source).toMatch(
+      /class="note-actions relative z-20[^"]*"/,
+    );
+    expect(source).toContain('class:pointer-events-none={!actionsVisible && !trashed}');
+    expect(source).toContain('class:pointer-events-auto={actionsVisible || trashed}');
+    expect(source).not.toMatch(/class="pointer-events-none relative z-0"/);
+  });
+
+  it('prevents duplicate Trash mutations while persistence is pending', () => {
+    const source = componentSource('NoteCard');
+
+    expect(source).toContain('if (mutatingTrash) return;');
+    expect(source).toContain('disabled={mutatingTrash}');
+    expect(source).toContain('void handleRestore()');
+  });
+
   it('gives note creation controls native button and label semantics', () => {
     const source = componentSource('NoteInput');
 
@@ -84,7 +103,7 @@ describe('component accessibility contracts', () => {
   it('focuses, traps Tab within, and restores focus from the note editor dialog', () => {
     const source = componentSource('NoteEditor');
 
-    expect(source).toContain("import { onMount } from 'svelte';");
+    expect(source).toMatch(/import \{[^}]*onMount[^}]*\} from 'svelte';/);
     expect(source).toContain('bind:this={dialogEl}');
     expect(source).toMatch(/if \(event\.key === 'Tab'[^)]*\)/);
     expect(source).toContain('previouslyFocused.focus()');
@@ -93,12 +112,30 @@ describe('component accessibility contracts', () => {
     expect(source).toContain('<label for="edit-note-labels"');
   });
 
-  it('labels Quick Send as an unencrypted snapshot before it is copied', () => {
+  it('offers recoverable Trash with Undo from the expanded editor', () => {
     const source = componentSource('NoteEditor');
 
-    expect(source).toContain(
-      'aria-label="Quick Send — copy unencrypted snapshot link"',
+    expect(source).toContain('async function handleDelete()');
+    expect(source).toContain('if (deleting) return;');
+    expect(source).toContain('const noteId = note.id;');
+    expect(source).toContain('await noteStore.trashNote(noteId)');
+    expect(source).toContain("toastStore.show('Moved to Trash'");
+    expect(source).toContain('fn: () => void noteStore.restoreTrashedNote(noteId)');
+    expect(source).toMatch(
+      /<button\s+type="button"[^>]*onclick=\{handleDelete\}[^>]*aria-label="Move to Trash"/s,
     );
+    expect(source).toContain('disabled={deleting}');
+  });
+
+  it('labels outbound sharing and warns that fallback destinations receive plaintext', () => {
+    const source = componentSource('NoteEditor');
+
+    expect(source).toContain('aria-label="Share note"');
+    expect(source).toContain('aria-haspopup="menu"');
+    expect(source).toContain('role="menu"');
+    expect(source).toContain('The destination receives plaintext.');
+    expect(source).toContain('Copy as Markdown');
+    expect(source).toContain('Open in Obsidian');
     expect(source).toContain(
       'Unencrypted Quick Send snapshot copied; anyone with the link can read it',
     );

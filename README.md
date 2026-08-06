@@ -160,19 +160,20 @@ pnpm preview      # preview the static PWA without the relay API
 
 ## Implemented product
 
-- **Notes and checklists** — titles, bodies, checklist conversion and editing, labels, pinning, archiving, 11 colors, a masonry card grid, and safe clickable HTTP(S), `www.`, and email links in rendered note text.
+- **Notes and checklists** — titles, bodies, checklist conversion and editing, labels, pinning, recoverable Trash, 11 colors, a masonry card grid, and safe clickable HTTP(S), `www.`, and email links in rendered note text.
 - **Local-first editing** — note writes go to IndexedDB first, with a 500 ms editor debounce and queued retries when the relay is unavailable.
 - **Search** — client-side matching across titles, bodies, checklist items, and labels.
 - **Attachments** — image previews and downloadable general files up to 25 MiB each. Bytes are saved durably in IndexedDB before upload and encrypted separately from note metadata.
 - **Encrypted sync** — AES-256-GCM note and attachment envelopes, atomic note-plus-new-attachment publication, revision cursors, tombstones, optimistic revision conflict protection, durable idempotent replay after a lost mutation response, device pairing, device revocation, and restricted service credentials.
 - **Recovery** — authenticated recovery-kit v2 binds the vault key to its relay instance; a separate operator token restores relay authorization after every device is lost.
 - **Markdown preview** — a safe rendered subset covering headings, paragraphs, emphasis, strong text, inline and fenced code, ordered and unordered lists, line breaks, and absolute HTTP(S) links.
-- **Google Keep import** — Takeout ZIPs, or selected JSON and media files, import titles, text, checklists, labels, colors, timestamps, pin/archive state, and referenced media. Trashed Keep notes are skipped; note records commit in one local transaction, failed staging rolls back, and a durable journal finalizes or removes an import interrupted by tab termination on the next startup.
+- **Google Keep import** — Takeout ZIPs, or selected JSON and media files, import titles, text, checklists, labels, colors, timestamps, pin state, legacy archive metadata, and referenced media. Previously archived Keep notes appear with regular notes; trashed Keep notes are skipped. Note records commit in one local transaction, failed staging rolls back, and a durable journal finalizes or removes an import interrupted by tab termination on the next startup.
 - **Complete vault export and restore** — the web UI downloads one JSON file containing every currently loaded note and the bytes for every attachment. Export refuses corrupt or silently partial attachment data, and the import dialog validates the complete format, preserves collisions as copies, and uses the same transactional restore path.
+- **Outbound sharing** — the note share action sends a plaintext Markdown snapshot through the operating-system share sheet when the browser exposes one. Firefox/Zen and failed native shares fall back to explicit Obsidian, Markdown/plain-text copy, `.md` download, and legacy Quick Send actions. Attachment names are listed in text exports; attachment bytes remain in UnKeep unless Quick Send is selected.
 - **Structured Quick Send** — a URL-fragment snapshot carries a note's title, body, checklist, labels, color, and small attachments that fit the payload budget; the receiver previews it and explicitly saves it to their vault. Existing text-only links remain readable.
 - **Share sheet integration** — Android/Chrome normally POSTs into the installed PWA's active service worker, which converts the content to a local URL fragment; iOS uses the documented fragment-based Shortcut. Both paths show a preview and require confirmation before a durable vault save. If the Android worker is unavailable, the relay rejects the network fallback but the plaintext has already crossed the reverse-proxy boundary; see the threat model.
 - **Installable and offline-capable PWA** — SvelteKit builds and registers a versioned service worker from `apps/web/src/service-worker.ts`. It precaches the generated application shell, falls back to that shell for offline navigation, caches same-origin assets, and never caches `/api` responses.
-- **CLI and agent workflows** — pair a terminal, list/get/put/delete notes, sync a local CLI snapshot, provision revocable agent credentials, and move files through an encrypted clipboard note.
+- **CLI and agent workflows** — pair a terminal, list/get/put notes, move notes through recoverable Trash, restore or permanently delete them, sync a local CLI snapshot, provision revocable agent credentials, and move files through an encrypted clipboard note.
 
 ## Architecture
 
@@ -347,17 +348,19 @@ still `0.x`, minor releases may contain breaking changes.
 - Revoking a device recursively revokes its known paired descendants, their service credentials, and pending approvals. Pre-schema-v7 devices have unknown lineage; the emergency revoke-all API contains every credential before operator recovery. Neither operation can erase keys or notes already copied to a device.
 - Back up the complete `/data` volume, the recovery kit, and the operator recovery token. Keep the latter two separate. A relay backup alone is ciphertext, and a recovery kit is not a backup of current note data.
 - Quick Send uses compression and base64url encoding, **not encryption**. The fragment is not sent in the HTTP request, but anyone who receives or captures the complete URL can read the snapshot.
+- Native sharing, clipboard copies, Obsidian handoff, and downloaded Markdown deliberately move plaintext outside the vault. UnKeep cannot control what the chosen application, operating system, clipboard manager, or downloaded-file backup retains.
 
 ## Current limitations and remaining work
 
 - A relay represents one vault, and the browser stores one active relay session per profile. There is no multi-user account model, multiple-vault switcher, live collaboration, or shared editing.
 - This preview does not reproduce every Google Keep feature. It has no reminders,
   handwriting or drawing tools, OCR, voice-note capture, or collaborative notes.
-- Concurrent relay writes use optimistic revision checks, and the web client preserves a stale local edit as a separately titled conflict copy instead of silently overwriting either side. There is still no merge UI, conflict history, note version history, or trash browser; deletion only offers the immediate undo action.
+- Concurrent relay writes use optimistic revision checks, and the web client preserves a stale local edit as a separately titled conflict copy instead of silently overwriting either side. There is still no merge UI, conflict history, note version history, or automatic Trash retention policy.
 - Vault export and restore operate on a complete JSON snapshot. There is no incremental or scheduled backup format, encrypted export option, selective restore UI, or server-side backup automation. Recovery-kit restore recovers keys and authorization, not exported note data.
 - Browser vault exports are capped at 10,000 notes, 10,000 attachments, 32 MiB of note text, 96 MiB of attachment bytes, and a 256 MiB serialized file. Google Keep imports accept at most 10,000 selected/archive entries and 512 MiB total expanded input, with 4 MiB per Keep note JSON; recovery-kit files are capped at 64 KiB. Larger vaults need a future streaming backup format.
 - Offline opening and editing require a previously loaded/installed app and an existing local session and key. First setup, device pairing, operator recovery, and remote sync require the relay. API responses are deliberately never served from cache.
 - Quick Send is a static copy rather than collaboration. Note data and up to 20 small attachments share a 100 KiB uncompressed structured-payload budget, and practical URL-length limits may be lower in some sharing tools.
+- Outbound Web Share support depends on HTTPS, the browser, and the operating system. Firefox/Zen desktop normally uses UnKeep's fallback menu. Text exports list attachment names but do not include attachment bytes; Quick Send remains the self-contained small-attachment option.
 - Android share-target privacy depends on an active installed service worker.
   Without it, the relay rejects the plaintext fallback POST without storing or
   rendering it, but the reverse proxy and relay host have already received the

@@ -215,6 +215,17 @@ immutable relay ID so a live unreachable upload is not retained.
 
 ## Sharing
 
+Outbound sharing creates a plaintext Markdown snapshot and hands it to an
+operating-system share target selected by the user. If native Web Share is not
+available or fails, the UI offers explicit clipboard, Markdown download,
+Obsidian custom-protocol, and legacy Quick Send actions. These destinations are
+outside the vault's cryptographic boundary. Clipboard managers, target apps,
+download folders, backups, and operating-system telemetry may retain the
+plaintext. The Obsidian handoff puts the note body on the clipboard and only a
+sanitized note name in the custom-protocol URL; it refuses to open Obsidian if
+the clipboard write fails. Markdown and plain-text exports list attachment
+names but do not copy attachment bytes.
+
 Quick Send creates a copy, not shared access or collaboration. Its payload is
 encoded and compressed, not encrypted. Anyone or any software that obtains the
 complete URL can read it, and there is no recipient identity, expiry, or
@@ -283,6 +294,12 @@ which is not included in the HTTP request.
   at the advertised maximum.
 - A relay operator can delete the database or serve an old backup. Keep and
   test independent backups and exports.
+- Trash is retention, not deletion. A note with `trashedAt` remains a live
+  encrypted record, its attachment ciphertext is retained indefinitely, it
+  continues to consume relay quota, and any client or agent with the vault key
+  can still decrypt it. Web and CLI delete actions move notes to Trash first.
+  Only an explicit permanent delete of a note already in Trash creates the
+  tombstone and cascades attachment deletion.
 - Tombstones and revocation are application-level state, not proof of secure
   erasure from SSDs, backups, logs, browser storage, or other devices.
 - The relay limits the total serialized encrypted-envelope bytes, total record

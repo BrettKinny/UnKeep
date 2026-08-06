@@ -54,6 +54,9 @@ let NoteStore: new (readVaultResources?: () => TestVaultResources) => {
   updateNote(id: string, updates: Partial<Omit<Note, 'id' | 'createdAt'>>): void;
   addAttachment(noteId: string, file: File): Promise<void>;
   removeAttachment(noteId: string, attachmentId: string): Promise<void>;
+  trashNote(noteId: string): Promise<boolean>;
+  restoreTrashedNote(noteId: string): Promise<boolean>;
+  permanentlyDeleteNote(noteId: string): Promise<boolean>;
   deleteNote(noteId: string): Promise<unknown | null>;
   undoDelete(token: unknown): Promise<void>;
   sync(): Promise<void>;
@@ -1871,6 +1874,36 @@ describe('NoteStore vault lifecycle', () => {
     expect(localValues.get(newResources.pendingKey)).toBeUndefined();
   });
 
+  it('keeps trashed note content and attachment bytes recoverable until explicit deletion', async () => {
+    const attachment = { id: 'trash-image', name: 'trash.png', mimeType: 'image/png', size: 3 };
+    const original = { ...note('trash-note', 'recover me'), archived: true, images: [attachment] };
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'trash');
+    const bytes = new Uint8Array([1, 2, 3]);
+    await attachments.save(original.id, attachment, bytes);
+    const adapter = new TestAdapter([original]);
+    const store = new NoteStore(() => resources('trash', attachments));
+    await store.initWithAdapter(adapter, {});
+
+    await expect(store.permanentlyDeleteNote(original.id)).resolves.toBe(false);
+    await expect(adapter.getNote(original.id)).resolves.toEqual(original);
+
+    await expect(store.trashNote(original.id)).resolves.toBe(true);
+    await expect(adapter.getNote(original.id)).resolves.toMatchObject({
+      content: original.content,
+      archived: false,
+      trashedAt: expect.any(Number),
+      images: [attachment],
+    });
+    await expect(attachments.get(original.id, attachment.id)).resolves.toEqual({ attachment, bytes });
+    await expect(attachments.pendingDeletes()).resolves.toEqual([]);
+
+    await expect(store.restoreTrashedNote(original.id)).resolves.toBe(true);
+    const restored = await adapter.getNote(original.id);
+    expect(restored.trashedAt).toBeUndefined();
+    expect(restored.content).toBe(original.content);
+    await expect(attachments.get(original.id, attachment.id)).resolves.toEqual({ attachment, bytes });
+  });
+
   it('finishes a deferred delete in its origin vault without mutating the same position in a new vault', async () => {
     const backing = new MemoryClientStorage();
     const readStarted = deferred<void>();
@@ -1923,6 +1956,32 @@ describe('NoteStore vault lifecycle', () => {
       { noteId: oldNote.id, attachment, retainBytes: true },
     ]);
     expect(localValues.get(newResources.pendingKey)).toBeUndefined();
+  });
+
+  it('requeues a pending edit when durable deletion fails', async () => {
+    vi.useFakeTimers();
+    const original = note('failed-delete', 'original content');
+    const adapter = new TestAdapter([original]);
+    const store = new NoteStore(() => resources('failed-delete'));
+    await store.initWithAdapter(adapter, {});
+    store.updateNote(original.id, { content: 'edited before delete' });
+    adapter.failNextSave = true;
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    try {
+      await expect(store.deleteNote(original.id)).resolves.toBeNull();
+      await vi.advanceTimersByTimeAsync(501);
+    } finally {
+      logged.mockRestore();
+      vi.useRealTimers();
+    }
+
+    const stored = await adapter.getNote(original.id);
+    expect(stored).toMatchObject({ content: 'edited before delete' });
+    expect(stored).not.toHaveProperty('deleted');
+    expect(store.notes).toEqual([
+      expect.objectContaining({ id: original.id, content: 'edited before delete' }),
+    ]);
   });
 
   it('finishes a deferred Undo durably in its origin vault without inserting into the new vault', async () => {

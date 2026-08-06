@@ -463,6 +463,7 @@ function stableNote(note: Note): Note {
   if (note.checkboxes !== undefined) result.checkboxes = note.checkboxes;
   if (note.labels !== undefined) result.labels = note.labels;
   if (note.images !== undefined) result.images = note.images;
+  if (note.trashedAt !== undefined) result.trashedAt = note.trashedAt;
   if (note.deleted !== undefined) result.deleted = note.deleted;
   return result;
 }
@@ -1153,7 +1154,9 @@ async function handleList(context: CommandContext): Promise<void> {
   const requiredLabels = labels(context.arguments.labels);
   const search = (context.arguments.search ?? context.arguments.positionals.join(' ')).trim().toLocaleLowerCase();
   const notes = Object.values(await loadNotes(context.storage, vault.session.instanceId))
-    .filter(note => context.arguments.archived === undefined || note.archived === context.arguments.archived)
+    .filter(note => context.arguments.trash
+      ? note.trashedAt !== undefined
+      : note.trashedAt === undefined)
     .filter(note => requiredLabels.every(label => note.labels?.includes(label)))
     .filter(note => !search || [note.title, note.content, ...(note.labels ?? [])]
       .some(value => value?.toLocaleLowerCase().includes(search)))
@@ -1199,6 +1202,9 @@ async function handlePut(context: CommandContext): Promise<void> {
   await syncNotes(vault, context.storage, context.stderr);
   const notes = await loadNotes(context.storage, vault.session.instanceId);
   const existing = cachedNote(notes, id);
+  if (existing?.trashedAt !== undefined) {
+    throw new Error(`Note is in Trash; restore it before editing: ${id}`);
+  }
   let content = context.arguments.content ?? (contentArguments.length ? contentArguments.join(' ') : undefined);
   if (content === undefined && context.stdin.isTTY !== true) content = await readStdin(context.stdin);
   if (content === undefined) {
@@ -1215,7 +1221,7 @@ async function handlePut(context: CommandContext): Promise<void> {
     createdAt: existing?.createdAt ?? timestamp,
     updatedAt: timestamp,
     pinned: context.arguments.pinned ?? existing?.pinned ?? false,
-    archived: context.arguments.archived ?? existing?.archived ?? false,
+    archived: existing?.archived ?? false,
   };
   if (context.arguments.title !== undefined) note.title = context.arguments.title;
   if (context.arguments.labels.length) note.labels = requestedLabels;
@@ -1239,13 +1245,54 @@ async function handleDelete(context: CommandContext): Promise<void> {
   const existing = cachedNote(notes, id);
   if (!existing) throw new Error(`Note not found: ${id}`);
 
-  await pushWithCredentialHandoff(
-    vault,
-    { ...existing, deleted: true, updatedAt: context.now() },
-  );
-  delete notes[id];
+  if (context.arguments.permanent) {
+    if (existing.trashedAt === undefined) {
+      throw new Error(`Permanent deletion requires the note to be in Trash: ${id}`);
+    }
+    await pushWithCredentialHandoff(
+      vault,
+      { ...existing, trashedAt: undefined, deleted: true, updatedAt: context.now() },
+    );
+    delete notes[id];
+    await saveNotes(context.storage, vault.session.instanceId, notes);
+    if (context.arguments.json) writeJson(context.stdout, { id, deleted: true, permanent: true });
+    else context.stdout.write(`${terminalValue(context.stdout, id)}\n`);
+    return;
+  }
+
+  if (existing.trashedAt !== undefined) throw new Error(`Note is already in Trash: ${id}`);
+  const trashedAt = context.now();
+  const trashed = {
+    ...existing,
+    archived: false,
+    trashedAt,
+    updatedAt: trashedAt,
+  } satisfies Note;
+  await pushWithCredentialHandoff(vault, trashed);
+  notes[id] = trashed;
   await saveNotes(context.storage, vault.session.instanceId, notes);
-  if (context.arguments.json) writeJson(context.stdout, { id, deleted: true });
+  if (context.arguments.json) writeJson(context.stdout, { id, trashed: true, trashedAt });
+  else context.stdout.write(`${terminalValue(context.stdout, id)}\n`);
+}
+
+async function handleRestore(context: CommandContext): Promise<void> {
+  const id = context.arguments.id ?? context.arguments.positionals[0];
+  if (!id) throw new Error('restore requires a note ID');
+  if (context.arguments.positionals.length > (context.arguments.id ? 0 : 1)) throw new Error('restore accepts only one note ID');
+  validateNoteId(id);
+
+  const vault = await connectedVault(context);
+  await syncNotes(vault, context.storage, context.stderr);
+  const notes = await loadNotes(context.storage, vault.session.instanceId);
+  const existing = cachedNote(notes, id);
+  if (!existing) throw new Error(`Note not found: ${id}`);
+  if (existing.trashedAt === undefined) throw new Error(`Note is not in Trash: ${id}`);
+
+  const restored = { ...existing, trashedAt: undefined, updatedAt: context.now() } satisfies Note;
+  await pushWithCredentialHandoff(vault, restored);
+  notes[id] = restored;
+  await saveNotes(context.storage, vault.session.instanceId, notes);
+  if (context.arguments.json) writeJson(context.stdout, stableNote(restored));
   else context.stdout.write(`${terminalValue(context.stdout, id)}\n`);
 }
 
@@ -1372,6 +1419,7 @@ export async function runCli(arguments_: readonly string[], options: RunCliOptio
         case 'get': await handleGet(context); break;
         case 'put': await handlePut(context); break;
         case 'delete': await handleDelete(context); break;
+        case 'restore': await handleRestore(context); break;
         case 'sync': await handleSync(context); break;
         case 'clip': await handleClip(context); break;
         case 'paste': await handlePaste(context); break;

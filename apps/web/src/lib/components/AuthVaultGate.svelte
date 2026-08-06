@@ -5,7 +5,6 @@
   import { approvePairingRequest, clearDeviceAccess, createPairingRequest, inspectPairingCode, resumePairingFinalization, waitForPairing, RelayClient, type DeviceCredential, type PairingSession, type PendingPairingRequest, type RelaySession, type ServiceCredential, type ServiceCredentialScope } from '@unkeep/client';
   import { deviceKeyStore, relaySessionStore } from '$lib/clientStorage';
   import { downloadRecoveryKit, readRecoveryKitFile } from '$lib/recoveryKit';
-  import { theme } from '$lib/theme.svelte';
   import { loadLocalVault } from '$lib/vaultBoot';
   import {
     createVaultAccessInvalidationChannel,
@@ -14,12 +13,10 @@
     type VaultAccessInvalidationChannel,
     type VaultAccessInvalidationKind,
   } from '$lib/vaultAccessInvalidation';
-  const themeModes = ['system', 'light', 'dark'] as const;
-
   export interface VaultReady { ownerId:string;masterKey:Uint8Array<ArrayBuffer>;session:RelaySession;migrateLegacy:boolean }
-  let {onReady,onSignedOut}:{onReady:(vault:VaultReady)=>void|Promise<void>;onSignedOut?:()=>void|Promise<void>}=$props();
+  let {onReady,onSignedOut,manageAccessOpen=false,onManageAccessClose=()=>{}}:{onReady:(vault:VaultReady)=>void|Promise<void>;onSignedOut?:()=>void|Promise<void>;manageAccessOpen?:boolean;onManageAccessClose?:()=>void}=$props();
   type View='loading'|'connect'|'setup'|'choose'|'pairing'|'recovery-confirm'|'legacy-recovery-warning'|'reclaim'|'ready';
-  let view=$state<View>('loading'),endpoint=$state(''),relayInstanceId=$state(''),setupToken=$state(''),recoveryToken=$state(''),error=$state<string|null>(null),busy=$state(false),recoverySaved=$state(false),recoveryKit=$state(''),pairing=$state<PairingSession|null>(null),pairingQr=$state(''),pairingCode=$state(''),notice=$state<string|null>(null),menu=$state(false);
+  let view=$state<View>('loading'),endpoint=$state(''),relayInstanceId=$state(''),setupToken=$state(''),recoveryToken=$state(''),error=$state<string|null>(null),busy=$state(false),recoverySaved=$state(false),recoveryKit=$state(''),pairing=$state<PairingSession|null>(null),pairingQr=$state(''),pairingCode=$state(''),notice=$state<string|null>(null);
   let devices=$state<DeviceCredential[]>([]),serviceCredentials=$state<ServiceCredential[]>([]),serviceName=$state(''),serviceScope=$state<ServiceCredentialScope>('read-only'),mintedServiceCredential=$state(''),credentialsBusy=$state(false);
   let activeKey=$state<Uint8Array<ArrayBuffer>|null>(null),activeSession=$state<RelaySession|null>(null),abort:AbortController|null=null,pairingOperation=0;
   let hasLocalKey=$state(false);
@@ -27,6 +24,24 @@
   let pendingLegacyRecoveryKit=$state('');
   let initializingSession:RelaySession|null=null,initializingAccessOperation=0,accessLifecycle=0;
   let accessInvalidationChannel:VaultAccessInvalidationChannel|null=null,accessInvalidationQueue:Promise<void>=Promise.resolve(),mounted=false;
+  let accessWasOpen=false;
+  let accessDialog:HTMLDivElement|undefined=$state();
+
+  $effect(()=>{
+    const shouldOpen=view==='ready'&&manageAccessOpen;
+    if(shouldOpen&&!accessWasOpen){accessWasOpen=true;queueMicrotask(()=>accessDialog?.focus());void loadCredentials()}
+    if(!shouldOpen&&accessWasOpen){accessWasOpen=false;pendingApproval=null}
+  });
+
+  function handleAccessKeydown(event:KeyboardEvent){
+    if(event.key==='Escape'){event.preventDefault();onManageAccessClose()}
+    if(event.key!=='Tab'||!accessDialog)return;
+    const focusable=[...accessDialog.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+    const first=focusable[0],last=focusable.at(-1);
+    if(!first||!last)return;
+    if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus()}
+    else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus()}
+  }
 
   onMount(()=>{
     mounted=true;
@@ -83,7 +98,7 @@
     initializingSession=null;
     hasLocalKey=currentKeys;
     busy=false;
-    menu=false;
+    onManageAccessClose();
     notice=currentSession
       ?'Vault access changed in another tab. Reload to use the current connection.'
       :kind==='forget'&&!currentKeys
@@ -140,28 +155,28 @@
   async function approveReviewed(){if(!activeSession||!activeKey||!pendingApproval)return;busy=true;error=null;try{await approvePairingRequest(activeSession,pendingApproval,activeKey);notice=`${pendingApproval.deviceName} approved`;pairingCode='';pendingApproval=null;await loadCredentials()}catch(e){error=e instanceof Error?e.message:String(e)}finally{busy=false}}
   function cancelApproval(){pendingApproval=null;pairingCode=''}
   async function loadCredentials(){if(!activeSession)return;credentialsBusy=true;error=null;try{const relay=new RelayClient(activeSession.endpoint,activeSession.credential);const [deviceList,serviceList]=await Promise.all([relay.devices(),relay.serviceCredentials()]);devices=deviceList.devices;serviceCredentials=serviceList.serviceCredentials;if(serviceCredentials.some(service=>!service.revokedAt&&service.issuedByDeviceId===null)&&!notice?.includes('Legacy service credentials'))notice=`${notice?`${notice} `:''}Legacy service credentials have no device issuer; revoke and re-mint them.`}catch(e){error=e instanceof Error?e.message:String(e)}finally{credentialsBusy=false}}
-  async function toggleMenu(){menu=!menu;if(!menu)pendingApproval=null;if(menu)await loadCredentials()}
   async function mintService(){if(!activeSession||!serviceName.trim())return;credentialsBusy=true;error=null;notice=null;try{const result=await new RelayClient(activeSession.endpoint,activeSession.credential).mintServiceCredential(serviceName,serviceScope);mintedServiceCredential=result.serviceCredential;serviceName='';serviceScope='read-only';notice=`Copy this ${result.scope} credential now. It will not be shown again.`;await loadCredentials()}catch(e){error=e instanceof Error?e.message:String(e)}finally{credentialsBusy=false}}
   async function revokeDevice(id:string,name:string){if(!activeSession||id===activeSession.deviceId||!window.confirm(`Revoke ${name}? That device, its known paired descendants, their service credentials, and pending approvals will lose relay access.`))return;credentialsBusy=true;error=null;try{await new RelayClient(activeSession.endpoint,activeSession.credential).revokeDevice(id);await loadCredentials()}catch(e){error=e instanceof Error?e.message:String(e)}finally{credentialsBusy=false}}
   async function revokeService(id:string){if(!activeSession)return;credentialsBusy=true;error=null;try{await new RelayClient(activeSession.endpoint,activeSession.credential).revokeServiceCredential(id);await loadCredentials()}catch(e){error=e instanceof Error?e.message:String(e)}finally{credentialsBusy=false}}
-  async function disconnect(){busy=true;error=null;try{accessLifecycle+=1;pairingOperation+=1;abort?.abort();abort=null;await onSignedOut?.();await relaySessionStore.clear();accessInvalidationChannel?.publish('disconnect');activeKey=null;activeSession=null;initializingSession=null;hasLocalKey=await deviceKeyStore.hasDeviceKeys();menu=false;view='connect'}catch(e){error=e instanceof Error?e.message:String(e)}finally{busy=false}}
-  async function forgetLocalAccess(){if(!window.confirm('Forget this vault key and connection on this browser? Local vault data will stay isolated until you pair that vault again.'))return;busy=true;error=null;try{accessLifecycle+=1;pairingOperation+=1;abort?.abort();abort=null;await onSignedOut?.();await clearDeviceAccess(deviceKeyStore,relaySessionStore);accessInvalidationChannel?.publish('forget');activeKey=null;activeSession=null;initializingSession=null;hasLocalKey=false;menu=false;notice='Stored vault access cleared. You can now connect a different vault.';view='connect'}catch(e){error=e instanceof Error?e.message:String(e)}finally{busy=false}}
+  async function disconnect(){busy=true;error=null;try{accessLifecycle+=1;pairingOperation+=1;abort?.abort();abort=null;await onSignedOut?.();await relaySessionStore.clear();accessInvalidationChannel?.publish('disconnect');activeKey=null;activeSession=null;initializingSession=null;hasLocalKey=await deviceKeyStore.hasDeviceKeys();onManageAccessClose();view='connect'}catch(e){error=e instanceof Error?e.message:String(e)}finally{busy=false}}
+  async function forgetLocalAccess(){if(!window.confirm('Forget this vault key and connection on this browser? Local vault data will stay isolated until you pair that vault again.'))return;busy=true;error=null;try{accessLifecycle+=1;pairingOperation+=1;abort?.abort();abort=null;await onSignedOut?.();await clearDeviceAccess(deviceKeyStore,relaySessionStore);accessInvalidationChannel?.publish('forget');activeKey=null;activeSession=null;initializingSession=null;hasLocalKey=false;onManageAccessClose();notice='Stored vault access cleared. You can now connect a different vault.';view='connect'}catch(e){error=e instanceof Error?e.message:String(e)}finally{busy=false}}
 </script>
 
 {#if view==='ready'}
-  <div class="fixed right-2 top-[calc(0.875rem+env(safe-area-inset-top))] z-50 sm:right-3">
-    <button class="rounded-full p-2 text-on-surface-muted hover:bg-surface-dim hover:text-on-surface" aria-label="Device menu" aria-expanded={menu} onclick={()=>void toggleMenu()}>
-      <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20"><path d="M10 6a2 2 0 110-4 2 2 0 010 4zm0 6a2 2 0 110-4 2 2 0 010 4zm0 6a2 2 0 110-4 2 2 0 010 4z"/></svg>
-    </button>
-    {#if menu}
-      <div class="absolute right-0 mt-2 max-h-[calc(100dvh-4rem)] w-80 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-xl border border-border bg-surface p-4 shadow-xl">
-        <p class="truncate text-sm">{activeSession?.endpoint}</p>
-        <div class="mt-3 flex items-center gap-1 text-sm">
-          <span class="mr-auto text-on-surface-muted">Theme</span>
-          {#each themeModes as mode}
-            <button class="rounded-full px-2.5 py-1 capitalize {theme.mode === mode ? 'bg-primary/15 text-primary' : 'text-on-surface-muted hover:bg-surface-dim'}" onclick={() => theme.set(mode)}>{mode}</button>
-          {/each}
-        </div>
+  {#if manageAccessOpen}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="fixed inset-0 z-[60] flex items-center justify-center bg-black/55 p-3 sm:p-6" onclick={(event)=>{if(event.target===event.currentTarget)onManageAccessClose()}} onkeydown={handleAccessKeydown}>
+      <div bind:this={accessDialog} class="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-2xl" role="dialog" aria-modal="true" aria-labelledby="manage-access-title" tabindex="-1">
+        <header class="flex items-center gap-3 border-b border-border px-4 py-3 sm:px-5">
+          <div class="min-w-0 flex-1">
+            <h2 id="manage-access-title" class="font-semibold text-on-surface">Manage access</h2>
+            <p class="truncate text-xs text-on-surface-muted">{activeSession?.endpoint}</p>
+          </div>
+          <button type="button" class="grid h-9 w-9 place-items-center rounded-full text-on-surface-muted hover:bg-surface-dim hover:text-on-surface" aria-label="Close access manager" onclick={onManageAccessClose}>
+            <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 18 18 6M6 6l12 12"/></svg>
+          </button>
+        </header>
+        <div class="min-h-0 overflow-y-auto p-4 sm:p-5">
         {#if pendingApproval}
           <div class="mt-3 rounded-lg border border-border bg-surface-dim p-3 text-sm">
             <p>Approve access for <strong><bdi>{pendingApproval.deviceName}</bdi></strong>?</p>
@@ -250,9 +265,10 @@
           <button class="text-sm text-on-surface-muted" onclick={disconnect}>Disconnect sync</button>
           <button class="text-sm text-danger" onclick={()=>void forgetLocalAccess()}>Forget stored vault key and switch</button>
         </div>
+        </div>
       </div>
-    {/if}
-  </div>
+    </div>
+  {/if}
 {:else}
   <main class="grid min-h-dvh place-items-center bg-surface-dim p-4"><section class="w-full max-w-md rounded-2xl border border-border bg-surface p-6 shadow-lg">
     <div class="mb-5 flex items-center gap-3"><img src="/icon.svg" alt="" class="h-12 w-12"/><div><h1 class="text-2xl font-semibold">UnKeep</h1><p class="text-sm text-on-surface-muted">Your notes. Your storage.</p></div></div>

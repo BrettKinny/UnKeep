@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import type { Note } from '@unkeep/core';
   import { noteStore } from '$lib/noteStore.svelte';
   import NoteInput from '$lib/components/NoteInput.svelte';
@@ -10,31 +9,63 @@
   import Toast from '$lib/components/Toast.svelte';
   import AuthVaultGate, { type VaultReady } from '$lib/components/AuthVaultGate.svelte';
   import KeepImporter from '$lib/components/KeepImporter.svelte';
+  import AppMenu from '$lib/components/AppMenu.svelte';
   import { listPendingShares, removePendingShares } from '$lib/shareTarget';
   import { toastStore } from '$lib/toast.svelte';
 
+  type ContentView = 'notes' | 'trash';
+  interface DeleteConfirmation { ids: string[]; emptyAll: boolean }
+
   let editingNote: Note | null = $state(null);
-  let showArchive = $state(false);
+  let contentView = $state<ContentView>('notes');
   let showImporter = $state(false);
-  let sidebarOpen = $state(false);
+  let showAccessManager = $state(false);
   let vaultReady = $state(false);
   let exporting = $state(false);
-  let desktopMedia: MediaQueryList | null = null;
+  let selectedTrashIds = $state(new Set<string>());
+  let deleteConfirmation = $state<DeleteConfirmation | null>(null);
+  let destructiveBusy = $state(false);
+  let deleteDialog: HTMLDivElement | undefined = $state();
+  let previousSearch = noteStore.searchQuery;
 
-  onMount(() => {
-    const media = window.matchMedia('(min-width: 768px)');
-    desktopMedia = media;
-    const syncSidebarToViewport = () => {
-      if (media.matches) sidebarOpen = true;
-      if (!media.matches) sidebarOpen = false;
-    };
-    syncSidebarToViewport();
-    media.addEventListener('change', syncSidebarToViewport);
-    return () => media.removeEventListener('change', syncSidebarToViewport);
+  let allTrashedNotes = $derived(noteStore.notes
+    .filter(note => !note.deleted && note.trashedAt !== undefined));
+  let selectedTrashNotes = $derived(allTrashedNotes
+    .filter(note => selectedTrashIds.has(note.id)));
+  let allVisibleTrashSelected = $derived(noteStore.trashedNotes.length > 0
+    && noteStore.trashedNotes.every(note => selectedTrashIds.has(note.id)));
+
+  $effect(() => {
+    const currentSearch = noteStore.searchQuery;
+    if (currentSearch !== previousSearch) {
+      previousSearch = currentSearch;
+      selectedTrashIds = new Set();
+    }
   });
 
-  function closeSidebarOnMobile() {
-    if (!desktopMedia?.matches) sidebarOpen = false;
+  $effect(() => {
+    if (deleteConfirmation) queueMicrotask(() => deleteDialog?.focus());
+  });
+
+  function handleDeleteDialogKeydown(event: KeyboardEvent) {
+    if (!deleteConfirmation) return;
+    if (event.key === 'Escape' && !destructiveBusy) {
+      event.preventDefault();
+      deleteConfirmation = null;
+      return;
+    }
+    if (event.key !== 'Tab' || !deleteDialog) return;
+    const focusable = [...deleteDialog.querySelectorAll<HTMLButtonElement>('button:not([disabled])')];
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (!first || !last) return;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
   }
 
   async function handleVaultReady(vault: VaultReady) {
@@ -78,12 +109,63 @@
     }
   }
 
-  function handleEditNote(note: Note) {
-    editingNote = note;
+  function showNotes() {
+    contentView = 'notes';
+    selectedTrashIds = new Set();
+    editingNote = null;
   }
 
-  function handleCloseEditor() {
+  function showTrash() {
+    contentView = 'trash';
+    selectedTrashIds = new Set();
     editingNote = null;
+  }
+
+  function setTrashSelected(note: Note, selected: boolean) {
+    const next = new Set(selectedTrashIds);
+    if (selected) next.add(note.id);
+    else next.delete(note.id);
+    selectedTrashIds = next;
+  }
+
+  function toggleSelectAllVisible() {
+    const next = new Set(selectedTrashIds);
+    if (allVisibleTrashSelected) {
+      for (const note of noteStore.trashedNotes) next.delete(note.id);
+    } else {
+      for (const note of noteStore.trashedNotes) next.add(note.id);
+    }
+    selectedTrashIds = next;
+  }
+
+  async function restoreSelected() {
+    const notes = [...selectedTrashNotes];
+    let restored = 0;
+    for (const note of notes) {
+      if (await noteStore.restoreTrashedNote(note.id)) restored += 1;
+    }
+    selectedTrashIds = new Set();
+    if (restored) toastStore.show(`Restored ${restored} note${restored === 1 ? '' : 's'}`);
+  }
+
+  function requestPermanentDelete(notes: Note[], emptyAll = false) {
+    if (!notes.length) return;
+    deleteConfirmation = { ids: notes.map(note => note.id), emptyAll };
+  }
+
+  async function confirmPermanentDelete() {
+    if (!deleteConfirmation || destructiveBusy) return;
+    destructiveBusy = true;
+    const ids = [...deleteConfirmation.ids];
+    let deleted = 0;
+    for (const id of ids) {
+      if (await noteStore.permanentlyDeleteNote(id)) deleted += 1;
+    }
+    destructiveBusy = false;
+    deleteConfirmation = null;
+    selectedTrashIds = new Set();
+    if (editingNote && ids.includes(editingNote.id)) editingNote = null;
+    if (deleted) toastStore.show(`Permanently deleted ${deleted} note${deleted === 1 ? '' : 's'}`);
   }
 
   async function handleExport() {
@@ -108,111 +190,144 @@
   }
 </script>
 
-<AuthVaultGate onReady={handleVaultReady} onSignedOut={async () => { await noteStore.disableEncryptedSync(); vaultReady = false; }} />
+<AuthVaultGate
+  onReady={handleVaultReady}
+  onSignedOut={async () => {
+    await noteStore.disableEncryptedSync();
+    vaultReady = false;
+    showAccessManager = false;
+  }}
+  manageAccessOpen={showAccessManager}
+  onManageAccessClose={() => showAccessManager = false}
+/>
 
 {#if vaultReady}
-  <main class="min-h-screen bg-surface">
-    <header class="sticky top-0 z-30 flex min-h-[calc(4rem+env(safe-area-inset-top))] items-center gap-1.5 border-b border-border bg-surface/95 px-2 pr-14 pt-[env(safe-area-inset-top)] backdrop-blur-sm sm:gap-3 sm:px-3">
-      <button
-        onclick={() => sidebarOpen = !sidebarOpen}
-        class="shrink-0 rounded-full p-2 text-on-surface-muted hover:bg-surface-dim hover:text-on-surface"
-        aria-label="Toggle navigation"
-      >
-        <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
-      </button>
-      <button
-        onclick={() => { showArchive = false; }}
-        class="flex shrink-0 items-center gap-2 text-xl font-semibold text-on-surface"
-        aria-label="Show notes"
-      >
-        <img src="/icon.svg" alt="" class="h-8 w-8 sm:h-9 sm:w-9" />
-        <span class="hidden md:inline">UnKeep</span>
-      </button>
+  <main class="min-h-dvh bg-surface">
+    <header class="sticky top-0 z-40 border-b border-border bg-surface/95 pt-[env(safe-area-inset-top)] backdrop-blur-md">
+      <div class="mx-auto grid min-h-16 max-w-[96rem] grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-3 sm:gap-5 sm:px-5">
+        <button
+          type="button"
+          onclick={showNotes}
+          class="flex shrink-0 items-center gap-2 rounded-lg pr-1 text-xl font-semibold text-on-surface focus-visible:outline-2 focus-visible:outline-primary sm:pr-3"
+          aria-label="Show notes"
+        >
+          <img src="/icon.svg" alt="" class="h-9 w-9" />
+          <span class="hidden lg:inline">UnKeep</span>
+        </button>
 
-      <div class="mx-auto w-full min-w-0 max-w-3xl"><SearchBar /></div>
+        <div class="mx-auto w-full min-w-0 max-w-3xl"><SearchBar scope={contentView} /></div>
 
-      <div class="flex shrink-0 items-center gap-0.5 sm:gap-1">
-        <SyncStatus />
+        <div class="flex shrink-0 items-center gap-1 sm:gap-2">
+          <SyncStatus />
+          <AppMenu
+            inTrash={contentView === 'trash'}
+            {exporting}
+            onShowNotes={showNotes}
+            onShowTrash={showTrash}
+            onImport={() => showImporter = true}
+            onExport={() => void handleExport()}
+            onManageAccess={() => showAccessManager = true}
+          />
+        </div>
       </div>
     </header>
 
-    {#if sidebarOpen}
-      <button class="fixed inset-0 z-10 bg-black/30 md:hidden" aria-label="Close navigation" onclick={() => sidebarOpen = false}></button>
-    {/if}
-    <aside
-      class="fixed bottom-0 left-0 top-[calc(4rem+env(safe-area-inset-top))] z-20 w-64 border-r border-border bg-surface py-3 transition-transform"
-      class:-translate-x-full={!sidebarOpen}
-    >
-      <nav class="space-y-1 pr-3">
-        <button
-          class="flex w-full items-center gap-5 rounded-r-full px-6 py-3 text-sm font-medium {!showArchive ? 'bg-primary/15 text-primary' : ''}"
-          onclick={() => { showArchive = false; closeSidebarOnMobile(); }}
-        >
-          <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 18h6M10 22h4M8 14a7 7 0 118 0c-1 1-2 2-2 4h-4c0-2-1-3-2-4z"/></svg>
-          Notes
-        </button>
-        <button
-          class="flex w-full items-center gap-5 rounded-r-full px-6 py-3 text-sm font-medium {showArchive ? 'bg-primary/15 text-primary' : ''}"
-          onclick={() => { showArchive = true; closeSidebarOnMobile(); }}
-        >
-          <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/></svg>
-          Archive
-        </button>
-        <button
-          class="flex w-full items-center gap-5 rounded-r-full px-6 py-3 text-sm font-medium hover:bg-surface-dim"
-          onclick={() => { showImporter = true; closeSidebarOnMobile(); }}
-        >
-          <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
-          Import from Keep
-        </button>
-        <button
-          class="flex w-full items-center gap-5 rounded-r-full px-6 py-3 text-sm font-medium hover:bg-surface-dim disabled:opacity-50"
-          onclick={() => void handleExport()}
-          disabled={exporting}
-        >
-          <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 3v12m0 0l4-4m-4 4l-4-4M5 17v2a2 2 0 002 2h10a2 2 0 002-2v-2"/></svg>
-          {exporting ? 'Preparing export…' : 'Export vault'}
-        </button>
-      </nav>
-      <p class="absolute bottom-4 left-6 text-xs text-on-surface-muted">End-to-end encrypted</p>
-    </aside>
-
-    <div class="px-3 pt-6 pb-[calc(2rem+env(safe-area-inset-bottom))] transition-[margin] sm:px-4 sm:pt-8 md:px-8 {sidebarOpen ? 'md:ml-64' : ''}">
-      <div class="mx-auto max-w-7xl">
+    <div class="mx-auto max-w-[90rem] px-3 pb-[calc(2rem+env(safe-area-inset-bottom))] pt-6 sm:px-5 sm:pt-8">
       {#if noteStore.loading}
         <div class="flex items-center justify-center py-16">
-          <svg class="w-8 h-8 animate-spin text-primary" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+          <svg class="h-8 w-8 animate-spin text-primary" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
         </div>
-      {:else if showArchive}
-        <h2 class="mb-5 text-sm font-medium uppercase tracking-wide text-on-surface-muted">Archive</h2>
-        <NoteGrid
-          pinnedNotes={[]}
-          unpinnedNotes={noteStore.archivedNotes}
-          onEdit={handleEditNote}
-          emptyMessage="No archived notes"
-        />
+      {:else if contentView === 'trash'}
+        <section aria-labelledby="trash-heading">
+          <div class="mb-6 flex flex-wrap items-center gap-3 border-b border-border pb-4">
+            <button
+              type="button"
+              class="grid h-10 w-10 place-items-center rounded-full text-on-surface-muted hover:bg-surface-dim hover:text-on-surface focus-visible:outline-2 focus-visible:outline-primary"
+              aria-label="Back to notes"
+              onclick={showNotes}
+            >
+              <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>
+            </button>
+            <div class="mr-auto">
+              <h1 id="trash-heading" class="text-xl font-semibold text-on-surface">Trash</h1>
+              <p class="text-xs text-on-surface-muted">Notes stay here until you permanently delete them.</p>
+            </div>
+            {#if allTrashedNotes.length}
+              <button
+                type="button"
+                class="rounded-lg px-3 py-2 text-sm text-danger hover:bg-danger/10 focus-visible:outline-2 focus-visible:outline-danger"
+                onclick={() => requestPermanentDelete(allTrashedNotes, true)}
+              >Empty Trash…</button>
+            {/if}
+          </div>
+
+          {#if noteStore.trashedNotes.length}
+            <div class="sticky top-[calc(4rem+env(safe-area-inset-top))] z-20 mb-5 flex min-h-12 flex-wrap items-center gap-2 rounded-xl border border-border bg-surface/95 px-3 py-2 shadow-sm backdrop-blur-md">
+              <button
+                type="button"
+                class="rounded-md px-2.5 py-1.5 text-sm text-on-surface-muted hover:bg-surface-dim hover:text-on-surface"
+                onclick={toggleSelectAllVisible}
+              >{allVisibleTrashSelected ? 'Clear visible selection' : `Select all${noteStore.searchQuery.trim() ? ' results' : ''}`}</button>
+              {#if selectedTrashNotes.length}
+                <span class="text-sm text-on-surface-muted">{selectedTrashNotes.length} selected</span>
+                <div class="ml-auto flex items-center gap-2">
+                  <button type="button" class="rounded-lg px-3 py-1.5 text-sm font-medium text-on-surface hover:bg-surface-dim" onclick={() => void restoreSelected()}>Restore</button>
+                  <button type="button" class="rounded-lg px-3 py-1.5 text-sm font-medium text-danger hover:bg-danger/10" onclick={() => requestPermanentDelete(selectedTrashNotes)}>Delete forever…</button>
+                </div>
+              {/if}
+            </div>
+          {/if}
+
+          <NoteGrid
+            pinnedNotes={[]}
+            unpinnedNotes={noteStore.trashedNotes}
+            onEdit={(note) => editingNote = note}
+            emptyMessage={noteStore.searchQuery.trim() ? 'No trashed notes match this search' : 'Trash is empty'}
+            trashed
+            selectedIds={selectedTrashIds}
+            onSelect={setTrashSelected}
+            onPermanentDelete={(note) => requestPermanentDelete([note])}
+          />
+        </section>
       {:else}
         <NoteInput />
         <NoteGrid
           pinnedNotes={noteStore.pinnedNotes}
           unpinnedNotes={noteStore.unpinnedNotes}
-          onEdit={handleEditNote}
+          onEdit={(note) => editingNote = note}
         />
       {/if}
-      </div>
     </div>
   </main>
 
-  <!-- Note editor modal -->
   {#if editingNote}
-    <NoteEditor note={editingNote} onClose={handleCloseEditor} />
+    <NoteEditor note={editingNote} onClose={() => editingNote = null} readOnly={contentView === 'trash'} />
   {/if}
 
-  <!-- Keep importer modal -->
   {#if showImporter}
     <KeepImporter onClose={() => showImporter = false} />
   {/if}
 
-  <!-- Toast notifications -->
+  {#if deleteConfirmation}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="fixed inset-0 z-[70] grid place-items-center bg-black/55 p-4" onkeydown={handleDeleteDialogKeydown} onclick={(event) => { if (event.target === event.currentTarget && !destructiveBusy) deleteConfirmation = null; }}>
+      <div bind:this={deleteDialog} class="w-full max-w-md rounded-2xl border border-border bg-surface p-5 shadow-2xl" role="alertdialog" aria-modal="true" aria-labelledby="delete-confirm-title" aria-describedby="delete-confirm-description" tabindex="-1">
+        <h2 id="delete-confirm-title" class="text-lg font-semibold text-on-surface">
+          {deleteConfirmation.emptyAll ? 'Empty Trash?' : 'Delete forever?'}
+        </h2>
+        <p id="delete-confirm-description" class="mt-2 text-sm leading-relaxed text-on-surface-muted">
+          {deleteConfirmation.emptyAll
+            ? `This permanently deletes all ${deleteConfirmation.ids.length} trashed notes from every synced device.`
+            : `This permanently deletes ${deleteConfirmation.ids.length} selected note${deleteConfirmation.ids.length === 1 ? '' : 's'} from every synced device.`}
+          This cannot be undone.
+        </p>
+        <div class="mt-5 flex justify-end gap-2">
+          <button type="button" class="rounded-lg px-4 py-2 text-sm text-on-surface hover:bg-surface-dim" disabled={destructiveBusy} onclick={() => deleteConfirmation = null}>Cancel</button>
+          <button type="button" class="rounded-lg bg-danger px-4 py-2 text-sm font-medium text-white disabled:opacity-60" disabled={destructiveBusy} onclick={() => void confirmPermanentDelete()}>{destructiveBusy ? 'Deleting…' : 'Delete forever'}</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   <Toast />
 {/if}

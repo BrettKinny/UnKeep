@@ -198,13 +198,18 @@
             </div>
             <div class="bg-surface-dim rounded-lg p-3 text-center">
               <div class="text-2xl font-bold text-on-surface">{preview?.archived}</div>
-              <div class="text-xs text-on-surface-muted">Archived</div>
+              <div class="text-xs text-on-surface-muted">Previously archived</div>
             </div>
           </div>
 
           {#if preview?.trashed && preview.trashed > 0}
             <p class="text-sm text-on-surface-muted">
               {preview.trashed} trashed notes will be skipped.
+            </p>
+          {/if}
+          {#if preview?.archived && preview.archived > 0}
+            <p class="text-sm text-on-surface-muted">
+              Previously archived notes will appear with your other notes.
             </p>
           {/if}
 
