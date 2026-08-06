@@ -52,10 +52,14 @@ UnKeep is dual-purpose: a self-hosted Keep-style PWA for humans, and a scratchpa
 - **Encrypted relay client** (`packages/client`) — owns relay transport, optimistic revisions, mutation replay, cursor acknowledgement, device sessions, and pairing. Web and CLI clients must durably apply a pull before acknowledging its cursor.
 - **Device and recovery crypto** (`packages/core/src/crypto.ts`) — context-bound AES-256-GCM envelopes, per-device wrapping, and relay-bound recovery kits implemented with Web Crypto. The relay never receives the vault master key in the supported flow.
 <<<<<<< HEAD
+<<<<<<< HEAD
 - **Sharing** — Quick Send carries an encoded, unencrypted snapshot in a URL fragment. Installed share-target handling converts operating-system shares into a local draft; `/recv` previews and requires confirmation before persistence.
 =======
 - **Sharing** — Outbound note sharing sends a plaintext Markdown snapshot through native Web Share, with explicit Obsidian, clipboard, download, and legacy Quick Send fallbacks when native sharing is unavailable. Quick Send carries an encoded, unencrypted snapshot in a URL fragment. Installed share-target handling converts operating-system shares into a local draft; `/recv` previews and requires confirmation before persistence.
 >>>>>>> a8e4969 (Add native note sharing with Obsidian and Markdown fallbacks (#17))
+=======
+- **Sharing** — Outbound note sharing sends a plaintext Markdown snapshot through native Web Share, with explicit Obsidian, clipboard, download, and legacy Quick Send fallbacks when native sharing is unavailable. Quick Send carries an encoded, unencrypted snapshot in a URL fragment. Installed share-target handling converts operating-system shares into a local draft; `/recv` previews and requires confirmation before persistence.
+>>>>>>> 0200690 (Integrate sharing and editor deletion with recoverable Trash)
 - **Legacy adapters** — `packages/core/src/adapters/`, `adapterRegistry.ts`, and the old setup wizard remain experimental code. They are not wired into current onboarding and must not be described as supported storage options.
 - **TailwindCSS v4** — configured through Vite plugin (`@tailwindcss/vite`), styles in `apps/web/src/app.css`.
 - **Security boundary** — encryption protects contents from an honest-but-curious relay, not an actively compromised host serving modified PWA code. Read `THREAT_MODEL.md` before changing pairing, rendering, recovery, or authorization.

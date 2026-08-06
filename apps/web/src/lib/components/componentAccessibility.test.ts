@@ -30,8 +30,8 @@ describe('component accessibility contracts', () => {
     expect(source).toMatch(
       /class="note-actions relative z-20[^"]*"/,
     );
-    expect(source).toContain('class:pointer-events-none={!actionsVisible}');
-    expect(source).toContain('class:pointer-events-auto={actionsVisible}');
+    expect(source).toContain('class:pointer-events-none={!actionsVisible && !trashed}');
+    expect(source).toContain('class:pointer-events-auto={actionsVisible || trashed}');
     expect(source).not.toMatch(/class="pointer-events-none relative z-0"/);
   });
 
@@ -111,16 +111,17 @@ describe('component accessibility contracts', () => {
     expect(source).toContain('<label for="edit-note-labels"');
   });
 
-  it('offers note deletion with Undo from the expanded editor', () => {
+  it('offers recoverable Trash with Undo from the expanded editor', () => {
     const source = componentSource('NoteEditor');
 
     expect(source).toContain('async function handleDelete()');
     expect(source).toContain('if (deleting) return;');
-    expect(source).toContain('await noteStore.deleteNote(note.id)');
-    expect(source).toContain("toastStore.show('Note deleted'");
-    expect(source).toContain('fn: () => noteStore.undoDelete(deleted)');
+    expect(source).toContain('const noteId = note.id;');
+    expect(source).toContain('await noteStore.trashNote(noteId)');
+    expect(source).toContain("toastStore.show('Moved to Trash'");
+    expect(source).toContain('fn: () => void noteStore.restoreTrashedNote(noteId)');
     expect(source).toMatch(
-      /<button\s+type="button"[^>]*onclick=\{handleDelete\}[^>]*aria-label="Delete"/s,
+      /<button\s+type="button"[^>]*onclick=\{handleDelete\}[^>]*aria-label="Move to Trash"/s,
     );
     expect(source).toContain('disabled={deleting}');
   });
