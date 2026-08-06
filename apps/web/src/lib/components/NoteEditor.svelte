@@ -42,6 +42,7 @@
   let showColorPicker = $state(false);
   let showShareMenu = $state(false);
   let showMarkdown = $state(false);
+  let deleting = $state(false);
   let markdownBlocks = $derived(parseMarkdown(content));
   let dialogEl: HTMLDivElement | undefined = $state();
   let shareButtonEl: HTMLButtonElement | undefined = $state();
@@ -88,6 +89,25 @@
 
   function handleRemoveCheckboxItem(itemId: string) {
     noteStore.removeChecklistItem(note.id, itemId);
+  }
+
+  async function handleDelete() {
+    if (deleting) return;
+    deleting = true;
+    try {
+      const deleted = await noteStore.deleteNote(note.id);
+      if (!deleted) return;
+      onClose();
+      toastStore.show('Note deleted', {
+        action: {
+          label: 'Undo',
+          fn: () => noteStore.undoDelete(deleted),
+        },
+        timeout: 3000,
+      });
+    } finally {
+      deleting = false;
+    }
   }
 
   function handleDialogKeydown(event: KeyboardEvent) {
@@ -506,6 +526,16 @@
           </div>
         {/if}
       </div>
+      <button
+        type="button"
+        onclick={handleDelete}
+        disabled={deleting}
+        class="p-2 rounded-full hover:bg-black/10 text-danger transition-colors"
+        title="Delete"
+        aria-label="Delete"
+      >
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+      </button>
       <span class="flex-1"></span>
       <button
         onclick={onClose}

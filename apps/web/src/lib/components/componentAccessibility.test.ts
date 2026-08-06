@@ -28,8 +28,10 @@ describe('component accessibility contracts', () => {
     const source = componentSource('NoteCard');
 
     expect(source).toMatch(
-      /class="note-actions pointer-events-auto relative z-20[^"]*"/,
+      /class="note-actions relative z-20[^"]*"/,
     );
+    expect(source).toContain('class:pointer-events-none={!actionsVisible}');
+    expect(source).toContain('class:pointer-events-auto={actionsVisible}');
     expect(source).not.toMatch(/class="pointer-events-none relative z-0"/);
   });
 
@@ -100,6 +102,20 @@ describe('component accessibility contracts', () => {
     expect(source).toContain('<label for="edit-note-title"');
     expect(source).toContain('<label for="edit-note-content"');
     expect(source).toContain('<label for="edit-note-labels"');
+  });
+
+  it('offers note deletion with Undo from the expanded editor', () => {
+    const source = componentSource('NoteEditor');
+
+    expect(source).toContain('async function handleDelete()');
+    expect(source).toContain('if (deleting) return;');
+    expect(source).toContain('await noteStore.deleteNote(note.id)');
+    expect(source).toContain("toastStore.show('Note deleted'");
+    expect(source).toContain('fn: () => noteStore.undoDelete(deleted)');
+    expect(source).toMatch(
+      /<button\s+type="button"[^>]*onclick=\{handleDelete\}[^>]*aria-label="Delete"/s,
+    );
+    expect(source).toContain('disabled={deleting}');
   });
 
   it('labels outbound sharing and warns that fallback destinations receive plaintext', () => {
