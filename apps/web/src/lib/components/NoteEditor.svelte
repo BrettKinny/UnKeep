@@ -33,6 +33,7 @@
   });
   let showColorPicker = $state(false);
   let showMarkdown = $state(false);
+  let deleting = $state(false);
   let markdownBlocks = $derived(parseMarkdown(content));
   let dialogEl: HTMLDivElement | undefined = $state();
 
@@ -80,16 +81,22 @@
   }
 
   async function handleDelete() {
-    const deleted = await noteStore.deleteNote(note.id);
-    if (!deleted) return;
-    onClose();
-    toastStore.show('Note deleted', {
-      action: {
-        label: 'Undo',
-        fn: () => noteStore.undoDelete(deleted),
-      },
-      timeout: 3000,
-    });
+    if (deleting) return;
+    deleting = true;
+    try {
+      const deleted = await noteStore.deleteNote(note.id);
+      if (!deleted) return;
+      onClose();
+      toastStore.show('Note deleted', {
+        action: {
+          label: 'Undo',
+          fn: () => noteStore.undoDelete(deleted),
+        },
+        timeout: 3000,
+      });
+    } finally {
+      deleting = false;
+    }
   }
 
   function handleDialogKeydown(event: KeyboardEvent) {
@@ -393,6 +400,7 @@
       <button
         type="button"
         onclick={handleDelete}
+        disabled={deleting}
         class="p-2 rounded-full hover:bg-black/10 text-danger transition-colors"
         title="Delete"
         aria-label="Delete"

@@ -108,12 +108,14 @@ describe('component accessibility contracts', () => {
     const source = componentSource('NoteEditor');
 
     expect(source).toContain('async function handleDelete()');
+    expect(source).toContain('if (deleting) return;');
     expect(source).toContain('await noteStore.deleteNote(note.id)');
     expect(source).toContain("toastStore.show('Note deleted'");
     expect(source).toContain('fn: () => noteStore.undoDelete(deleted)');
     expect(source).toMatch(
       /<button\s+type="button"[^>]*onclick=\{handleDelete\}[^>]*aria-label="Delete"/s,
     );
+    expect(source).toContain('disabled={deleting}');
   });
 
   it('labels Quick Send as an unencrypted snapshot before it is copied', () => {
