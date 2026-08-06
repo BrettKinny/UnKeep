@@ -34,6 +34,14 @@ describe('component accessibility contracts', () => {
     expect(source).toContain('class:pointer-events-auto={actionsVisible}');
     expect(source).not.toMatch(/class="pointer-events-none relative z-0"/);
   });
+
+  it('prevents duplicate Trash mutations while persistence is pending', () => {
+    const source = componentSource('NoteCard');
+
+    expect(source).toContain('if (mutatingTrash) return;');
+    expect(source).toContain('disabled={mutatingTrash}');
+    expect(source).toContain('void handleRestore()');
+  });
   it('gives note creation controls native button and label semantics', () => {
     const source = componentSource('NoteInput');
 

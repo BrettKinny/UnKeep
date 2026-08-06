@@ -27,6 +27,7 @@
 
   let showActions = $state(false);
   let showColorPicker = $state(false);
+  let mutatingTrash = $state(false);
   let actionsVisible = $derived(showActions || showColorPicker);
   let visibleImages = $derived(note.images?.filter(
     attachment => isImageAttachment(attachment) && hasLocalAttachmentUrl(attachment),
@@ -44,14 +45,30 @@
   }
 
   async function handleDelete() {
-    if (await noteStore.trashNote(note.id)) {
-      toastStore.show('Moved to Trash', {
-        action: {
-          label: 'Undo',
-          fn: () => void noteStore.restoreTrashedNote(note.id),
-        },
-        timeout: 5000,
-      });
+    if (mutatingTrash) return;
+    mutatingTrash = true;
+    try {
+      if (await noteStore.trashNote(note.id)) {
+        toastStore.show('Moved to Trash', {
+          action: {
+            label: 'Undo',
+            fn: () => void noteStore.restoreTrashedNote(note.id),
+          },
+          timeout: 5000,
+        });
+      }
+    } finally {
+      mutatingTrash = false;
+    }
+  }
+
+  async function handleRestore() {
+    if (mutatingTrash) return;
+    mutatingTrash = true;
+    try {
+      await noteStore.restoreTrashedNote(note.id);
+    } finally {
+      mutatingTrash = false;
     }
   }
 
@@ -170,7 +187,8 @@
     {#if trashed}
       <button
         type="button"
-        onclick={(e) => { e.stopPropagation(); void noteStore.restoreTrashedNote(note.id); }}
+        onclick={(e) => { e.stopPropagation(); void handleRestore(); }}
+        disabled={mutatingTrash}
         class="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-on-surface-muted hover:bg-black/10 hover:text-on-surface dark:hover:bg-white/10"
         title="Restore note"
         aria-label="Restore note"
@@ -219,6 +237,7 @@
     <button
       type="button"
       onclick={(e) => { e.stopPropagation(); handleDelete(); }}
+      disabled={mutatingTrash}
       class="p-2 rounded-full hover:bg-black/10 dark:hover:bg-white/10 text-danger transition-colors ml-auto"
       title="Move to Trash"
       aria-label="Move to Trash"
