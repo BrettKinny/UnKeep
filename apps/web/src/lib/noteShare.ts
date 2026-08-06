@@ -4,6 +4,14 @@ const FALLBACK_NOTE_NAME = 'UnKeep note';
 const MAX_FILE_BASENAME_LENGTH = 120;
 const UNSAFE_FILENAME_CHARACTERS = new Set('<>:"/\\|?*');
 
+function isBidirectionalControl(codePoint: number): boolean {
+  return codePoint === 0x061c
+    || codePoint === 0x200e
+    || codePoint === 0x200f
+    || (codePoint >= 0x202a && codePoint <= 0x202e)
+    || (codePoint >= 0x2066 && codePoint <= 0x2069);
+}
+
 function noteBody(note: Note, checkboxPrefix: (checked: boolean) => string): string {
   if (note.checkboxes) {
     return note.checkboxes
@@ -52,7 +60,10 @@ export function noteShareFilename(note: Note): string {
   let basename = [...noteShareTitle(note)]
     .map(character => {
       const codePoint = character.codePointAt(0) ?? 0;
-      return codePoint < 32 || codePoint === 127 || UNSAFE_FILENAME_CHARACTERS.has(character)
+      return codePoint < 32
+        || codePoint === 127
+        || isBidirectionalControl(codePoint)
+        || UNSAFE_FILENAME_CHARACTERS.has(character)
         ? '-'
         : character;
     })

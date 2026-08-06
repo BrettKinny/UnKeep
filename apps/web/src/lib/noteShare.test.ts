@@ -71,6 +71,7 @@ describe('outbound note sharing', () => {
     expect(noteShareFilename(note({ title: 'NUL' }))).toBe('_NUL.md');
     expect(noteShareFilename(note({ title: 'con.txt' }))).toBe('_con.txt.md');
     expect(noteShareFilename(note({ title: '\u0000 / \\' }))).toBe('- - -.md');
+    expect(noteShareFilename(note({ title: 'report\u202Efdp.exe' }))).toBe('report-fdp.exe.md');
     expect(noteShareFilename(note({ title: '' }))).toBe('UnKeep note.md');
     expect(noteShareFilename(note({ title: '🧭'.repeat(121) })))
       .toBe(`${'🧭'.repeat(120)}.md`);

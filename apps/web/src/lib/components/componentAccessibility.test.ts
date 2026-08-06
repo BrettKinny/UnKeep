@@ -106,6 +106,7 @@ describe('component accessibility contracts', () => {
     const source = componentSource('NoteEditor');
 
     expect(source).toContain('aria-label="Share note"');
+    expect(source).toContain('aria-haspopup="menu"');
     expect(source).toContain('role="menu"');
     expect(source).toContain('The destination receives plaintext.');
     expect(source).toContain('Copy as Markdown');
