@@ -63,7 +63,7 @@
     onclick={() => onEdit(note)}
   ></button>
 
-  <div class="pointer-events-none relative z-0">
+  <div class="pointer-events-none relative z-20">
   {#if note.pinned}
     <div class="absolute top-2 right-2 text-on-surface-muted" title="Pinned">
       <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M10 2a1 1 0 011 1v1.323l3.954 1.582 1.599-.8a1 1 0 01.894 1.79l-1.233.615L17 11a1 1 0 01-.293.707l-3 3A1 1 0 0113 15v-2.586l-2.293 2.293a1 1 0 01-1.414-1.414L11.586 11H9a1 1 0 01-.707-.293l-3-3A1 1 0 015 7l.786-3.49-1.233-.615a1 1 0 01.894-1.79l1.599.8L11 1.322V3a1 1 0 01-1-1z"/></svg>

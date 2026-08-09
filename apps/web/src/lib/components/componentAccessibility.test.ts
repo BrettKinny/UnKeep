@@ -24,6 +24,16 @@ describe('component accessibility contracts', () => {
     );
   });
 
+  it('keeps note links above the edit overlay and directly clickable', () => {
+    const card = componentSource('NoteCard');
+    const linkedText = componentSource('LinkedText');
+
+    expect(card).toContain('class="pointer-events-none relative z-20"');
+    expect(linkedText).toMatch(/<a[^>]*class="pointer-events-auto /s);
+    expect(linkedText).toContain('onclick={stopActivation}');
+    expect(linkedText).toContain('rel="noopener noreferrer"');
+  });
+
   it('gives note creation controls native button and label semantics', () => {
     const source = componentSource('NoteInput');
 
