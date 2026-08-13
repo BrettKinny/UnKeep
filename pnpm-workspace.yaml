@@ -4,6 +4,7 @@ packages:
 
 overrides:
   cookie@<0.7.0: 0.7.2
+  nanoid@<3.3.17: 3.3.17
 
 onlyBuiltDependencies:
   - esbuild
