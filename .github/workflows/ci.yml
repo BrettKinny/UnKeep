@@ -1,0 +1,183 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  TRIVY_IMAGE: docker.io/aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.33.4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm notices:check
+
+      - run: pnpm check
+
+      - run: pnpm lint
+
+      - run: pnpm test
+
+      - run: pnpm smoke:packages
+
+      - run: pnpm exec playwright install --with-deps chromium
+
+      - run: pnpm test:e2e
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure()
+        with:
+          name: playwright-artifacts
+          path: test-results/playwright
+          retention-days: 7
+
+  node-20-packages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.33.4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm build:packages
+
+      - run: pnpm smoke:packages
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Verify sensitive files cannot enter the Docker build context
+        run: |
+          mkdir -p apps/server apps/web
+          printf 'VITE_UNKEEP_DOCKERIGNORE_PROBE=must-not-enter-build\n' > apps/web/.env.local
+          printf '{}\n' > apps/web/unkeep-recovery-kit-context-probe.json
+          printf '{}\n' > apps/web/unkeep-vault-context-probe.json
+          printf 'probe\n' > apps/server/context-probe.sqlite
+          printf 'probe\n' > apps/server/context-probe.sqlite-wal
+          printf 'probe\n' > apps/server/context-probe.sqlite-shm
+          docker build --target build --tag unkeep:context-probe .
+          docker run --rm --entrypoint sh unkeep:context-probe -c \
+            'test ! -e /app/apps/web/.env.local &&
+             test ! -e /app/apps/web/unkeep-recovery-kit-context-probe.json &&
+             test ! -e /app/apps/web/unkeep-vault-context-probe.json &&
+             test ! -e /app/apps/server/context-probe.sqlite &&
+             test ! -e /app/apps/server/context-probe.sqlite-wal &&
+             test ! -e /app/apps/server/context-probe.sqlite-shm'
+
+      - run: docker build --tag unkeep:test .
+
+      - name: Verify image notices and minimal runtime toolchain
+        run: |
+          docker run --rm --entrypoint sh unkeep:test -c \
+            'test "$(id -u)" = 1000 &&
+             test "$(stat -c %a:%u:%g /data)" = 700:1000:1000 &&
+             test "$(stat -c %a:%u:%g /home/node/.config)" = 700:1000:1000 &&
+             test "$(stat -c %a:%u:%g /home/node/.config/unkeep)" = 700:1000:1000 &&
+             test -s /app/THIRD_PARTY_NOTICES.md &&
+             test -s /app/web/THIRD_PARTY_NOTICES.md &&
+             test -s /usr/local/LICENSE &&
+             ! command -v npm &&
+             ! command -v npx &&
+             ! command -v pnpm &&
+             ! command -v pnpx &&
+             ! command -v yarn &&
+             ! command -v corepack'
+
+      - name: Exercise isolated CLI key-storage volume
+        run: |
+          docker run --rm \
+            --read-only \
+            --tmpfs /tmp:size=16m,mode=1777 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --mount type=volume,destination=/home/node/.config/unkeep \
+            --entrypoint node \
+            unkeep:test \
+            --input-type=module \
+            --eval '
+              import { stat } from "node:fs/promises";
+              import { JsonFileClientStorage } from "/app/cli/dist/storage.js";
+              const path = "/home/node/.config/unkeep/config.json";
+              const storage = new JsonFileClientStorage(path);
+              await storage.set("volumeProbe", "ok");
+              if (await storage.get("volumeProbe") !== "ok") throw new Error("config volume round trip failed");
+              const directoryMode = (await stat("/home/node/.config/unkeep")).mode & 0o777;
+              const fileMode = (await stat(path)).mode & 0o777;
+              if (directoryMode !== 0o700 || fileMode !== 0o600) throw new Error("unsafe CLI config permissions");
+            '
+
+      - name: Fail on high or critical container vulnerabilities
+        run: |
+          mkdir -p "$RUNNER_TEMP/trivy-cache"
+          docker save --output "$RUNNER_TEMP/unkeep-image.tar" unkeep:test
+          docker run --rm \
+            --mount "type=bind,src=$RUNNER_TEMP/unkeep-image.tar,dst=/scan/unkeep.tar,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/trivy-cache,dst=/root/.cache/trivy" \
+            "$TRIVY_IMAGE" image \
+              --input /scan/unkeep.tar \
+              --exit-code 1 \
+              --severity HIGH,CRITICAL \
+              --scanners vuln \
+              --no-progress \
+              --skip-version-check
+
+      - name: Exercise hardened runtime and health endpoint
+        run: |
+          docker run --name unkeep-smoke --detach \
+            --read-only \
+            --tmpfs /tmp:size=16m,mode=1777 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --env UNKEEP_SETUP_TOKEN=container-smoke-setup-token-0000001 \
+            --env UNKEEP_RECOVERY_TOKEN=container-smoke-recovery-token-0001 \
+            unkeep:test
+          trap 'docker logs unkeep-smoke; docker rm --force unkeep-smoke' EXIT
+          for _ in $(seq 1 20); do
+            if docker exec unkeep-smoke wget -qO- http://127.0.0.1:3000/api/v1/status; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1

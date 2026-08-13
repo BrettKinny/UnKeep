@@ -1,0 +1,56 @@
+{
+  "name": "@unkeep/cli",
+  "version": "0.2.0-rc.1",
+  "description": "Command-line client for encrypted UnKeep notes and automation workflows",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BrettKinny/UnKeep.git",
+    "directory": "apps/cli"
+  },
+  "homepage": "https://github.com/BrettKinny/UnKeep#readme",
+  "bugs": {
+    "url": "https://github.com/BrettKinny/UnKeep/issues"
+  },
+  "keywords": [
+    "notes",
+    "cli",
+    "unkeep"
+  ],
+  "type": "module",
+  "files": [
+    "README.md",
+    "LICENSE",
+    "dist",
+    "!dist/**/*.test.*",
+    "!dist/**/*.integration.test.*"
+  ],
+  "exports": {},
+  "bin": {
+    "unkeep": "./dist/bin.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc --noEmit",
+    "prepack": "pnpm build",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "@unkeep/client": "workspace:*",
+    "@unkeep/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "@unkeep/server": "workspace:*",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  }
+}

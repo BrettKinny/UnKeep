@@ -1,0 +1,64 @@
+name: Bug report
+description: Report reproducible behavior that is not a security vulnerability
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, recovery material, databases, private notes, or exploit details.
+        Report suspected vulnerabilities through the private process in SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: UnKeep version
+      description: Release, image digest, or commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Browser, OS, Node/container platform, reverse proxy, and relevant device count
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Minimal steps using generated or redacted data
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: data_safety
+    attributes:
+      label: Data-safety impact
+      options:
+        - No data loss observed
+        - Possible local data loss
+        - Possible multi-device or server data loss
+        - Unsure
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed all secrets, private note content, databases, and identifying URLs.
+          required: true
+        - label: This is not a suspected security vulnerability.
+          required: true

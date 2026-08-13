@@ -1,0 +1,20 @@
+* @BrettKinny
+
+# Security- and release-sensitive surfaces are listed explicitly so future
+# ownership changes cannot accidentally leave them uncovered.
+/.github/workflows/ @BrettKinny
+/Dockerfile @BrettKinny
+/compose*.yaml @BrettKinny
+/package.json @BrettKinny
+/pnpm-lock.yaml @BrettKinny
+/docs/releasing.md @BrettKinny
+/scripts/check-release-slot* @BrettKinny
+/scripts/container-source-bundle* @BrettKinny
+/scripts/extract-release-notes.mjs @BrettKinny
+/scripts/inventory-ghcr* @BrettKinny
+/scripts/package-smoke.mjs @BrettKinny
+/scripts/release-workflow-security.test.mjs @BrettKinny
+/SECURITY.md @BrettKinny
+/THREAT_MODEL.md @BrettKinny
+/apps/server/ @BrettKinny
+/packages/client/ @BrettKinny

@@ -1,0 +1,68 @@
+services:
+  unkeep:
+    image: ${UNKEEP_IMAGE:-ghcr.io/brettkinny/unkeep:0.2.0-rc.1}
+    pull_policy: always
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      UNKEEP_HOST: 0.0.0.0
+      UNKEEP_SETUP_TOKEN: ${UNKEEP_SETUP_TOKEN:?set a 32-256 character random setup token}
+      UNKEEP_RECOVERY_TOKEN: ${UNKEEP_RECOVERY_TOKEN:?set a distinct 32-256 character random recovery token}
+      UNKEEP_ALLOW_SETUP_TOKEN_RECOVERY: ${UNKEEP_ALLOW_SETUP_TOKEN_RECOVERY:-}
+      UNKEEP_ADMIN_RATE_WINDOW_MS: ${UNKEEP_ADMIN_RATE_WINDOW_MS:-}
+      UNKEEP_ADMIN_SOURCE_RATE_LIMIT: ${UNKEEP_ADMIN_SOURCE_RATE_LIMIT:-}
+      UNKEEP_ADMIN_GLOBAL_RATE_LIMIT: ${UNKEEP_ADMIN_GLOBAL_RATE_LIMIT:-}
+      UNKEEP_ALLOWED_ORIGIN: ${UNKEEP_ALLOWED_ORIGIN:-}
+      UNKEEP_MAX_ATTACHMENT_SIZE: ${UNKEEP_MAX_ATTACHMENT_SIZE:-}
+      UNKEEP_MAX_ENCRYPTED_RECORD_BYTES: ${UNKEEP_MAX_ENCRYPTED_RECORD_BYTES:-}
+      UNKEEP_MAX_RECORDS: ${UNKEEP_MAX_RECORDS:-}
+      UNKEEP_MAX_ATTACHMENTS: ${UNKEEP_MAX_ATTACHMENTS:-}
+      UNKEEP_MAX_DEVICES: ${UNKEEP_MAX_DEVICES:-}
+      UNKEEP_MAX_SERVICE_CREDENTIALS: ${UNKEEP_MAX_SERVICE_CREDENTIALS:-}
+      UNKEEP_MAX_MUTATION_RECEIPTS: ${UNKEEP_MAX_MUTATION_RECEIPTS:-}
+      UNKEEP_MUTATION_RECEIPT_TTL_MS: ${UNKEEP_MUTATION_RECEIPT_TTL_MS:-}
+      UNKEEP_ATTACHMENT_STAGE_TTL_MS: ${UNKEEP_ATTACHMENT_STAGE_TTL_MS:-}
+      UNKEEP_PAIRING_TTL_MS: ${UNKEEP_PAIRING_TTL_MS:-}
+      UNKEEP_MAX_PENDING_PAIRINGS: ${UNKEEP_MAX_PENDING_PAIRINGS:-}
+      UNKEEP_PAIRING_RATE_WINDOW_MS: ${UNKEEP_PAIRING_RATE_WINDOW_MS:-}
+      UNKEEP_PAIRING_SOURCE_RATE_LIMIT: ${UNKEEP_PAIRING_SOURCE_RATE_LIMIT:-}
+      UNKEEP_PAIRING_GLOBAL_RATE_LIMIT: ${UNKEEP_PAIRING_GLOBAL_RATE_LIMIT:-}
+      UNKEEP_TRUST_PROXY: ${UNKEEP_TRUST_PROXY:-}
+    volumes:
+      - ./data:/data
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  unkeep-cli:
+    profiles:
+      - cli
+    image: ${UNKEEP_IMAGE:-ghcr.io/brettkinny/unkeep:0.2.0-rc.1}
+    pull_policy: always
+    entrypoint:
+      - unkeep
+    healthcheck:
+      disable: true
+    depends_on:
+      unkeep:
+        condition: service_healthy
+    volumes:
+      - unkeep-cli-config:/home/node/.config/unkeep
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  unkeep-cli-config:
