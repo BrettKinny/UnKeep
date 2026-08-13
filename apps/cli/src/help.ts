@@ -1,4 +1,4 @@
-export const VERSION = '0.2.0-rc.2';
+export const VERSION = '0.2.0-rc.3';
 
 export const HELP = `Usage: unkeep [connection options] <command> [options]
 

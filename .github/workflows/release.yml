@@ -935,171 +935,20 @@ jobs:
         if: always()
         run: docker logout ghcr.io
 
-  draft_release:
-    name: Create draft GitHub prerelease
-    if: >-
-      needs.prepare.outputs.publish == 'true' &&
-      needs.stage_container.outputs.release_gate == 'release-environment-v1'
-    needs:
-      - prepare
-      - stage_container
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    environment: release
-    permissions:
-      contents: write
-    env:
-      BASE_DIGEST: ${{ needs.stage_container.outputs.base_digest }}
-      IMAGE: ${{ needs.prepare.outputs.image }}
-      RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
-      VERSION: ${{ needs.prepare.outputs.version }}
-    steps:
-      - name: Verify protected release environment configuration
-        env:
-          CONTAINER_COMPLIANCE_GUARD: ${{ vars.UNKEEP_CONTAINER_COMPLIANCE_GUARD }}
-          IMMUTABLE_RELEASES_GUARD: ${{ vars.UNKEEP_IMMUTABLE_RELEASES_GUARD }}
-          RELEASE_GUARD: ${{ vars.UNKEEP_RELEASE_GUARD }}
-          STAGED_RELEASE_ATTEMPT: ${{ needs.stage_container.outputs.release_attempt }}
-        run: |
-          set -euo pipefail
-          test "$BASE_DIGEST" != ""
-          expected_compliance_guard="BrettKinny/UnKeep:container-compliance:${BASE_DIGEST}:v1"
-          test "$RELEASE_GUARD" = "BrettKinny/UnKeep:release:v1"
-          test "$IMMUTABLE_RELEASES_GUARD" = "BrettKinny/UnKeep:immutable-releases-reviewed:v1"
-          test "$CONTAINER_COMPLIANCE_GUARD" = "$expected_compliance_guard"
-          if [[ "$STAGED_RELEASE_ATTEMPT" != "$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" ]]; then
-            echo "::error::Publication jobs cannot resume across workflow attempts"
-            echo "::error::Re-run all jobs so the immutable release slot is inventoried again"
-            exit 1
-          fi
-
-      - name: Check out the validated commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          ref: ${{ needs.prepare.outputs.release_sha }}
-
-      - name: Download the verified staging bundle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: staged-release-assets-${{ env.VERSION }}
-          path: release-assets
-
-      - name: Download the independently hashed source assets
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: container-source-assets-${{ env.VERSION }}-${{ env.RELEASE_SHA }}
-          path: release-assets
-
-      - name: Download the staging bundle manifest
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: staged-release-manifest-${{ env.VERSION }}
-          path: release-verification
-
-      - name: Revalidate the staging bundle before drafting
-        env:
-          AMD64_DIGEST: ${{ needs.stage_container.outputs.amd64_digest }}
-          ARM64_DIGEST: ${{ needs.stage_container.outputs.arm64_digest }}
-          BINDING_SHA256: ${{ needs.stage_container.outputs.source_binding_sha256 }}
-          BUNDLE_SHA256: ${{ needs.stage_container.outputs.source_bundle_sha256 }}
-          METADATA_SHA256: ${{ needs.stage_container.outputs.source_metadata_sha256 }}
-          STAGE_MANIFEST_SHA256: ${{ needs.stage_container.outputs.stage_manifest_sha256 }}
-        run: |
-          set -euo pipefail
-          export LC_ALL=C
-          manifest="release-verification/staged-release-assets.sha256"
-          test "$(sha256sum "$manifest" | awk '{ print $1 }')" = "$STAGE_MANIFEST_SHA256"
-          diff -u \
-            <(printf '%s\n' \
-              "NODE_RUNTIME_LICENSE" \
-              "THIRD_PARTY_NOTICES.md" \
-              "compose.release.yaml" \
-              "unkeep-$VERSION-container-source-binding.json" \
-              "unkeep-$VERSION-container-sources.json" \
-              "unkeep-$VERSION-container-sources.tar.gz" \
-              "unkeep-$VERSION-linux-amd64.spdx.json" | sort) \
-            <(find release-assets -maxdepth 1 -type f -printf '%f\n' | sort)
-          (
-            cd release-assets
-            sha256sum --check "../$manifest"
-          )
-          node scripts/container-source-bundle.mjs verify-binding \
-            --version "$VERSION" \
-            --revision "$RELEASE_SHA" \
-            --assets release-assets \
-            --bundle-sha "$BUNDLE_SHA256" \
-            --metadata-sha "$METADATA_SHA256" \
-            --binding-sha "$BINDING_SHA256" \
-            --amd64-digest "$AMD64_DIGEST" \
-            --arm64-digest "$ARM64_DIGEST"
-
-      - name: Revalidate the remote release tag before public writes
-        run: |
-          set -euo pipefail
-          remote_release_sha="$(
-            git ls-remote --tags origin "refs/tags/$GITHUB_REF_NAME^{}" |
-              awk 'NR == 1 { print $1 }'
-          )"
-          if [[ "$remote_release_sha" != "$RELEASE_SHA" ]]; then
-            echo "::error::Release tag no longer resolves to the validated commit"
-            exit 1
-          fi
-
-      - name: Create or verify the draft prerelease before public release tags
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          node scripts/extract-release-notes.mjs "$VERSION" > "$RUNNER_TEMP/release-notes.md"
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = "true"
-            test "$(gh release view "$GITHUB_REF_NAME" --json isPrerelease --jq .isPrerelease)" = "true"
-            gh release edit "$GITHUB_REF_NAME" \
-              --notes-file "$RUNNER_TEMP/release-notes.md" \
-              --title "UnKeep $VERSION"
-            gh release upload "$GITHUB_REF_NAME" --clobber release-assets/*
-          else
-            gh release create "$GITHUB_REF_NAME" \
-              --verify-tag \
-              --draft \
-              --prerelease \
-              --latest=false \
-              --notes-file "$RUNNER_TEMP/release-notes.md" \
-              --title "UnKeep $VERSION" \
-              release-assets/*
-          fi
-          gh release view "$GITHUB_REF_NAME" \
-            --json body,isDraft,isPrerelease,name \
-            > "$RUNNER_TEMP/draft-release-metadata.json"
-          test "$(
-            jq -r '.isDraft' "$RUNNER_TEMP/draft-release-metadata.json"
-          )" = "true"
-          test "$(
-            jq -r '.isPrerelease' "$RUNNER_TEMP/draft-release-metadata.json"
-          )" = "true"
-          test "$(
-            jq -r '.name' "$RUNNER_TEMP/draft-release-metadata.json"
-          )" = "UnKeep $VERSION"
-          jq -j '.body' "$RUNNER_TEMP/draft-release-metadata.json" \
-            > "$RUNNER_TEMP/remote-release-notes.md"
-          cmp "$RUNNER_TEMP/release-notes.md" "$RUNNER_TEMP/remote-release-notes.md"
-
   promote_image:
-    name: Promote and attest container image
+    name: Draft, promote, and attest release
     if: >-
       needs.prepare.outputs.publish == 'true' &&
       needs.stage_container.outputs.release_gate == 'release-environment-v1'
     needs:
       - prepare
       - stage_container
-      - draft_release
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: release
     permissions:
       attestations: write
-      contents: read
+      contents: write
       id-token: write
       packages: write
     outputs:
@@ -1222,7 +1071,7 @@ jobs:
             exit 1
           fi
 
-      - name: Require the draft prerelease before image promotion
+      - name: Create and require the draft prerelease before image promotion
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           STAGE_MANIFEST_SHA256: ${{ needs.stage_container.outputs.stage_manifest_sha256 }}
@@ -1230,6 +1079,23 @@ jobs:
           set -euo pipefail
           node scripts/extract-release-notes.mjs "$VERSION" \
             > "$RUNNER_TEMP/release-notes.md"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = "true"
+            test "$(gh release view "$GITHUB_REF_NAME" --json isPrerelease --jq .isPrerelease)" = "true"
+            gh release edit "$GITHUB_REF_NAME" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              --title "UnKeep $VERSION"
+            gh release upload "$GITHUB_REF_NAME" --clobber release-assets/*
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --draft \
+              --prerelease \
+              --latest=false \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              --title "UnKeep $VERSION" \
+              release-assets/*
+          fi
           gh release view "$GITHUB_REF_NAME" \
             --json body,isDraft,isPrerelease,name \
             > "$RUNNER_TEMP/prepromotion-release-metadata.json"
@@ -1390,7 +1256,6 @@ jobs:
     needs:
       - prepare
       - stage_container
-      - draft_release
       - promote_image
     runs-on: ubuntu-latest
     timeout-minutes: 20

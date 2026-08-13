@@ -76,7 +76,7 @@ and covers upgrades and backups:
 
 [Follow the verified release procedure in `docs/self-hosting.md`.](docs/self-hosting.md)
 
-The first published release line is planned as the `0.2.0-rc.2` preview. Once published,
+The first published release line is planned as the `0.2.0-rc.3` preview. Once published,
 pin exact preview versions while the project is `0.x`; minor releases may
 still contain breaking changes.
 
