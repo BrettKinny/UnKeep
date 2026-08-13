@@ -92,16 +92,18 @@ The external-write chain uses these permissions:
 | Order | Job | Environment | Declared permissions |
 | --- | --- | --- | --- |
 | 1 | `stage_container` | `release` | `contents: read`, `packages: write` |
-| 2 | `draft_release` | `release` | `contents: write` |
-| 3 | `promote_image` | `release` | `contents: read`, `packages: write`, `attestations: write`, `id-token: write` |
-| 4 | `finalize_release` | `release` | `contents: write` |
+| 2 | `promote_image` | `release` | `contents: write`, `packages: write`, `attestations: write`, `id-token: write` |
+| 3 | `finalize_release` | `release` | `contents: write` |
 
-No job holds the union of release, package, attestation, and OIDC write
-permissions. The jobs form one dependency chain and cannot publish
-independently. Each checks its environment guards and the validated output
-sentinel from `stage_container`. The staging job binds downstream writes to
-the same source SHA, workflow run, and run attempt, preventing a later job from
-being rerun in a new attempt to bypass the fresh release-slot inventory.
+Draft creation and image promotion intentionally share one protected job and
+short-lived token because a draft created by one job's token is not reliably
+visible to another job's token. The combined job revalidates the tag, staged
+assets, source binding, draft metadata, and unused immutable image tags before
+promotion. The jobs form one dependency chain and cannot publish independently.
+Each checks its environment guards and the validated output sentinel from
+`stage_container`. The staging job binds downstream writes to the same source
+SHA, workflow run, and run attempt, preventing a later job from being rerun in
+a new attempt to bypass the fresh release-slot inventory.
 
 GitHub may request approval separately for the sequential deployment jobs.
 That repeated approval is intentional: review the completed prior stage and
@@ -141,7 +143,7 @@ in its `ref` input. It must not create a release or push a release image.
 For publication, create an annotated tag from a commit contained in `main`:
 
 ```sh
-version=0.2.0-rc.2
+version=0.2.0-rc.3
 git tag --sign --annotate "v$version" -m "UnKeep $version"
 git push origin "v$version"
 ```
@@ -160,14 +162,13 @@ record bind each step to the previously verified candidate.
    review, and container-compliance guards. It inventories GHCR, requires an
    unused version and source-SHA image-tag slot, validates the source bundle
    and notices, and stages the release assets. A registry error fails closed.
-2. `draft_release` creates or validates the immutable GitHub prerelease draft
-   and uploads the checked release assets. The draft remains unpublished while
-   image promotion and attestation complete.
-3. `promote_image` builds the pinned multi-platform image, pushes only the
-   validated version and source-SHA tags, and attaches BuildKit SBOM and
-   provenance attestations. It rechecks the source binding, labels, digest,
-   and anonymous read path.
-4. `finalize_release` verifies the promoted digest, attestations, checksums,
+2. `promote_image` creates or validates the GitHub prerelease draft and uploads
+   the checked assets, then promotes only the verified platform digests to the
+   version and source-SHA tags and attaches provenance attestations. One token
+   owns the draft-and-promotion transaction; the job rechecks the source
+   binding, draft, labels, digest, and anonymous read path immediately before
+   irreversible writes.
+3. `finalize_release` verifies the promoted digest, attestations, checksums,
    release metadata, and every local asset against the immutable release
    attestation before clearing draft state and publishing the GitHub
    prerelease.
@@ -181,7 +182,7 @@ incomplete public GitHub release.
 Replace the version and source SHA below for a later candidate:
 
 ```sh
-version=0.2.0-rc.2
+version=0.2.0-rc.3
 docker buildx imagetools inspect "ghcr.io/brettkinny/unkeep:$version"
 gh attestation verify \
   "oci://ghcr.io/brettkinny/unkeep:$version" \
@@ -218,6 +219,11 @@ and no published GitHub release was created. A private draft or untagged
 candidate image does not consume the release slot. Use **Re-run all jobs** so
 `stage_container` performs a fresh inventory; do not rerun a later publication
 job by itself.
+
+The failed `v0.2.0-rc.2` attempt is preserved as an incident record: its draft
+release and untagged staged images remain unpublished. Because correcting the
+cross-job draft visibility requires changed workflow source, publication
+continues with `v0.2.0-rc.3`; do not move or reuse the `rc.2` tag.
 
 If either immutable GHCR tag or the GitHub release exists, preserve the failed
 candidate as an incident record. Do not expect a rebuild to complete missing

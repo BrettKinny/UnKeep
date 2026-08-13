@@ -10,6 +10,13 @@ Because UnKeep is still `0.x`, minor releases may include breaking changes.
 
 No changes yet.
 
+## [0.2.0-rc.3] - 2026-08-13
+
+### Changed
+
+- Consolidated draft prerelease creation and immutable GHCR promotion into one
+  protected job so both operations share the same short-lived GitHub token.
+
 ## [0.2.0-rc.2] - 2026-08-13
 
 ### Changed
@@ -173,7 +180,8 @@ collaboration.
 
 - Initial client-side encryption and input-hardening work.
 
-[Unreleased]: https://github.com/BrettKinny/UnKeep/compare/v0.2.0-rc.2...HEAD
+[Unreleased]: https://github.com/BrettKinny/UnKeep/compare/v0.2.0-rc.3...HEAD
+[0.2.0-rc.3]: https://github.com/BrettKinny/UnKeep/compare/v0.2.0-rc.2...v0.2.0-rc.3
 [0.2.0-rc.2]: https://github.com/BrettKinny/UnKeep/compare/v0.2.0-rc.1...v0.2.0-rc.2
 [0.2.0-rc.1]: https://github.com/BrettKinny/UnKeep/compare/v0.1.1...v0.2.0-rc.1
 [0.1.1]: https://github.com/BrettKinny/UnKeep/compare/v0.1.0...v0.1.1

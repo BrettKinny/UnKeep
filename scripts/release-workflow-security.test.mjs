@@ -62,11 +62,13 @@ test('only image promotion receives an OIDC identity', () => {
     .map(([name]) => name);
   assert.deepEqual(oidcJobs, ['promote_image']);
   assert.equal(jobEnvironment(jobs.get('promote_image')), 'release');
+  assert.equal(jobPermissions(jobs.get('promote_image')).get('contents'), 'write');
 });
 
 test('every external write requires the reviewed release guards', () => {
   const jobs = workflowJobs(workflow);
-  for (const name of ['stage_container', 'draft_release', 'promote_image', 'finalize_release']) {
+  assert.equal(jobs.has('draft_release'), false);
+  for (const name of ['stage_container', 'promote_image', 'finalize_release']) {
     const block = jobs.get(name);
     assert.ok(block, `${name} job must exist`);
     assert.equal(jobEnvironment(block), 'release');
@@ -95,9 +97,25 @@ test('container sources are built without publication authority and bound before
   }
   assert.ok(stage.indexOf('container-source-bundle.mjs verify') < stage.indexOf('Log in to GHCR'));
   assert.ok(stage.indexOf('container-source-bundle.mjs bind') < stage.indexOf('Record the exact staging bundle'));
-  for (const name of ['draft_release', 'promote_image', 'finalize_release']) {
+  for (const name of ['promote_image', 'finalize_release']) {
     assert.match(jobs.get(name), /container-source-bundle\.mjs verify-binding/);
   }
+});
+
+test('draft creation and image promotion share one protected token', () => {
+  const jobs = workflowJobs(workflow);
+  const promote = jobs.get('promote_image');
+  assert.equal(jobs.has('draft_release'), false);
+  assert.match(promote, /gh release create "\$GITHUB_REF_NAME"/);
+  assert.match(promote, /Promote only the verified platform digests/);
+  assert.ok(
+    promote.indexOf('gh release create "$GITHUB_REF_NAME"') <
+      promote.indexOf('Promote only the verified platform digests'),
+  );
+  assert.match(promote, /contents: write/);
+  assert.match(promote, /packages: write/);
+  assert.match(promote, /attestations: write/);
+  assert.match(promote, /id-token: write/);
 });
 
 test('release metadata and public assets are revalidated', () => {

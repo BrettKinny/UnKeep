@@ -1,6 +1,6 @@
 services:
   unkeep:
-    image: ${UNKEEP_IMAGE:-ghcr.io/brettkinny/unkeep:0.2.0-rc.2}
+    image: ${UNKEEP_IMAGE:-ghcr.io/brettkinny/unkeep:0.2.0-rc.3}
     pull_policy: always
     ports:
       - "127.0.0.1:3000:3000"
@@ -44,7 +44,7 @@ services:
   unkeep-cli:
     profiles:
       - cli
-    image: ${UNKEEP_IMAGE:-ghcr.io/brettkinny/unkeep:0.2.0-rc.2}
+    image: ${UNKEEP_IMAGE:-ghcr.io/brettkinny/unkeep:0.2.0-rc.3}
     pull_policy: always
     entrypoint:
       - unkeep
