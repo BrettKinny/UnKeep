@@ -15,9 +15,9 @@ verified image digest:
 ```sh
 set -eu
 mkdir unkeep && cd unkeep
-release_url=https://github.com/BrettKinny/UnKeep/releases/download/v0.2.0-rc.3
+release_url=https://github.com/BrettKinny/UnKeep/releases/download/v0.2.0-rc.4
 curl -fsSLO "$release_url/compose.release.yaml"
-curl -fsSLO "$release_url/unkeep-0.2.0-rc.3-image-digest.txt"
+curl -fsSLO "$release_url/unkeep-0.2.0-rc.4-image-digest.txt"
 curl -fsSLO "$release_url/SHA256SUMS"
 grep -E \
   '^[0-9a-f]{64}  (compose\.release\.yaml|unkeep-0\.2\.0-rc\.1-image-digest\.txt)$' \
@@ -27,7 +27,7 @@ sha256sum --check --strict RELEASE_SHA256SUMS
 rm RELEASE_SHA256SUMS
 release_digest="$(
   sed -n 's/^digest=\(sha256:[0-9a-f]\{64\}\)$/\1/p' \
-    unkeep-0.2.0-rc.3-image-digest.txt
+    unkeep-0.2.0-rc.4-image-digest.txt
 )"
 printf '%s\n' "$release_digest" | grep -Eq '^sha256:[0-9a-f]{64}$'
 mv compose.release.yaml compose.yaml
@@ -84,12 +84,12 @@ can additionally run the following after downloading the assets and before the
 local files match its attestations:
 
 ```sh
-gh release verify v0.2.0-rc.3 --repo BrettKinny/UnKeep
-gh release verify-asset v0.2.0-rc.3 \
+gh release verify v0.2.0-rc.4 --repo BrettKinny/UnKeep
+gh release verify-asset v0.2.0-rc.4 \
   compose.release.yaml --repo BrettKinny/UnKeep
-gh release verify-asset v0.2.0-rc.3 \
-  unkeep-0.2.0-rc.3-image-digest.txt --repo BrettKinny/UnKeep
-gh release verify-asset v0.2.0-rc.3 SHA256SUMS --repo BrettKinny/UnKeep
+gh release verify-asset v0.2.0-rc.4 \
+  unkeep-0.2.0-rc.4-image-digest.txt --repo BrettKinny/UnKeep
+gh release verify-asset v0.2.0-rc.4 SHA256SUMS --repo BrettKinny/UnKeep
 ```
 
 Keep the digest pin in the mode-`0600` `.env` when recreating the service. To
@@ -97,7 +97,7 @@ audit and build source instead, clone the exact tag and use the repository's
 separate development Compose file:
 
 ```sh
-git clone --branch v0.2.0-rc.3 https://github.com/BrettKinny/UnKeep.git
+git clone --branch v0.2.0-rc.4 https://github.com/BrettKinny/UnKeep.git
 cd UnKeep
 install -d -m 700 data
 sudo chown 1000:1000 data
@@ -106,7 +106,7 @@ release_sha="$(git rev-parse HEAD)"
 {
   printf 'UNKEEP_SETUP_TOKEN=%s\n' "$(openssl rand -base64 32)"
   printf 'UNKEEP_RECOVERY_TOKEN=%s\n' "$(openssl rand -base64 32)"
-  printf 'UNKEEP_BUILD_VERSION=0.2.0-rc.3\n'
+  printf 'UNKEEP_BUILD_VERSION=0.2.0-rc.4\n'
   printf 'UNKEEP_BUILD_REVISION=%s\n' "$release_sha"
 } > .env
 docker compose --env-file .env up --build -d

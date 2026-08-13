@@ -143,7 +143,7 @@ in its `ref` input. It must not create a release or push a release image.
 For publication, create an annotated tag from a commit contained in `main`:
 
 ```sh
-version=0.2.0-rc.3
+version=0.2.0-rc.4
 git tag --sign --annotate "v$version" -m "UnKeep $version"
 git push origin "v$version"
 ```
@@ -182,7 +182,7 @@ incomplete public GitHub release.
 Replace the version and source SHA below for a later candidate:
 
 ```sh
-version=0.2.0-rc.3
+version=0.2.0-rc.4
 docker buildx imagetools inspect "ghcr.io/brettkinny/unkeep:$version"
 gh attestation verify \
   "oci://ghcr.io/brettkinny/unkeep:$version" \
@@ -220,10 +220,11 @@ candidate image does not consume the release slot. Use **Re-run all jobs** so
 `stage_container` performs a fresh inventory; do not rerun a later publication
 job by itself.
 
-The failed `v0.2.0-rc.2` attempt is preserved as an incident record: its draft
-release and untagged staged images remain unpublished. Because correcting the
-cross-job draft visibility requires changed workflow source, publication
-continues with `v0.2.0-rc.3`; do not move or reuse the `rc.2` tag.
+The failed `v0.2.0-rc.2` and `v0.2.0-rc.3` attempts are preserved as incident
+records. The former exposed cross-job draft visibility; the latter exposed a
+QEMU crash while building arm64 application assets. Their drafts and untagged
+staged images remain unpublished. Publication continues with
+`v0.2.0-rc.4`; do not move or reuse either earlier tag.
 
 If either immutable GHCR tag or the GitHub release exists, preserve the failed
 candidate as an incident record. Do not expect a rebuild to complete missing

@@ -50,7 +50,7 @@ o:musl
 c:f5640d3a10f664c9119720c60515265d3d6f6d01
 `;
 
-const fixtureVersion = '0.2.0-rc.3';
+const fixtureVersion = '0.2.0-rc.4';
 const fixtureRevision = 'a'.repeat(40);
 function sha256(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -251,7 +251,7 @@ test('requires controlled license, build, and runtime stages with one base', () 
   const valid = [
     'ARG NODE_LICENSE_PLATFORM=linux/amd64',
     `FROM --platform=\${NODE_LICENSE_PLATFORM} ${base} AS node-license`,
-    `FROM ${base} AS build`,
+    `FROM --platform=\${BUILDPLATFORM} ${base} AS build`,
     `FROM ${base}`,
     'COPY --from=node-license /usr/local/LICENSE /usr/local/LICENSE',
   ].join('\n');
@@ -260,8 +260,8 @@ test('requires controlled license, build, and runtime stages with one base', () 
     base,
   );
   for (const dockerfile of [
-    `FROM ${base} AS build\nFROM node:22-alpine\n`,
-    `FROM ${base} AS build\nFROM ${base}\nFROM scratch\n`,
+    `FROM --platform=\${BUILDPLATFORM} ${base} AS build\nFROM node:22-alpine\n`,
+    `FROM --platform=\${BUILDPLATFORM} ${base} AS build\nFROM ${base}\nFROM scratch\n`,
     valid.replace(
       'NODE_LICENSE_PLATFORM=linux/amd64',
       'NODE_LICENSE_PLATFORM=linux/arm64',
@@ -275,7 +275,10 @@ test('requires controlled license, build, and runtime stages with one base', () 
       'COPY --from=node-license /usr/local/LICENSE /usr/local/LICENSE',
       'COPY --from=node-license /usr/local/LICENSE /tmp/LICENSE',
     ),
-    valid.replace(`FROM ${base} AS build`, 'FROM node:22-alpine AS build'),
+    valid.replace(
+      `FROM --platform=\${BUILDPLATFORM} ${base} AS build`,
+      'FROM node:22-alpine AS build',
+    ),
   ]) {
     assert.throws(
       () => parseDockerfileBase(dockerfile),

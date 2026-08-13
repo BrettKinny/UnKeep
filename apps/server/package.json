@@ -1,6 +1,6 @@
 {
   "name": "@unkeep/server",
-  "version": "0.2.0-rc.3",
+  "version": "0.2.0-rc.4",
   "private": true,
   "description": "Private UnKeep ciphertext relay and static PWA host",
   "license": "MIT",
