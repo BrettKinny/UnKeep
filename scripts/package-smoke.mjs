@@ -14,7 +14,6 @@ const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const node = process.execPath;
 const repositoryLicense = readFileSync(join(repositoryRoot, 'LICENSE'), 'utf8');
-const publicRegistry = 'https://registry.npmjs.org/';
 const suppliedTarballs = process.argv.slice(2).map((path) => resolve(path));
 
 const packages = [
@@ -114,12 +113,9 @@ try {
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
     if (typeof manifest.version !== 'string' || !manifest.version) fail(`${packageDefinition.name} is missing a version`);
     installedVersions.set(packageDefinition.name, manifest.version);
-    if (manifest.private) fail(`${packageDefinition.name} is still marked private`);
+    if (manifest.private !== true) fail(`${packageDefinition.name} must remain private`);
     if (manifest.license !== 'MIT') fail(`${packageDefinition.name} is missing its MIT license metadata`);
-    if (manifest.publishConfig?.access !== 'public') fail(`${packageDefinition.name} is missing public publishConfig`);
-    if (manifest.publishConfig?.registry !== publicRegistry) {
-      fail(`${packageDefinition.name} must publish only to ${publicRegistry}`);
-    }
+    if (manifest.publishConfig !== undefined) fail(`${packageDefinition.name} must not define publishConfig`);
     if (!manifest.engines?.node) fail(`${packageDefinition.name} is missing a Node engine requirement`);
     if (!manifest.repository?.url) fail(`${packageDefinition.name} is missing repository metadata`);
     for (const dependency of packageDefinition.internalDependencies) {
