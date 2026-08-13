@@ -23,6 +23,14 @@ device; the relay stores ciphertext and the metadata needed to synchronize it.
 UnKeep is independent software, not affiliated with or endorsed by Google.
 Google and Google Keep are trademarks of Google LLC.
 
+> [!IMPORTANT]
+> **Hobby project, heavily AI-assisted.** UnKeep was built with substantial AI
+> assistance in a domain outside the maintainer's primary expertise. It has
+> been reviewed and dogfooded on a home server for the last couple of months,
+> but it is not a polished commercial product or a substitute for an
+> independent security audit. Expect rough edges, keep tested backups, and read
+> the [threat model](THREAT_MODEL.md) before trusting it with important data.
+
 ## Why UnKeep?
 
 - **Keep your data close.** Run one small Docker container on your own server,
