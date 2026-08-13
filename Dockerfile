@@ -1,7 +1,7 @@
 ARG NODE_LICENSE_PLATFORM=linux/amd64
-FROM --platform=${NODE_LICENSE_PLATFORM} node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS node-license
+FROM --platform=${NODE_LICENSE_PLATFORM} node:26-alpine@sha256:aadf416b2cdce311a8811ba3f0608a61b77dbf997500e2eafe781b51f6a0b019 AS node-license
 
-FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS build
+FROM node:26-alpine@sha256:aadf416b2cdce311a8811ba3f0608a61b77dbf997500e2eafe781b51f6a0b019 AS build
 ARG UNKEEP_VERSION=dev
 ARG UNKEEP_REVISION=unknown
 ENV UNKEEP_BUILD_VERSION=${UNKEEP_VERSION} \
@@ -18,7 +18,7 @@ RUN pnpm install --frozen-lockfile
 COPY . .
 RUN pnpm build
 
-FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+FROM node:26-alpine@sha256:aadf416b2cdce311a8811ba3f0608a61b77dbf997500e2eafe781b51f6a0b019
 ARG UNKEEP_VERSION=dev
 ARG UNKEEP_REVISION=unknown
 WORKDIR /app
