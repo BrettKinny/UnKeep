@@ -11,6 +11,7 @@ import {
   readlinkSync,
   realpathSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   unlinkSync,
@@ -33,6 +34,13 @@ const SPDX_LICENSE_LIST_COMMIT =
   'd46e94e2c78ceede1cfc63cfa0396472d2798d4c';
 const NODE_RELEASE_KEY_FINGERPRINT =
   'CC68F5A3106FF448322E48ED27F5E38D5B0A215F';
+// zlib.net has occasionally returned an HTML/error body with HTTP 200. Keep
+// the fallback deliberately narrow: this is an alternate transport for the
+// exact upstream zlib archive, not a general-purpose mirror selector.
+const ZLIB_FALLBACK_HOSTS = [
+  'https://github.com/madler/zlib/releases/download',
+  'https://gstreamer.freedesktop.org/src/mirror/zlib',
+];
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = resolve(SCRIPT_DIRECTORY, '..');
 
@@ -59,6 +67,10 @@ function validateRevision(value) {
 
 function validateSha256(value, label = 'SHA-256') {
   return validateToken(value, /^[0-9a-f]{64}$/, label);
+}
+
+function validateSha512(value, label = 'SHA-512') {
+  return validateToken(value, /^[0-9a-f]{128}$/, label);
 }
 
 function validateGitCommit(value, label = 'Git commit') {
@@ -99,6 +111,12 @@ function sha256File(path) {
   const hash = createHash('sha256');
   const content = readFileSync(path);
   hash.update(content);
+  return hash.digest('hex');
+}
+
+function sha512File(path) {
+  const hash = createHash('sha512');
+  hash.update(readFileSync(path));
   return hash.digest('hex');
 }
 
@@ -579,7 +597,144 @@ async function download(url, destination) {
   });
 }
 
-function fetchAlpineDistfiles(bundleRoot, origins) {
+function zlibFallbackUrls(sourceUrl) {
+  let parsed;
+  try {
+    parsed = new URL(sourceUrl);
+  } catch {
+    return [];
+  }
+  if (
+    parsed.hostname !== 'zlib.net'
+    && parsed.hostname !== 'www.zlib.net'
+  ) return [];
+  const filename = basename(parsed.pathname);
+  const match = /^zlib-(\d+\.\d+(?:\.\d+)+)\.tar\.gz$/.exec(filename);
+  if (!match) return [];
+  const version = match[1];
+  return [
+    `${ZLIB_FALLBACK_HOSTS[0]}/v${version}/${filename}`,
+    `${ZLIB_FALLBACK_HOSTS[1]}/${filename}`,
+  ];
+}
+
+function parseRecipeDistfiles(recipePath) {
+  const recipe = readFileSync(recipePath, 'utf8');
+  const packageName = /^pkgname=(\S+)$/m.exec(recipe)?.[1];
+  const packageVersion = /^pkgver=(\S+)$/m.exec(recipe)?.[1];
+  const sourceBlock = /(?:^|\n)source\s*=\s*"([\s\S]*?)"/
+    .exec(recipe)?.[1];
+  const checksumBlock = /(?:^|\n)sha512sums\s*=\s*"([\s\S]*?)"/
+    .exec(recipe)?.[1];
+  if (!packageName || !packageVersion || !sourceBlock || !checksumBlock) {
+    return [];
+  }
+  const substitutions = value => value
+    .replaceAll('$pkgname', packageName)
+    .replaceAll('${pkgname}', packageName)
+    .replaceAll('$pkgver', packageVersion)
+    .replaceAll('${pkgver}', packageVersion);
+  const checksums = new Map();
+  for (const line of checksumBlock.split(/\r?\n/)) {
+    const match = /^\s*([0-9a-f]{128})\s+(\S+)\s*$/.exec(line);
+    if (match) checksums.set(match[2], match[1]);
+  }
+  const distfiles = [];
+  for (const source of sourceBlock.split(/\s+/).filter(Boolean)) {
+    const separator = source.indexOf('::');
+    const url = substitutions(
+      separator >= 0 ? source.slice(separator + 2) : source,
+    );
+    if (!url.startsWith('https://')) continue;
+    const filename = basename(new URL(url).pathname);
+    const fallbackUrls = zlibFallbackUrls(url);
+    if (fallbackUrls.length > 0) {
+      distfiles.push({
+        url,
+        filename,
+        sha512: checksums.get(filename),
+        fallbackUrls,
+      });
+    }
+  }
+  return distfiles;
+}
+
+/**
+ * Download a source from its primary URL, then from explicitly allowlisted
+ * fallback URLs. Every candidate is checked against the APKBUILD SHA-512
+ * before it can replace the destination. A successful HTTP response is not
+ * considered success until this immutable recipe checksum matches.
+ */
+export async function downloadWithFallback({
+  primaryUrl,
+  fallbackUrls,
+  destination,
+  expectedSha512,
+  fetcher = download,
+}) {
+  validateSha512(expectedSha512, 'Alpine distfile SHA-512');
+  const urls = [primaryUrl, ...fallbackUrls];
+  const errors = [];
+  for (const [index, url] of urls.entries()) {
+    const temporaryPath = `${destination}.candidate-${index}`;
+    rmSync(temporaryPath, { force: true });
+    try {
+      await fetcher(url, temporaryPath);
+      const actualSha512 = sha512File(temporaryPath);
+      if (actualSha512 !== expectedSha512) {
+        throw new Error(
+          `SHA-512 ${actualSha512} does not match ${expectedSha512}`,
+        );
+      }
+      renameSync(temporaryPath, destination);
+      return url;
+    } catch (error) {
+      errors.push(`${url}: ${error.message}`);
+      rmSync(temporaryPath, { force: true });
+    }
+  }
+  fail(
+    `All Alpine distfile sources failed for ${primaryUrl}\n${errors.join('\n')}`,
+  );
+}
+
+async function fetchFallbackDistfiles(bundleRoot, origins) {
+  let recovered = 0;
+  for (const item of origins) {
+    const recipePath = join(
+      bundleRoot,
+      'alpine',
+      item.origin,
+      'recipe',
+      'APKBUILD',
+    );
+    for (const distfile of parseRecipeDistfiles(recipePath)) {
+      if (!distfile.sha512) {
+        fail(
+          `Fallback source for ${distfile.url} has no APKBUILD SHA-512 `
+          + 'checksum',
+        );
+      }
+      await downloadWithFallback({
+        primaryUrl: distfile.url,
+        fallbackUrls: distfile.fallbackUrls,
+        expectedSha512: distfile.sha512,
+        destination: join(
+          bundleRoot,
+          'alpine',
+          item.origin,
+          'distfiles',
+          distfile.filename,
+        ),
+      });
+      recovered += 1;
+    }
+  }
+  return recovered;
+}
+
+async function fetchAlpineDistfiles(bundleRoot, origins) {
   const uid = process.getuid?.();
   if (!Number.isSafeInteger(uid) || uid < 0) {
     fail('Cannot determine the host user ID for the source-fetch container');
@@ -612,7 +767,7 @@ function fetchAlpineDistfiles(bundleRoot, origins) {
     '  done',
     'done < /bundle/alpine/origins.txt',
   ].join('\n');
-  run('docker', [
+  const dockerArguments = [
     'run',
     '--rm',
     '--env',
@@ -624,8 +779,27 @@ function fetchAlpineDistfiles(bundleRoot, origins) {
     parseDockerfileBase(),
     '-c',
     fetchScript,
-  ], { stdio: 'inherit', encoding: null });
-  rmSync(listPath);
+  ];
+  try {
+    run('docker', dockerArguments, { stdio: 'inherit', encoding: null });
+    rmSync(listPath);
+    return;
+  } catch (primaryError) {
+    try {
+      const recovered = await fetchFallbackDistfiles(bundleRoot, origins);
+      if (recovered === 0) {
+        fail('No allowlisted Alpine distfile fallback applies');
+      }
+    } catch (fallbackError) {
+      rmSync(listPath, { force: true });
+      fail(
+        `${primaryError.message}\nFallback Alpine distfile recovery failed: `
+        + fallbackError.message,
+      );
+    }
+    run('docker', dockerArguments, { stdio: 'inherit', encoding: null });
+    rmSync(listPath);
+  }
 }
 
 function verifyNodeReleaseSignature(
@@ -902,7 +1076,7 @@ async function buildBundle(options) {
         destination,
       );
     }
-    fetchAlpineDistfiles(bundleRoot, origins);
+    await fetchAlpineDistfiles(bundleRoot, origins);
 
     const dockerNodeRepository = join(temporaryRoot, 'docker-node.git');
     initializeRepository(dockerNodeRepository, DOCKER_NODE_REPOSITORY);

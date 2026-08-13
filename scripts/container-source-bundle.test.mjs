@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
+  existsSync,
   lstatSync,
   mkdtempSync,
   mkdirSync,
@@ -17,6 +18,7 @@ import {
   bindBundle,
   compareRuntimeCorrespondence,
   compareAlpineInventories,
+  downloadWithFallback,
   fetchCommits,
   normalizeSourceSymlinks,
   parseDockerfileBase,
@@ -325,6 +327,60 @@ test('fetches multiple immutable source commits in one shallow transaction', () 
         commit,
       );
     }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('uses an allowlisted fallback only after primary failure and verifies it', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'unkeep-source-fallback-test-'));
+  const destination = join(root, 'zlib-1.3.1.tar.gz');
+  const primary = 'https://zlib.net/fossils/zlib-1.3.1.tar.gz';
+  const fallback =
+    'https://github.com/madler/zlib/releases/download/v1.3.1/'
+    + 'zlib-1.3.1.tar.gz';
+  const bytes = Buffer.from('verified zlib fixture\n');
+  const expectedSha512 = createHash('sha512').update(bytes).digest('hex');
+  try {
+    await downloadWithFallback({
+      primaryUrl: primary,
+      fallbackUrls: [fallback],
+      destination,
+      expectedSha512,
+      fetcher: async (url, path) => {
+        if (url === primary) throw new Error('primary unavailable');
+        writeFileSync(path, bytes);
+      },
+    });
+    assert.deepEqual(readFileSync(destination), bytes);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('fails closed when a fallback source fails the APKBUILD checksum', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'unkeep-source-fallback-test-'));
+  const destination = join(root, 'zlib-1.3.1.tar.gz');
+  try {
+    await assert.rejects(
+      downloadWithFallback({
+        primaryUrl: 'https://zlib.net/fossils/zlib-1.3.1.tar.gz',
+        fallbackUrls: [
+          'https://github.com/madler/zlib/releases/download/v1.3.1/'
+          + 'zlib-1.3.1.tar.gz',
+        ],
+        destination,
+        expectedSha512: 'a'.repeat(128),
+        fetcher: async (url, path) => {
+          if (url.startsWith('https://zlib.net/')) {
+            throw new Error('primary unavailable');
+          }
+          writeFileSync(path, 'tampered fallback bytes');
+        },
+      }),
+      /All Alpine distfile sources failed.*SHA-512/s,
+    );
+    assert.equal(existsSync(destination), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
