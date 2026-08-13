@@ -211,7 +211,7 @@ export function parseDockerfileBase(
     'i',
   ).exec(fromInstructions[0] ?? '');
   const buildStage = new RegExp(
-    `^\\s*FROM\\s+${basePattern}\\s+AS\\s+build\\s*$`,
+    `^\\s*FROM\\s+--platform=\\$\\{BUILDPLATFORM\\}\\s+${basePattern}\\s+AS\\s+build\\s*$`,
     'i',
   ).exec(fromInstructions[1] ?? '');
   const runtimeStage = new RegExp(

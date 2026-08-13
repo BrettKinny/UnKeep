@@ -10,6 +10,13 @@ Because UnKeep is still `0.x`, minor releases may include breaking changes.
 
 No changes yet.
 
+## [0.2.0-rc.4] - 2026-08-13
+
+### Fixed
+
+- Build architecture-independent application assets on the native builder
+  platform, avoiding QEMU crashes during arm64 release-image publication.
+
 ## [0.2.0-rc.3] - 2026-08-13
 
 ### Changed
@@ -180,7 +187,8 @@ collaboration.
 
 - Initial client-side encryption and input-hardening work.
 
-[Unreleased]: https://github.com/BrettKinny/UnKeep/compare/v0.2.0-rc.3...HEAD
+[Unreleased]: https://github.com/BrettKinny/UnKeep/compare/v0.2.0-rc.4...HEAD
+[0.2.0-rc.4]: https://github.com/BrettKinny/UnKeep/compare/v0.2.0-rc.3...v0.2.0-rc.4
 [0.2.0-rc.3]: https://github.com/BrettKinny/UnKeep/compare/v0.2.0-rc.2...v0.2.0-rc.3
 [0.2.0-rc.2]: https://github.com/BrettKinny/UnKeep/compare/v0.2.0-rc.1...v0.2.0-rc.2
 [0.2.0-rc.1]: https://github.com/BrettKinny/UnKeep/compare/v0.1.1...v0.2.0-rc.1
