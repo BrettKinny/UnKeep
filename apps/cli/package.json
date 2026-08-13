@@ -1,6 +1,7 @@
 {
   "name": "@unkeep/cli",
   "version": "0.2.0-rc.1",
+  "private": true,
   "description": "Command-line client for encrypted UnKeep notes and automation workflows",
   "license": "MIT",
   "repository": {
@@ -38,10 +39,6 @@
   },
   "engines": {
     "node": ">=20"
-  },
-  "publishConfig": {
-    "access": "public",
-    "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
     "@unkeep/client": "workspace:*",

@@ -4,12 +4,6 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const EXPECTED_NPM_PACKAGES = [
-  '@unkeep/core',
-  '@unkeep/client',
-  '@unkeep/cli',
-];
-
 function fail(message) {
   throw new Error(message);
 }
@@ -35,40 +29,6 @@ function nextReleaseCandidate(version) {
   return `${match[1]}-rc.${BigInt(match[2]) + 1n}`;
 }
 
-function validateNpmInventory(entries, version) {
-  const byPackage = new Map();
-  for (const entry of entries) {
-    if (
-      !entry
-      || typeof entry !== 'object'
-      || typeof entry.package !== 'string'
-      || typeof entry.exists !== 'boolean'
-    ) {
-      fail('npm inventory entries require string package and boolean exists fields');
-    }
-    if (!EXPECTED_NPM_PACKAGES.includes(entry.package)) {
-      fail(`npm inventory contains unexpected package: ${entry.package}`);
-    }
-    if (byPackage.has(entry.package)) {
-      fail(`npm inventory contains duplicate package: ${entry.package}`);
-    }
-    if (entry.exists && entry.version !== version) {
-      fail(`npm inventory returned ${entry.package}@${entry.version ?? 'unknown'}; expected ${version}`);
-    }
-    if (!entry.exists && 'version' in entry) {
-      fail(`npm inventory marks ${entry.package} absent but also supplies a version`);
-    }
-    byPackage.set(entry.package, entry);
-  }
-
-  for (const packageName of EXPECTED_NPM_PACKAGES) {
-    if (!byPackage.has(packageName)) {
-      fail(`npm inventory is missing package: ${packageName}`);
-    }
-  }
-  return byPackage;
-}
-
 function validateGhcrInventory(entries) {
   for (const entry of entries) {
     const tags = entry?.metadata?.container?.tags;
@@ -86,7 +46,6 @@ export function inspectReleaseSlot({
   version,
   releaseSha,
   image,
-  npmEntries,
   ghcrEntries,
 }) {
   const nextVersion = nextReleaseCandidate(version);
@@ -97,15 +56,8 @@ export function inspectReleaseSlot({
     fail(`Invalid GHCR image reference: ${image}`);
   }
 
-  const npmByPackage = validateNpmInventory(npmEntries, version);
   const ghcrVersions = validateGhcrInventory(ghcrEntries);
   const collisions = [];
-
-  for (const packageName of EXPECTED_NPM_PACKAGES) {
-    if (npmByPackage.get(packageName).exists) {
-      collisions.push(`npm ${packageName}@${version}`);
-    }
-  }
 
   for (const tag of [version, `sha-${releaseSha}`]) {
     const matches = ghcrVersions.filter((entry) => entry.metadata.container.tags.includes(tag));
@@ -133,18 +85,17 @@ export function formatConsumedReleaseSlot({ version, collisions, nextVersion }) 
 }
 
 function main(args) {
-  if (args.length !== 5) {
+  if (args.length !== 4) {
     fail(
       'Usage: node scripts/check-release-slot.mjs '
-      + '<version> <release-sha> <image> <npm-inventory.jsonl> <ghcr-inventory.jsonl>',
+      + '<version> <release-sha> <image> <ghcr-inventory.jsonl>',
     );
   }
-  const [version, releaseSha, image, npmPath, ghcrPath] = args;
+  const [version, releaseSha, image, ghcrPath] = args;
   const result = inspectReleaseSlot({
     version,
     releaseSha,
     image,
-    npmEntries: parseJsonLines(npmPath, 'npm inventory'),
     ghcrEntries: parseJsonLines(ghcrPath, 'GHCR inventory'),
   });
   if (result.collisions.length) {
@@ -153,7 +104,7 @@ function main(args) {
     return;
   }
   process.stdout.write(
-    `Release candidate ${version} has no npm versions or immutable GHCR tags; publication may proceed.\n`,
+    `Release candidate ${version} has no immutable GHCR tags; publication may proceed.\n`,
   );
 }
 

@@ -4,15 +4,8 @@ The command-line client for [UnKeep](https://github.com/BrettKinny/UnKeep).
 
 ## Install
 
-Install the exact public preview version:
-
-```sh
-npm install --global @unkeep/cli@0.2.0-rc.1
-unkeep --version
-```
-
-The UnKeep image also provides a separate one-shot Compose client whose key
-volume is isolated from the relay:
+The release image provides a separate one-shot Compose client whose key volume
+is isolated from the relay:
 
 ```sh
 docker compose --env-file .env run --rm --no-deps unkeep-cli --help
@@ -28,6 +21,9 @@ automatically.
 
 From a source checkout, run `pnpm build:packages`, then execute
 `node apps/cli/dist/bin.js`.
+
+Release images and source/release assets are published through GitHub and
+GHCR. There is no registry install step for the CLI.
 
 The CLI is ESM and requires Node.js 20 or newer.
 

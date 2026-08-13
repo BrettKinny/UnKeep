@@ -19,6 +19,7 @@ The package is ESM and requires Node.js 20 or newer when used in Node.
 Experimental adapters also depend on their corresponding browser or platform
 APIs.
 
-Release-candidate tags publish this package to npm under the `next` dist-tag
-through the protected release workflow. Pin an exact prerelease version when
-evaluating it.
+Release candidates are validated from the source tree and identified by their
+annotated GitHub tag. The supported deployment artifact is the release image
+published to GHCR; build this package from a source checkout when using its
+library API.

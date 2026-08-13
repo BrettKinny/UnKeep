@@ -186,7 +186,7 @@ pnpm build          # build core, client, CLI, and the static PWA
 pnpm check          # type-check all packages and the web app
 pnpm lint           # lint the web app
 pnpm test           # workspace and release-safety tests
-pnpm smoke:packages # test the packed public npm artifacts
+pnpm smoke:packages # pack and test the local package artifacts
 pnpm test:e2e       # build and exercise critical browser flows
 ```
 
@@ -197,17 +197,12 @@ contributor commands.
 
 ## Packages
 
-Install exact preview versions from npm when published:
-
-```sh
-npm install --global @unkeep/cli@0.2.0-rc.1
-npm install @unkeep/core@0.2.0-rc.1 @unkeep/client@0.2.0-rc.1
-```
-
 The package-root APIs and documented CLI commands are the intended public
 `0.x` surface. Deep imports, application/server modules, raw relay request
 shapes, and legacy adapter exports are internal or experimental. Release
-candidates use npm's `next` dist-tag; pin an exact version for automation.
+candidates are distributed through the GitHub source and release assets; the
+container image is published to GHCR. Build the packages from a source
+checkout, or use the bundled CLI in the release image.
 
 ## License
 
