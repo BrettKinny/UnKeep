@@ -10,6 +10,15 @@ Because UnKeep is still `0.x`, minor releases may include breaking changes.
 
 No changes yet.
 
+## [0.2.0-rc.2] - 2026-08-13
+
+### Changed
+
+- Removed npm publication entirely. Workspace packages are private and the
+  supported release surface is GitHub Releases plus GHCR container images.
+- Replaced the GitHub Packages REST inventory check with an authenticated,
+  fail-closed registry manifest check before immutable GHCR tags are written.
+
 ## [0.2.0-rc.1] - 2026-07-30
 
 The first public preview of the current self-hosted relay architecture. It is
@@ -164,7 +173,8 @@ collaboration.
 
 - Initial client-side encryption and input-hardening work.
 
-[Unreleased]: https://github.com/BrettKinny/UnKeep/compare/v0.2.0-rc.1...HEAD
+[Unreleased]: https://github.com/BrettKinny/UnKeep/compare/v0.2.0-rc.2...HEAD
+[0.2.0-rc.2]: https://github.com/BrettKinny/UnKeep/compare/v0.2.0-rc.1...v0.2.0-rc.2
 [0.2.0-rc.1]: https://github.com/BrettKinny/UnKeep/compare/v0.1.1...v0.2.0-rc.1
 [0.1.1]: https://github.com/BrettKinny/UnKeep/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/BrettKinny/UnKeep/releases/tag/v0.1.0

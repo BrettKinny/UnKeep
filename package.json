@@ -23,7 +23,7 @@
     "lint": "pnpm --filter @unkeep/web lint",
     "notices": "node scripts/generate-third-party-notices.mjs",
     "notices:check": "node scripts/generate-third-party-notices.mjs --check",
-    "test": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/client build && pnpm --filter @unkeep/core test && pnpm --filter @unkeep/client test && pnpm --filter @unkeep/cli test && pnpm --filter @unkeep/web test && pnpm --filter @unkeep/server test && node --test scripts/check-release-slot.test.mjs scripts/container-source-bundle.test.mjs scripts/inventory-ghcr.test.mjs scripts/release-workflow-security.test.mjs",
+    "test": "pnpm --filter @unkeep/core build && pnpm --filter @unkeep/client build && pnpm --filter @unkeep/core test && pnpm --filter @unkeep/client test && pnpm --filter @unkeep/cli test && pnpm --filter @unkeep/web test && pnpm --filter @unkeep/server test && node --test scripts/container-source-bundle.test.mjs scripts/release-workflow-security.test.mjs",
     "test:e2e": "pnpm build && playwright test",
     "smoke:packages": "node scripts/package-smoke.mjs"
   },
