@@ -113,12 +113,14 @@ test('release metadata and public assets are revalidated', () => {
   assert.match(finalize, /gh release verify-asset/);
 });
 
-test('release slot checks only immutable GHCR tags', () => {
+test('release slot checks authenticated GHCR tags and fails closed on ambiguous errors', () => {
   const jobs = workflowJobs(workflow);
-  for (const name of ['stage_container', 'promote_image']) {
-    const block = jobs.get(name);
-    assert.match(block, /inventory-ghcr\.mjs/);
-    assert.match(block, /check-release-slot\.mjs/);
-    assert.doesNotMatch(block, /npm-release-state|registry\.npmjs\.org/);
+  const stage = jobs.get('stage_container');
+  assert.ok(stage.indexOf('Log in to GHCR') < stage.indexOf('Require unused immutable GHCR tags'));
+  for (const block of [stage, jobs.get('promote_image')]) {
+    assert.match(block, /docker buildx imagetools inspect "\$reference"/);
+    assert.match(block, /manifest unknown\|not found/);
+    assert.match(block, /Could not prove that immutable release tag/);
+    assert.doesNotMatch(block, /inventory-ghcr|check-release-slot|npm-release-state/);
   }
 });

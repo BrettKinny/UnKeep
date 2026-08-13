@@ -656,25 +656,6 @@ jobs:
           cp THIRD_PARTY_NOTICES.md compose.release.yaml release-assets/
 
 
-      - name: Inventory GHCR release state
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          package_name="${GITHUB_REPOSITORY#*/}"
-          package_name="${package_name,,}"
-          node scripts/inventory-ghcr.mjs \
-            "$GITHUB_REPOSITORY_OWNER" \
-            "$package_name" \
-            "$RUNNER_TEMP/ghcr-versions.jsonl"
-
-      - name: Require a completely unused release slot
-        run: |
-          node scripts/check-release-slot.mjs \
-            "$VERSION" \
-            "$RELEASE_SHA" \
-            "$IMAGE" \
-            "$RUNNER_TEMP/ghcr-versions.jsonl"
 
       - name: Revalidate the remote release tag before staging
         run: |
@@ -707,6 +688,22 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Require unused immutable GHCR tags
+        run: |
+          set -euo pipefail
+          for reference in "$IMAGE:$VERSION" "$IMAGE:sha-$RELEASE_SHA"; do
+            stderr="$RUNNER_TEMP/ghcr-slot-${reference##*:}.err"
+            if docker buildx imagetools inspect "$reference" >/dev/null 2>"$stderr"; then
+              echo "::error::Immutable release tag already exists: $reference"
+              exit 1
+            fi
+            if ! grep -Eqi 'manifest unknown|not found' "$stderr"; then
+              echo "::error::Could not prove that immutable release tag is absent: $reference"
+              cat "$stderr"
+              exit 1
+            fi
+          done
 
       - name: Revalidate the release tag before amd64 staging
         run: |
@@ -1276,18 +1273,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          package_name="${GITHUB_REPOSITORY#*/}"
-          package_name="${package_name,,}"
-          node scripts/inventory-ghcr.mjs \
-            "$GITHUB_REPOSITORY_OWNER" \
-            "$package_name" \
-            "$RUNNER_TEMP/ghcr-prepromotion.jsonl"
-          node scripts/check-release-slot.mjs \
-            "$VERSION" \
-            "$RELEASE_SHA" \
-            "$IMAGE" \
-            "$RUNNER_TEMP/ghcr-prepromotion.jsonl"
-
+          for reference in "$IMAGE:$VERSION" "$IMAGE:sha-$RELEASE_SHA"; do
+            stderr="$RUNNER_TEMP/ghcr-slot-${reference##*:}.err"
+            if docker buildx imagetools inspect "$reference" >/dev/null 2>"$stderr"; then
+              echo "::error::Immutable release tag appeared before promotion: $reference"
+              exit 1
+            fi
+            if ! grep -Eqi 'manifest unknown|not found' "$stderr"; then
+              echo "::error::Could not prove that immutable release tag remains absent: $reference"
+              cat "$stderr"
+              exit 1
+            fi
+          done
           remote_release_sha="$(
             git ls-remote --tags origin "refs/tags/$GITHUB_REF_NAME^{}" |
               awk 'NR == 1 { print $1 }'

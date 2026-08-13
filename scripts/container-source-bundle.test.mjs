@@ -50,7 +50,7 @@ o:musl
 c:f5640d3a10f664c9119720c60515265d3d6f6d01
 `;
 
-const fixtureVersion = '0.2.0-rc.1';
+const fixtureVersion = '0.2.0-rc.2';
 const fixtureRevision = 'a'.repeat(40);
 function sha256(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex');

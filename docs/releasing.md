@@ -141,7 +141,7 @@ in its `ref` input. It must not create a release or push a release image.
 For publication, create an annotated tag from a commit contained in `main`:
 
 ```sh
-version=0.2.0-rc.1
+version=0.2.0-rc.2
 git tag --sign --annotate "v$version" -m "UnKeep $version"
 git push origin "v$version"
 ```
@@ -181,7 +181,7 @@ incomplete public GitHub release.
 Replace the version and source SHA below for a later candidate:
 
 ```sh
-version=0.2.0-rc.1
+version=0.2.0-rc.2
 docker buildx imagetools inspect "ghcr.io/brettkinny/unkeep:$version"
 gh attestation verify \
   "oci://ghcr.io/brettkinny/unkeep:$version" \
@@ -230,9 +230,9 @@ For an incident:
 
 1. Preserve the failed workflow run, annotated tag, draft release, registry
    objects, and logs. Do not delete or overwrite them.
-2. Inventory GHCR and GitHub release state before making any repair. Use the
-   repository's GHCR inventory helper with an authenticated session and treat
-   timeouts or ambiguous responses as unknown state, not absence.
+2. Inventory GHCR and GitHub release state before making any repair. Inspect
+   both immutable image tags through an authenticated registry session and
+   treat timeouts or ambiguous responses as unknown state, not absence.
 3. If all immutable names are absent, correct the transient cause and rerun
    the same annotated tag with `stage_container` included in the new attempt.
 4. If any immutable name exists, leave it preserved and publish the next
