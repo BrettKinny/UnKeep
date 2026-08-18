@@ -1,6 +1,6 @@
 {
   "name": "@unkeep/core",
-  "version": "0.2.0-rc.4",
+  "version": "0.2.0-rc.5",
   "private": true,
   "description": "UnKeep domain types, validation, migrations, and client-side cryptography",
   "license": "MIT",

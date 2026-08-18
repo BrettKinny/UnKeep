@@ -1,6 +1,6 @@
 {
   "name": "@unkeep/cli",
-  "version": "0.2.0-rc.4",
+  "version": "0.2.0-rc.5",
   "private": true,
   "description": "Command-line client for encrypted UnKeep notes and automation workflows",
   "license": "MIT",

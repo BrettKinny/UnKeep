@@ -10,6 +10,26 @@ Because UnKeep is still `0.x`, minor releases may include breaking changes.
 
 No changes yet.
 
+## [0.2.0-rc.5] - 2026-08-18
+
+### Added
+
+- **Recoverable Trash** — notes move to Trash with an Undo action and can be
+  restored; the note record schema advances to version 2 (forward-only
+  migration, `schemaVersion: 2`).
+- **Native note sharing** from the expanded editor — Open in Obsidian, copy as
+  Markdown or plain text, download `.md`, alongside the unencrypted Quick Send
+  link.
+- **Delete action in the expanded note editor** with duplicate-mutation
+  protection while persistence is pending.
+- **Pin icon fix** in note cards.
+
+### Changed
+
+- Notes navigation redesigned around the Trash picker and selection UI (the
+  full-card edit target no longer blocks the action toolbar for pointer
+  users).
+
 ## [0.2.0-rc.4] - 2026-08-13
 
 ### Fixed
