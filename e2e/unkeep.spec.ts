@@ -10,6 +10,8 @@ const IMAGE_NAME = 'playwright-pixel.png';
 const KEEP_IMPORT_TITLE = 'Google Keep image import';
 const KEEP_IMPORT_IMAGE = 'keep-referenced-pixel.png';
 const MODAL_DELETE_TITLE = 'Delete from expanded note';
+const LINK_NOTE_TITLE = 'Launchable links';
+const LINK_NOTE_URL = 'https://example.test/docs?from=unkeep#links';
 const IMAGE_BYTES = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6qAAAAABJRU5ErkJggg==',
   'base64',
@@ -186,6 +188,7 @@ test.describe.serial('UnKeep browser vault', () => {
 
     await page.getByRole('button', { name: `Edit note: ${NOTE_TITLE}` }).click();
     const editor = page.getByRole('dialog', { name: 'Edit note' });
+    await editor.getByRole('button', { name: 'Edit note' }).click();
     await editor.getByLabel('Note title').fill(EDITED_TITLE);
     await editor.getByLabel('Note content').fill(EDITED_CONTENT);
     await editor.getByRole('button', { name: 'Close' }).click();
@@ -199,6 +202,45 @@ test.describe.serial('UnKeep browser vault', () => {
     await expect(page.getByRole('button', { name: 'Create a new note' })).toBeVisible();
     await expect(page.getByRole('button', { name: `Edit note: ${EDITED_TITLE}` })).toBeVisible();
     await expect(page.getByText(EDITED_CONTENT, { exact: true })).toBeVisible();
+  });
+
+  test('launches note links from cards and view-first expanded notes', async () => {
+    await context.route('https://example.test/**', route => route.fulfill({
+      contentType: 'text/html',
+      body: '<title>External link target</title>',
+    }));
+
+    await page.getByRole('button', { name: 'Create a new note' }).click();
+    await page.getByLabel('Note title').fill(LINK_NOTE_TITLE);
+    await page.getByLabel('Note content').fill(LINK_NOTE_URL);
+    await page.getByRole('button', { name: 'Close' }).click();
+
+    const editTarget = page.getByRole('button', { name: `Edit note: ${LINK_NOTE_TITLE}` });
+    const card = editTarget.locator('..');
+    const cardLink = card.getByRole('link', { name: LINK_NOTE_URL });
+    const cardPopupPromise = page.waitForEvent('popup');
+    await cardLink.click();
+    const cardPopup = await cardPopupPromise;
+    await expect(cardPopup).toHaveURL(LINK_NOTE_URL);
+    await cardPopup.close();
+    await expect(page.getByRole('dialog', { name: 'Edit note' })).toHaveCount(0);
+
+    await editTarget.click({ position: { x: 8, y: 8 } });
+    const editor = page.getByRole('dialog', { name: 'Edit note' });
+    await expect(editor.getByLabel('Note content')).toHaveCount(0);
+    const editorLink = editor.getByRole('link', { name: LINK_NOTE_URL });
+    const editorPopupPromise = page.waitForEvent('popup');
+    await editorLink.click();
+    const editorPopup = await editorPopupPromise;
+    await expect(editorPopup).toHaveURL(LINK_NOTE_URL);
+    await editorPopup.close();
+
+    await editor.getByRole('button', { name: 'Edit note' }).click();
+    await expect(editor.getByLabel('Note content')).toHaveValue(LINK_NOTE_URL);
+    await editor.getByRole('button', { name: 'Convert to checklist' }).click();
+    await editor.getByRole('button', { name: 'Done editing' }).click();
+    await expect(editor.getByRole('link', { name: LINK_NOTE_URL })).toBeVisible();
+    await editor.getByRole('button', { name: 'Close' }).click();
   });
 
   test('moves a note through the recoverable Trash view and restores it', async () => {
@@ -248,6 +290,7 @@ test.describe.serial('UnKeep browser vault', () => {
   test('keeps an attached image visible after reload', async () => {
     await page.getByRole('button', { name: `Edit note: ${EDITED_TITLE}` }).click();
     const editor = page.getByRole('dialog', { name: 'Edit note' });
+    await editor.getByRole('button', { name: 'Edit note' }).click();
     await editor.getByLabel('Add attachment').setInputFiles({
       name: IMAGE_NAME,
       mimeType: 'image/png',

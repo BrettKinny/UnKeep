@@ -35,6 +35,16 @@ describe('component accessibility contracts', () => {
     expect(source).not.toMatch(/class="pointer-events-none relative z-0"/);
   });
 
+  it('keeps note links above the edit overlay and directly clickable', () => {
+    const card = componentSource('NoteCard');
+    const linkedText = componentSource('LinkedText');
+
+    expect(card).toContain('class="pointer-events-none relative z-20"');
+    expect(linkedText).toMatch(/<a[^>]*class="pointer-events-auto /s);
+    expect(linkedText).toContain('onclick={stopActivation}');
+    expect(linkedText).toContain('rel="noopener noreferrer"');
+  });
+
   it('prevents duplicate Trash mutations while persistence is pending', () => {
     const source = componentSource('NoteCard');
 
@@ -109,6 +119,16 @@ describe('component accessibility contracts', () => {
     expect(source).toContain('<label for="edit-note-title"');
     expect(source).toContain('<label for="edit-note-content"');
     expect(source).toContain('<label for="edit-note-labels"');
+  });
+
+  it('opens notes in link-enabled view mode before explicit editing', () => {
+    const source = componentSource('NoteEditor');
+
+    expect(source).toContain("let mode = $state<'view' | 'edit'>('view')");
+    expect(source).toContain("mode = 'view'");
+    expect(source).toContain("aria-label={mode === 'view' ? 'Edit note' : 'Done editing'}");
+    expect(source).toContain('<LinkedText text={item.text} />');
+    expect(source).toContain('{#if mode === \'view\'}');
   });
 
   it('offers recoverable Trash with Undo from the expanded editor', () => {

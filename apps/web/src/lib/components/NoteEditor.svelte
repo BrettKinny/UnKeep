@@ -36,15 +36,13 @@
       title = note.title ?? '';
       labelsText = (note.labels ?? []).join(', ');
       showShareMenu = false;
+      mode = 'view';
       lastNoteId = note.id;
     }
   });
   let showColorPicker = $state(false);
   let showShareMenu = $state(false);
-  let showMarkdown = $state(false);
-  $effect(() => {
-    if (readOnly && !note.checkboxes) showMarkdown = true;
-  });
+  let mode = $state<'view' | 'edit'>('view');
   let deleting = $state(false);
   let markdownBlocks = $derived(parseMarkdown(content));
   let dialogEl: HTMLDivElement | undefined = $state();
@@ -53,7 +51,7 @@
 
   onMount(() => {
     const previouslyFocused = document.activeElement;
-    dialogEl?.querySelector<HTMLInputElement>('#edit-note-title')?.focus();
+    dialogEl?.focus();
     return () => {
       if (previouslyFocused instanceof HTMLElement && document.contains(previouslyFocused)) {
         previouslyFocused.focus();
@@ -63,6 +61,16 @@
 
   function bgColor() {
     return colorMap[note.color ?? 'default'] ?? colorMap['default'];
+  }
+
+  async function toggleEditMode() {
+    mode = mode === 'view' ? 'edit' : 'view';
+    showColorPicker = false;
+    showShareMenu = false;
+    if (mode === 'edit') {
+      await tick();
+      dialogEl?.querySelector<HTMLInputElement>('#edit-note-title')?.focus();
+    }
   }
 
   function handleContentChange() {
@@ -283,22 +291,27 @@
   >
     <!-- Content -->
     <div class="flex-1 overflow-y-auto p-4">
-      <label for="edit-note-title" class="sr-only">Note title</label>
-      <input
-        id="edit-note-title"
-        bind:value={title}
-        oninput={handleTitleChange}
-        readonly={readOnly}
-        class="w-full mb-3 bg-transparent text-lg font-semibold text-on-surface outline-none"
-        placeholder="Title"
-      />
+      {#if mode === 'view'}
+        <h2 class="mb-3 text-lg font-semibold text-on-surface" class:text-on-surface-muted={!title}>
+          {title || 'Untitled'}
+        </h2>
+      {:else}
+        <label for="edit-note-title" class="sr-only">Note title</label>
+        <input
+          id="edit-note-title"
+          bind:value={title}
+          oninput={handleTitleChange}
+          class="w-full mb-3 bg-transparent text-lg font-semibold text-on-surface outline-none"
+          placeholder="Title"
+        />
+      {/if}
       {#if note.images?.some(attachment => isImageAttachment(attachment) && hasLocalAttachmentUrl(attachment))}
         <div class="grid grid-cols-2 gap-2 mb-3">
           {#each note.images as attachment}
             {#if isImageAttachment(attachment) && hasLocalAttachmentUrl(attachment)}
               <figure class="group/attachment relative overflow-hidden rounded">
                 <img src={attachment.url} alt={attachment.name} class="w-full max-h-48 object-cover" />
-                {#if !readOnly}<button
+                {#if mode === 'edit' && !readOnly}<button
                   type="button"
                   class="absolute right-2 top-2 grid h-8 w-8 place-items-center rounded-full bg-black/65 text-white opacity-80 hover:opacity-100 focus:opacity-100"
                   aria-label={`Remove ${attachment.name}`}
@@ -317,12 +330,62 @@
           {#each note.images.filter(attachment => !isImageAttachment(attachment)) as attachment}
             <AttachmentChip
               {attachment}
-              onRemove={readOnly ? undefined : () => void noteStore.removeAttachment(note.id, attachment.id)}
+              onRemove={mode === 'edit' && !readOnly ? () => void noteStore.removeAttachment(note.id, attachment.id) : undefined}
             />
           {/each}
         </div>
       {/if}
-      {#if note.checkboxes}
+      {#if mode === 'view'}
+        {#if note.checkboxes}
+          <ul class="space-y-2 text-on-surface">
+            {#each note.checkboxes as item}
+              <li class="flex items-start gap-2">
+                <span class="mt-0.5" aria-hidden="true">{item.checked ? '☑' : '☐'}</span>
+                <span class:line-through={item.checked} class:text-on-surface-muted={item.checked}>
+                  <LinkedText text={item.text} />
+                </span>
+              </li>
+            {/each}
+          </ul>
+        {:else}
+          <div class="min-h-[200px] text-on-surface">
+            {#each markdownBlocks as block}
+              {#if block.type === 'heading'}
+                <svelte:element
+                  this={`h${block.level}`}
+                  class="mb-2 mt-4 font-semibold leading-tight first:mt-0"
+                  class:text-2xl={block.level === 1}
+                  class:text-xl={block.level === 2}
+                  class:text-lg={block.level >= 3}
+                >{@render renderInline(block.content)}</svelte:element>
+              {:else if block.type === 'paragraph'}
+                <p class="my-2 leading-relaxed first:mt-0">{@render renderInline(block.content)}</p>
+              {:else if block.type === 'list' && block.ordered}
+                <ol start={block.start} class="my-2 list-decimal space-y-1 pl-6">
+                  {#each block.items as item}
+                    <li>{@render renderInline(item)}</li>
+                  {/each}
+                </ol>
+              {:else if block.type === 'list'}
+                <ul class="my-2 list-disc space-y-1 pl-6">
+                  {#each block.items as item}
+                    <li>{@render renderInline(item)}</li>
+                  {/each}
+                </ul>
+              {:else if block.type === 'codeBlock'}
+                <div class="my-3 overflow-hidden rounded-lg border border-border/60 bg-black/10">
+                  {#if block.language}
+                    <div class="border-b border-border/50 px-3 py-1 font-mono text-xs text-on-surface-muted">
+                      {block.language}
+                    </div>
+                  {/if}
+                  <pre class="overflow-x-auto p-3 text-sm"><code>{block.text}</code></pre>
+                </div>
+              {/if}
+            {/each}
+          </div>
+        {/if}
+      {:else if note.checkboxes}
         <ul class="space-y-2">
           {#each note.checkboxes as item, i}
             <li class="group flex items-center gap-2">
@@ -330,7 +393,6 @@
                 type="checkbox"
                 aria-label={`Mark ${item.text || 'checklist item'} ${item.checked ? 'incomplete' : 'complete'}`}
                 checked={item.checked}
-                disabled={readOnly}
                 onchange={() => handleCheckboxToggle(item.id, !item.checked)}
                 class="w-4 h-4 rounded"
               />
@@ -338,89 +400,73 @@
                 type="text"
                 aria-label="Checklist item"
                 value={item.text}
-                readonly={readOnly}
                 oninput={(e) => handleCheckboxText(item.id, e.currentTarget.value)}
                 onkeydown={(e) => handleCheckboxKeydown(e, i)}
                 class="flex-1 bg-transparent text-on-surface outline-none checklist-input"
                 placeholder="List item"
               />
-              {#if !readOnly}<button
+              <button
                 onclick={() => handleRemoveCheckboxItem(item.id)}
                 class="p-1 text-on-surface-muted hover:text-danger opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100 transition-opacity"
                 aria-label="Remove item"
               >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12"/></svg>
-              </button>{/if}
+              </button>
             </li>
           {/each}
-          {#if !readOnly}<li>
+          <li>
             <button onclick={handleAddCheckboxItem} class="text-sm text-on-surface-muted hover:text-on-surface">
               + Add item
             </button>
-          </li>{/if}
+          </li>
         </ul>
-      {:else if showMarkdown}
-        <div class="min-h-[200px] text-on-surface">
-          {#each markdownBlocks as block}
-            {#if block.type === 'heading'}
-              <svelte:element
-                this={`h${block.level}`}
-                class="mb-2 mt-4 font-semibold leading-tight first:mt-0"
-                class:text-2xl={block.level === 1}
-                class:text-xl={block.level === 2}
-                class:text-lg={block.level >= 3}
-              >{@render renderInline(block.content)}</svelte:element>
-            {:else if block.type === 'paragraph'}
-              <p class="my-2 leading-relaxed first:mt-0">{@render renderInline(block.content)}</p>
-            {:else if block.type === 'list' && block.ordered}
-              <ol start={block.start} class="my-2 list-decimal space-y-1 pl-6">
-                {#each block.items as item}
-                  <li>{@render renderInline(item)}</li>
-                {/each}
-              </ol>
-            {:else if block.type === 'list'}
-              <ul class="my-2 list-disc space-y-1 pl-6">
-                {#each block.items as item}
-                  <li>{@render renderInline(item)}</li>
-                {/each}
-              </ul>
-            {:else if block.type === 'codeBlock'}
-              <div class="my-3 overflow-hidden rounded-lg border border-border/60 bg-black/10">
-                {#if block.language}
-                  <div class="border-b border-border/50 px-3 py-1 font-mono text-xs text-on-surface-muted">
-                    {block.language}
-                  </div>
-                {/if}
-                <pre class="overflow-x-auto p-3 text-sm"><code>{block.text}</code></pre>
-              </div>
-            {/if}
-          {/each}
-        </div>
       {:else}
         <label for="edit-note-content" class="sr-only">Note content</label>
         <textarea
           id="edit-note-content"
           bind:value={content}
           oninput={handleContentChange}
-          readonly={readOnly}
           class="w-full min-h-[200px] bg-transparent text-on-surface resize-none outline-none"
           placeholder="Note content..."
         ></textarea>
       {/if}
-      <label for="edit-note-labels" class="sr-only">Labels, separated by commas</label>
-      <input
-        id="edit-note-labels"
-        bind:value={labelsText}
-        onchange={handleLabelsChange}
-        readonly={readOnly}
-        class="w-full mt-4 bg-transparent text-base sm:text-sm text-on-surface-muted outline-none"
-        placeholder="Labels, separated by commas"
-      />
+      {#if mode === 'view'}
+        {#if note.labels?.length}
+          <div class="mt-4 flex flex-wrap gap-1">
+            {#each note.labels as label}
+              <span class="rounded-full bg-black/10 px-2 py-0.5 text-xs text-on-surface-muted">{label}</span>
+            {/each}
+          </div>
+        {/if}
+      {:else}
+        <label for="edit-note-labels" class="sr-only">Labels, separated by commas</label>
+        <input
+          id="edit-note-labels"
+          bind:value={labelsText}
+          onchange={handleLabelsChange}
+          class="w-full mt-4 bg-transparent text-base sm:text-sm text-on-surface-muted outline-none"
+          placeholder="Labels, separated by commas"
+        />
+      {/if}
     </div>
 
     <!-- Toolbar -->
     <div class="flex items-center gap-1 p-3 border-t border-border/30">
-      {#if !readOnly}<label
+      {#if !readOnly}
+      <button
+        type="button"
+        onclick={() => void toggleEditMode()}
+        class="p-2 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors"
+        title={mode === 'view' ? 'Edit note' : 'Done editing'}
+        aria-label={mode === 'view' ? 'Edit note' : 'Done editing'}
+      >
+        {#if mode === 'view'}
+          <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4Z"/></svg>
+        {:else}
+          <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg>
+        {/if}
+      </button>
+      {#if mode === 'edit'}<label
         class="p-2 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors cursor-pointer"
         title="Add attachment"
         aria-label="Add attachment"
@@ -444,16 +490,6 @@
       >
         <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
       </button>
-      {#if !note.checkboxes}
-        <button
-          onclick={() => showMarkdown = !showMarkdown}
-          class="p-2 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors"
-          class:text-primary={showMarkdown}
-          title={showMarkdown ? 'Edit' : 'Preview markdown'}
-          aria-label={showMarkdown ? 'Edit' : 'Preview markdown'}
-        >
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
-        </button>
       {/if}
       <div class="relative">
         <button
