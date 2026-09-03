@@ -535,7 +535,7 @@ jobs:
             /usr/local/LICENSE > release-assets/NODE_RUNTIME_LICENSE
 
       - name: Generate dry-run image SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           image: unkeep:release-dry-run
           format: spdx-json
@@ -856,7 +856,7 @@ jobs:
             docker pull --platform linux/amd64 "$IMAGE@$AMD64_DIGEST"
 
       - name: Export an amd64 image SBOM for the GitHub release
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           image: unkeep:published-amd64
           format: spdx-json
