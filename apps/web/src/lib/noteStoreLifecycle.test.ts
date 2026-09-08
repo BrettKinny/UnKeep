@@ -4,6 +4,7 @@ import type {
   NoteAttachment,
   NoteMetadata,
 } from '@unkeep/core';
+import { normalizeNoteRecord } from '@unkeep/core';
 import type {
   ConfigField,
   DurableNoteStorageAdapter,
@@ -13,6 +14,7 @@ import type {
   SyncResult,
   ValidationResult,
 } from '@unkeep/core/experimental';
+import { LocalNoteConflictError } from '@unkeep/core/experimental';
 import {
   MemoryClientStorage,
   PendingMutationCredentialMismatchError,
@@ -52,6 +54,7 @@ let NoteStore: new (readVaultResources?: () => TestVaultResources) => {
     attachments?: Array<{ name: string; mimeType: string; size: number; bytes: Uint8Array<ArrayBuffer> }>;
   }, options?: { idempotencyKey?: string; createdAt?: number }): Promise<Note>;
   updateNote(id: string, updates: Partial<Omit<Note, 'id' | 'createdAt'>>): void;
+  togglePin(id: string): void;
   addAttachment(noteId: string, file: File): Promise<void>;
   removeAttachment(noteId: string, attachmentId: string): Promise<void>;
   trashNote(noteId: string): Promise<boolean>;
@@ -138,11 +141,24 @@ class TestAdapter implements DurableNoteStorageAdapter {
   }
   async saveNoteWithPendingSync(
     note: Note,
-    { beforeAttachments }: { beforeAttachments?: Note } = {},
+    options: { beforeAttachments?: Note; expected?: Note | null } = {},
   ): Promise<PendingNoteSync> {
     if (this.failNextSave) {
       this.failNextSave = false;
       throw new Error('note persistence failed');
+    }
+    const { beforeAttachments } = options;
+    if (Object.hasOwn(options, 'expected')) {
+      const current = this.values.get(note.id);
+      const expected = options.expected;
+      const matches = expected === null
+        ? current === undefined
+        : expected === undefined
+          ? true
+          : !!current
+            && JSON.stringify(normalizeNoteRecord(current))
+              === JSON.stringify(normalizeNoteRecord(expected));
+      if (!matches) throw new LocalNoteConflictError(current);
     }
     const stored = cloneNote(note);
     const pending = {
@@ -156,6 +172,27 @@ class TestAdapter implements DurableNoteStorageAdapter {
     this.values.set(stored.id, stored);
     this.pending.set(stored.id, pending);
     return structuredClone(pending);
+  }
+  async saveNoteIfUnchanged(note: Note, expected: Note | null): Promise<void> {
+    const current = this.values.get(note.id);
+    if (
+      (expected === null && current !== undefined)
+      || (expected !== null
+        && (!current || JSON.stringify(normalizeNoteRecord(current))
+          !== JSON.stringify(normalizeNoteRecord(expected))))
+    ) {
+      throw new LocalNoteConflictError(current);
+    }
+    this.values.set(note.id, cloneNote(note));
+  }
+  async deleteNoteIfUnchanged(id: string, expected: Note | null): Promise<void> {
+    const current = this.values.get(id);
+    const matches = expected === null
+      ? current === undefined
+      : !!current && JSON.stringify(normalizeNoteRecord(current))
+        === JSON.stringify(normalizeNoteRecord(expected));
+    if (!matches) throw new LocalNoteConflictError(current);
+    if (current) this.values.set(id, { ...cloneNote(current), deleted: true, updatedAt: Date.now() });
   }
   async saveNotesWithPendingSyncAtomically(
     notes: Note[],
@@ -2789,5 +2826,606 @@ describe('NoteStore vault lifecycle', () => {
       }),
     ]);
     expect(localValues.get(activeResources.pendingKey)).toBeUndefined();
+  });
+
+  it('keeps an immediate pin when it supersedes a debounced edit', async () => {
+    const local = note('edit-pin-order', 'old');
+    const adapter = new TestAdapter([local]);
+    const store = new NoteStore(() => resources('edit-pin-order'));
+    await store.initWithAdapter(adapter, {});
+
+    store.updateNote(local.id, { content: 'edited' });
+    store.togglePin(local.id);
+    await store.sync();
+
+    await expect(adapter.getNote(local.id)).resolves.toMatchObject({
+      content: 'edited',
+      pinned: true,
+    });
+  });
+
+  it('flushes a pending edit in its old vault before switching vaults', async () => {
+    const oldNote = note('lifecycle-fenced-edit', 'old');
+    const oldAdapter = new TestAdapter([oldNote]);
+    const newAdapter = new TestAdapter([note('new-vault-note', 'new')]);
+    const store = new NoteStore(() => resources('lifecycle-fenced-edit'));
+    await store.initWithAdapter(oldAdapter, {});
+
+    store.updateNote(oldNote.id, { content: 'saved in old vault' });
+    await store.initWithAdapter(newAdapter, {});
+
+    await expect(oldAdapter.getNote(oldNote.id)).resolves.toMatchObject({
+      content: 'saved in old vault',
+    });
+    await expect(newAdapter.getNote(oldNote.id)).rejects.toThrow('Note not found');
+    expect(store.notes.map(value => value.id)).toEqual(['new-vault-note']);
+  });
+
+  it('keeps an immediate attachment mutation with a debounced edit', async () => {
+    const attachment = {
+      id: 'existing-attachment',
+      name: 'existing.txt',
+      mimeType: 'text/plain',
+      size: 3,
+    };
+    const local = { ...note('edit-attachment-order', 'old'), images: [attachment] };
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'edit-attachment-order');
+    await attachments.save(local.id, attachment, new Uint8Array([1, 2, 3]));
+    const adapter = new TestAdapter([local]);
+    const store = new NoteStore(() => resources('edit-attachment-order', attachments));
+    await store.initWithAdapter(adapter, {});
+
+    store.updateNote(local.id, { content: 'edited' });
+    await store.removeAttachment(local.id, attachment.id);
+    await store.sync();
+
+    await expect(adapter.getNote(local.id)).resolves.toMatchObject({
+      content: 'edited',
+      images: undefined,
+    });
+  });
+
+  it('keeps an immediate attachment addition with a debounced edit', async () => {
+    const local = note('edit-attachment-add-order', 'old');
+    const attachments = new AttachmentStore(new MemoryClientStorage(), 'edit-attachment-add-order');
+    const adapter = new TestAdapter([local]);
+    const store = new NoteStore(() => resources('edit-attachment-add-order', attachments));
+    await store.initWithAdapter(adapter, {});
+
+    store.updateNote(local.id, { content: 'edited' });
+    await store.addAttachment(
+      local.id,
+      new File(['abc'], 'new.txt', { type: 'text/plain' }),
+    );
+    await store.sync();
+
+    await expect(adapter.getNote(local.id)).resolves.toMatchObject({
+      content: 'edited',
+      images: [expect.objectContaining({ name: 'new.txt' })],
+    });
+  });
+
+  it('keeps text typed while attachment bytes are still being read', async () => {
+    const local = note('attachment-read-race', 'old');
+    const adapter = new TestAdapter([local]);
+    const store = new NoteStore(() => resources('attachment-read-race'));
+    await store.initWithAdapter(adapter, {});
+    const readStarted = deferred<void>();
+    const releaseRead = deferred<ArrayBuffer>();
+    const file = new File(['abc'], 'read-race.txt', { type: 'text/plain' });
+    vi.spyOn(file, 'arrayBuffer').mockImplementation(() => {
+      readStarted.resolve();
+      return releaseRead.promise;
+    });
+
+    const adding = store.addAttachment(local.id, file);
+    await readStarted.promise;
+    store.updateNote(local.id, { content: 'typed while reading' });
+    releaseRead.resolve(new Uint8Array([1, 2, 3]).buffer);
+    await adding;
+
+    await expect(adapter.getNote(local.id)).resolves.toMatchObject({
+      content: 'typed while reading',
+      images: [expect.objectContaining({ name: 'read-race.txt' })],
+    });
+  });
+
+  it('preserves text typed while an attachment remote push is waiting', async () => {
+    vi.useFakeTimers();
+    try {
+      const local = note('attachment-push-race', 'old');
+      const attachments = new AttachmentStore(
+        new MemoryClientStorage(),
+        'attachment-push-race',
+      );
+      const adapter = new TestAdapter([local]);
+      const store = new NoteStore(() => resources('attachment-push-race', attachments));
+      await store.initWithAdapter(adapter, {});
+      const pushStarted = deferred<void>();
+      const releasePush = deferred<void>();
+      let pushes = 0;
+      useTestSync(store, {
+        async push() {
+          pushes += 1;
+          if (pushes === 1) {
+            pushStarted.resolve();
+            await releasePush.promise;
+          }
+          return pushes;
+        },
+        async pull() {
+          return {
+            notes: [],
+            deletedIds: [],
+            attachments: [],
+            deletedAttachments: [],
+            cursor: 0,
+            revisions: [],
+          };
+        },
+        async acknowledge() {},
+      });
+
+      const adding = store.addAttachment(
+        local.id,
+        new File(['abc'], 'new.txt', { type: 'text/plain' }),
+      );
+      await pushStarted.promise;
+      await expect(adapter.getNote(local.id)).resolves.toMatchObject({
+        content: 'old',
+        images: [expect.objectContaining({ name: 'new.txt' })],
+      });
+      // The visible note still has no image until the remote push returns.
+      // Its debounced snapshot must not overwrite the durable image-bearing
+      // generation; preserving it as a conflict is acceptable and visible.
+      store.updateNote(local.id, { content: 'typed during upload' });
+      await vi.advanceTimersByTimeAsync(500);
+      releasePush.resolve();
+      await adding;
+      await vi.waitFor(async () => {
+        const saved = await adapter.getAllNotes();
+        expect(saved.some(value => value.content === 'typed during upload')).toBe(true);
+      });
+
+      const saved = await adapter.getAllNotes();
+      expect(saved.find(value => value.id === local.id)).toMatchObject({
+        content: 'old',
+        images: [expect.objectContaining({ name: 'new.txt' })],
+      });
+      expect(saved.find(value => value.id !== local.id)).toMatchObject({
+        content: 'typed during upload',
+        images: undefined,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('preserves text typed while an attachment removal remote push is waiting', async () => {
+    vi.useFakeTimers();
+    try {
+      const attachment = {
+        id: 'remove-race-image',
+        name: 'remove.txt',
+        mimeType: 'text/plain',
+        size: 3,
+      };
+      const local = { ...note('attachment-remove-push-race', 'old'), images: [attachment] };
+      const attachments = new AttachmentStore(
+        new MemoryClientStorage(),
+        'attachment-remove-push-race',
+      );
+      const bytes = new Uint8Array([1, 2, 3]);
+      await attachments.save(local.id, attachment, bytes);
+      const adapter = new TestAdapter([local]);
+      const store = new NoteStore(() => resources('attachment-remove-push-race', attachments));
+      await store.initWithAdapter(adapter, {});
+      const pushStarted = deferred<void>();
+      const releasePush = deferred<void>();
+      let pushes = 0;
+      useTestSync(store, {
+        async push() {
+          pushes += 1;
+          if (pushes === 1) {
+            pushStarted.resolve();
+            await releasePush.promise;
+          }
+          return pushes;
+        },
+        async pull() {
+          return {
+            notes: [],
+            deletedIds: [],
+            attachments: [],
+            deletedAttachments: [],
+            cursor: 0,
+            revisions: [],
+          };
+        },
+        async acknowledge() {},
+      });
+
+      const removing = store.removeAttachment(local.id, attachment.id);
+      await pushStarted.promise;
+      // The visible object still references the attachment until the remote
+      // mutation returns, so this snapshot includes bytes that the durable
+      // removal has already detached. It must become a conflict copy.
+      store.updateNote(local.id, { content: 'typed during removal' });
+      await vi.advanceTimersByTimeAsync(500);
+      releasePush.resolve();
+      await removing;
+      await vi.waitFor(async () => {
+        const saved = await adapter.getAllNotes();
+        expect(saved.some(value => value.content === 'typed during removal')).toBe(true);
+      });
+
+      const saved = await adapter.getAllNotes();
+      expect(saved.find(value => value.id === local.id)).toMatchObject({
+        content: 'old',
+        images: undefined,
+      });
+      const copy = saved.find(value => value.id !== local.id);
+      expect(copy).toMatchObject({
+        content: 'typed during removal',
+        images: [expect.objectContaining({ name: 'remove.txt' })],
+      });
+      await expect(attachments.get(copy!.id, copy!.images![0].id)).resolves.toEqual({
+        attachment: expect.objectContaining({ name: 'remove.txt' }),
+        bytes,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('preserves a stale tab pin as a conflict instead of overwriting newer text', async () => {
+    const local = note('stale-tab-cas', 'original');
+    const adapter = new TestAdapter([local]);
+    const first = new NoteStore(() => resources('stale-tab-first'));
+    const second = new NoteStore(() => resources('stale-tab-second'));
+    await first.initWithAdapter(adapter, {});
+    await second.initWithAdapter(adapter, {});
+
+    first.updateNote(local.id, { content: 'valuable text' });
+    await first.sync();
+    second.togglePin(local.id);
+    await vi.waitFor(async () => {
+      expect((await adapter.getAllNotes()).length).toBe(2);
+    });
+
+    await expect(adapter.getNote(local.id)).resolves.toMatchObject({
+      content: 'valuable text',
+      pinned: false,
+    });
+    expect(second.notes.find(value => value.id === local.id)).toMatchObject({
+      content: 'valuable text',
+      pinned: false,
+    });
+    expect(second.notes.find(value => value.id !== local.id)).toMatchObject({
+      content: 'original',
+      // Conflict copies intentionally start unpinned so they do not jump
+      // ahead of the winning note in the pinned section.
+      pinned: false,
+    });
+  });
+
+  it('preserves each later distinct stale-tab edit after an earlier conflict', async () => {
+    const local = note('stale-tab-repeat-cas', 'original');
+    const adapter = new TestAdapter([local]);
+    const first = new NoteStore(() => resources('stale-tab-repeat-first'));
+    const second = new NoteStore(() => resources('stale-tab-repeat-second'));
+    await first.initWithAdapter(adapter, {});
+    await second.initWithAdapter(adapter, {});
+
+    first.updateNote(local.id, { content: 'first durable edit' });
+    await first.sync();
+    second.togglePin(local.id);
+    await vi.waitFor(async () => {
+      expect((await adapter.getAllNotes()).length).toBe(2);
+    });
+
+    first.updateNote(local.id, { content: 'second durable edit' });
+    await first.sync();
+    second.togglePin(local.id);
+    await vi.waitFor(async () => {
+      expect((await adapter.getAllNotes()).length).toBe(3);
+    });
+
+    const copies = (await adapter.getAllNotes()).filter(value => value.id !== local.id);
+    expect(copies.map(value => value.content).sort()).toEqual([
+      'first durable edit',
+      'original',
+    ]);
+    await expect(adapter.getNote(local.id)).resolves.toMatchObject({
+      content: 'second durable edit',
+      pinned: false,
+    });
+  });
+
+  it('keeps same-ID debounce work isolated between store instances', async () => {
+    vi.useFakeTimers();
+    try {
+      const firstNote = note('same-id-queue-first', 'old');
+      const secondNote = { ...firstNote };
+      const firstAdapter = new TestAdapter([firstNote]);
+      const secondAdapter = new TestAdapter([secondNote]);
+      const first = new NoteStore(() => resources('same-id-queue-first'));
+      const second = new NoteStore(() => resources('same-id-queue-second'));
+      await first.initWithAdapter(firstAdapter, {});
+      await second.initWithAdapter(secondAdapter, {});
+
+      first.updateNote(firstNote.id, { content: 'first vault edit' });
+      second.updateNote(secondNote.id, { content: 'second vault edit' });
+      await first.sync();
+
+      await expect(firstAdapter.getNote(firstNote.id)).resolves.toMatchObject({
+        content: 'first vault edit',
+      });
+      await expect(secondAdapter.getNote(secondNote.id)).resolves.toMatchObject({
+        content: 'old',
+      });
+      await vi.advanceTimersByTimeAsync(500);
+      await second.sync();
+      await expect(secondAdapter.getNote(secondNote.id)).resolves.toMatchObject({
+        content: 'second vault edit',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not hold a newer local mutation behind an in-flight remote push', async () => {
+    vi.useFakeTimers();
+    try {
+      const local = note('local-before-remote', 'old');
+      const adapter = new TestAdapter([local]);
+      const store = new NoteStore(() => resources('local-before-remote'));
+      await store.initWithAdapter(adapter, {});
+      const pushStarted = deferred<void>();
+      const releasePush = deferred<void>();
+      useTestSync(store, {
+        async push() {
+          pushStarted.resolve();
+          await releasePush.promise;
+          return 1;
+        },
+        async pull() {
+          return {
+            notes: [],
+            deletedIds: [],
+            attachments: [],
+            deletedAttachments: [],
+            cursor: 0,
+            revisions: [],
+          };
+        },
+        async acknowledge() {},
+      });
+
+      store.updateNote(local.id, { content: 'edited' });
+      await vi.advanceTimersByTimeAsync(500);
+      await pushStarted.promise;
+
+      store.togglePin(local.id);
+      await vi.waitFor(async () => {
+        await expect(adapter.getNote(local.id)).resolves.toMatchObject({
+          content: 'edited',
+          pinned: true,
+        });
+      });
+      releasePush.resolve();
+      await store.sync();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retains a failed debounced save for the next sync retry', async () => {
+    const local = note('debounced-save-retry', 'old');
+    const adapter = new TestAdapter([local]);
+    const store = new NoteStore(() => resources('debounced-save-retry'));
+    await store.initWithAdapter(adapter, {});
+    adapter.failNextSave = true;
+
+    store.updateNote(local.id, { content: 'retry me' });
+    await store.sync();
+    expect(store.syncStatus).toBe('error');
+    await expect(adapter.getNote(local.id)).resolves.toMatchObject({ content: 'old' });
+
+    await store.sync();
+    expect(store.syncStatus).toBe('synced');
+    await expect(adapter.getNote(local.id)).resolves.toMatchObject({ content: 'retry me' });
+  });
+
+  it('removes absent optional fields when applying a remote full note', async () => {
+    const local = {
+      ...note('remote-optional-fields', 'old'),
+      trashedAt: 123,
+      labels: ['old-label'],
+    };
+    const remote = { ...note(local.id, 'restored remotely') };
+    const adapter = new TestAdapter([local]);
+    const store = new NoteStore(() => resources('remote-optional-fields'));
+    await store.initWithAdapter(adapter, {});
+    useTestSync(store, {
+      async pull() {
+        return {
+          notes: [remote],
+          deletedIds: [],
+          attachments: [],
+          deletedAttachments: [],
+          cursor: 1,
+          revisions: [{ kind: 'note' as const, id: local.id, revision: 1 }],
+        };
+      },
+      async acknowledge() {},
+    });
+
+    await store.sync();
+
+    expect(store.notes[0]).toMatchObject({ content: 'restored remotely' });
+    expect(store.notes[0].trashedAt).toBeUndefined();
+    expect(store.notes[0].labels).toBeUndefined();
+    const saved = await adapter.getNote(local.id);
+    expect(saved).not.toHaveProperty('trashedAt');
+    expect(saved).not.toHaveProperty('labels');
+  });
+
+  it('pulls and acknowledges every full page before reporting synced', async () => {
+    const pageOne = Array.from({ length: 1000 }, (_, index) =>
+      note(`multi-page-${index}`, `page one ${index}`));
+    const pageTwo = [note('multi-page-final', 'page two')];
+    const adapter = new TestAdapter();
+    const store = new NoteStore(() => resources('multi-page-sync'));
+    await store.initWithAdapter(adapter, {});
+    let pullCalls = 0;
+    const acknowledged: number[] = [];
+    useTestSync(store, {
+      async pull() {
+        pullCalls++;
+        const notes = pullCalls === 1 ? pageOne : pageTwo;
+        const cursor = pullCalls === 1 ? 1000 : 1001;
+        return {
+          notes,
+          deletedIds: [],
+          attachments: [],
+          deletedAttachments: [],
+          cursor,
+          revisions: notes.map(value => ({
+            kind: 'note' as const,
+            id: value.id,
+            revision: Number(value.id.replace('multi-page-', '')) + 1,
+          })),
+        };
+      },
+      async acknowledge(cursor: number) { acknowledged.push(cursor); },
+    });
+
+    await store.sync();
+
+    expect(pullCalls).toBe(2);
+    expect(acknowledged).toEqual([1000, 1001]);
+    expect(store.notes).toHaveLength(1001);
+    expect(store.syncStatus).toBe('synced');
+  });
+
+  it('stops a paginated pass after a bounded number of full pages', async () => {
+    vi.useFakeTimers();
+    try {
+      const adapter = new TestAdapter();
+      const store = new NoteStore(() => resources('bounded-pages'));
+      await store.initWithAdapter(adapter, {});
+      let pullCalls = 0;
+      useTestSync(store, {
+        async pull() {
+          pullCalls++;
+          const cursor = pullCalls;
+          const value = note(`bounded-page-${cursor}`, `page ${cursor}`);
+          return {
+            notes: [value],
+            deletedIds: [],
+            attachments: [],
+            deletedAttachments: [],
+            cursor,
+            revisions: Array.from({ length: 1000 }, () => ({
+              kind: 'note' as const,
+              id: value.id,
+              revision: cursor,
+            })),
+          };
+        },
+        async acknowledge() {},
+      });
+
+      await store.sync();
+
+      expect(pullCalls).toBe(8);
+      expect(store.syncStatus).toBe('offline');
+      expect(vi.getTimerCount()).toBe(1);
+      await store.initWithAdapter(new TestAdapter([note('replacement-vault', 'new')]), {});
+      await vi.runOnlyPendingTimersAsync();
+      expect(pullCalls).toBe(8);
+      vi.clearAllTimers();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not spin or report synced when a full page stops advancing its cursor', async () => {
+    vi.useFakeTimers();
+    try {
+      const adapter = new TestAdapter();
+      const store = new NoteStore(() => resources('stalled-pages'));
+      await store.initWithAdapter(adapter, {});
+      let pullCalls = 0;
+      useTestSync(store, {
+        async pull() {
+          pullCalls++;
+          const value = note(`stalled-page-${pullCalls}`, `page ${pullCalls}`);
+          return {
+            notes: [value],
+            deletedIds: [],
+            attachments: [],
+            deletedAttachments: [],
+            cursor: 1,
+            revisions: Array.from({ length: 1000 }, () => ({
+              kind: 'note' as const,
+              id: value.id,
+              revision: 1,
+            })),
+          };
+        },
+        async acknowledge() {},
+      });
+
+      await store.sync();
+
+      expect(pullCalls).toBe(2);
+      expect(store.syncStatus).toBe('error');
+      expect(vi.getTimerCount()).toBe(0);
+      vi.clearAllTimers();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drains a local edit arriving at a page boundary before pulling again', async () => {
+    vi.useFakeTimers();
+    try {
+      const local = note('page-boundary-local-edit', 'remote');
+      const adapter = new TestAdapter();
+      const store = new NoteStore(() => resources('page-boundary-local-edit'));
+      await store.initWithAdapter(adapter, {});
+      let pullCalls = 0;
+      useTestSync(store, {
+        async pull() {
+          pullCalls++;
+          return {
+            notes: [local],
+            deletedIds: [],
+            attachments: [],
+            deletedAttachments: [],
+            cursor: 1,
+            revisions: Array.from({ length: 1000 }, () => ({
+              kind: 'note' as const,
+              id: local.id,
+              revision: 1,
+            })),
+          };
+        },
+        async acknowledge() {
+          store.updateNote(local.id, { content: 'local wins' });
+        },
+      });
+
+      await store.sync();
+
+      expect(pullCalls).toBe(1);
+      expect(store.syncStatus).toBe('offline');
+      await expect(adapter.getNote(local.id)).resolves.toMatchObject({ content: 'local wins' });
+      vi.clearAllTimers();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

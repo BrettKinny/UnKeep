@@ -5,6 +5,7 @@ import {
   localDatabaseName,
   upgradeLocalDatabase,
   validateVaultNamespace,
+  LocalNoteConflictError,
   LocalOnlyAdapter,
 } from './local.js';
 import type { Note } from '../types.js';
@@ -150,6 +151,114 @@ describe('local database upgrades', () => {
 });
 
 describe('LocalOnlyAdapter schema boundaries', () => {
+  it('rejects a stale expected snapshot atomically without writing the newer tab away', async () => {
+    const current: Note = {
+      id: 'cas-note',
+      content: 'newer tab edit',
+      createdAt: 1,
+      updatedAt: 2,
+      pinned: false,
+      archived: false,
+    };
+    const expected: Note = { ...current, content: 'older tab snapshot', updatedAt: 1 };
+    const put = vi.fn(() => ({} as IDBRequest<IDBValidKey>));
+    const stores = {
+      notes: {
+        get: () => successfulRequest(current),
+        put,
+      },
+      'pending-sync': { put },
+    };
+    const db = {
+      transaction: () => {
+        const transaction = {
+          objectStore: (name: keyof typeof stores) => stores[name] as unknown as IDBObjectStore,
+          error: null,
+        } as unknown as IDBTransaction;
+        setTimeout(() => transaction.oncomplete?.({} as Event), 0);
+        return transaction;
+      },
+      close: vi.fn(),
+    } as unknown as IDBDatabase;
+    vi.stubGlobal('indexedDB', {
+      open: () => successfulRequest(db) as unknown as IDBOpenDBRequest,
+    });
+
+    try {
+      const adapter = new LocalOnlyAdapter();
+      await adapter.init({});
+      await expect(adapter.saveNoteWithPendingSync(
+        { ...expected, pinned: true },
+        { expected },
+      )).rejects.toBeInstanceOf(LocalNoteConflictError);
+      expect(put).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('shares conditional note writes and tombstones across adapter instances', async () => {
+    const notes = new Map<string, Note>();
+    const original: Note = {
+      id: 'shared-cas-note',
+      content: 'original',
+      createdAt: 1,
+      updatedAt: 1,
+      pinned: false,
+      archived: false,
+    };
+    notes.set(original.id, structuredClone(original));
+    const stores = {
+      notes: {
+        get: (id: string) => successfulRequest(notes.get(id)),
+        put: (value: Note) => {
+          notes.set(value.id, structuredClone(value));
+          return {} as IDBRequest<IDBValidKey>;
+        },
+      },
+    };
+    const db = {
+      transaction: () => {
+        const transaction = {
+          objectStore: (name: keyof typeof stores) => stores[name] as unknown as IDBObjectStore,
+          error: null,
+        } as unknown as IDBTransaction;
+        setTimeout(() => transaction.oncomplete?.({} as Event), 0);
+        return transaction;
+      },
+      close: vi.fn(),
+    } as unknown as IDBDatabase;
+    vi.stubGlobal('indexedDB', {
+      open: () => successfulRequest(db) as unknown as IDBOpenDBRequest,
+    });
+
+    try {
+      const firstTab = new LocalOnlyAdapter();
+      const secondTab = new LocalOnlyAdapter();
+      await Promise.all([firstTab.init({}), secondTab.init({})]);
+      const stale = await secondTab.getNote(original.id);
+      const winning = { ...original, content: 'valuable text', updatedAt: 2 };
+      await firstTab.saveNoteIfUnchanged(winning, original);
+      await expect(secondTab.saveNoteIfUnchanged(
+        { ...stale, pinned: true },
+        stale,
+      )).rejects.toMatchObject({ name: 'LocalNoteConflictError' });
+      await expect(secondTab.deleteNoteIfUnchanged!(original.id, stale))
+        .rejects.toMatchObject({ name: 'LocalNoteConflictError' });
+      await expect(firstTab.getNote(original.id)).resolves.toMatchObject({
+        content: 'valuable text',
+      });
+      await expect(firstTab.getNote(original.id)).resolves.not.toHaveProperty('deleted');
+      await firstTab.deleteNoteIfUnchanged!(original.id, winning);
+      await expect(secondTab.getNote(original.id)).resolves.toMatchObject({
+        content: 'valuable text',
+        deleted: true,
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('atomically queues the exact note snapshot and reports a quota-aborted transaction', async () => {
     const noteWrites: Note[] = [];
     const pendingWrites: Array<{ id: string; token: string; note: Note }> = [];

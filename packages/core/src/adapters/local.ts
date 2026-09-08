@@ -25,6 +25,18 @@ export interface PendingNoteSync {
   beforeAttachments?: Note;
 }
 
+/** Raised when a browser tab tries to save against an older durable snapshot. */
+export class LocalNoteConflictError extends Error {
+  readonly code = 'local_note_conflict';
+  readonly current?: Note;
+
+  constructor(current?: Note) {
+    super('The durable note changed in another tab');
+    this.name = 'LocalNoteConflictError';
+    this.current = current ? structuredClone(current) : undefined;
+  }
+}
+
 export type CreateNoteWithPendingSyncResult =
   | { created: true; note: Note; pending: PendingNoteSync }
   | { created: false; note: Note };
@@ -56,8 +68,12 @@ export type ClaimNoteCreationResult =
 export interface DurableNoteStorageAdapter extends StorageAdapter {
   saveNoteWithPendingSync(
     note: Note,
-    options?: { beforeAttachments?: Note },
+    options?: { beforeAttachments?: Note; expected?: Note | null },
   ): Promise<PendingNoteSync>;
+  /** Save a remote snapshot only if the local note still equals expected. */
+  saveNoteIfUnchanged?(note: Note, expected: Note | null): Promise<void>;
+  /** Apply a remote tombstone only if the local note still equals expected. */
+  deleteNoteIfUnchanged?(id: string, expected: Note | null): Promise<void>;
   saveNotesWithPendingSyncAtomically(
     notes: Note[],
     options?: { importCommitToken?: string },
@@ -89,6 +105,10 @@ function pendingNoteSync(note: Note, beforeAttachments?: Note): PendingNoteSync 
     note: structuredClone(note),
     ...(predecessor ? { beforeAttachments: structuredClone(predecessor) } : {}),
   };
+}
+
+function noteSnapshotKey(note: Note): string {
+  return JSON.stringify(normalizeNoteRecord(note));
 }
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
@@ -323,17 +343,74 @@ export class LocalOnlyAdapter implements DurableNoteStorageAdapter {
     await txn(db, 'readwrite', (store) => store.put(normalizeNoteRecord(note)));
   }
 
+  async saveNoteIfUnchanged(note: Note, expected: Note | null): Promise<void> {
+    validateNoteId(note.id);
+    const normalized = normalizeNoteRecord(note);
+    const db = this.getDB();
+    const transaction = db.transaction(STORE_NAME, 'readwrite');
+    const completion = transactionCompletion(transaction, 'Conditional note write failed');
+    const store = transaction.objectStore(STORE_NAME);
+    const stored = await requestResult(store.get(normalized.id));
+    const current = stored === undefined ? undefined : normalizeNoteRecord(stored);
+    if (
+      (expected === null && current !== undefined)
+      || (expected !== null
+        && (!current || noteSnapshotKey(current) !== noteSnapshotKey(expected)))
+    ) {
+      await completion;
+      throw new LocalNoteConflictError(current);
+    }
+    store.put(normalized);
+    await completion;
+  }
+
+  async deleteNoteIfUnchanged(id: string, expected: Note | null): Promise<void> {
+    validateNoteId(id);
+    const db = this.getDB();
+    const transaction = db.transaction(STORE_NAME, 'readwrite');
+    const completion = transactionCompletion(transaction, 'Conditional note deletion failed');
+    const store = transaction.objectStore(STORE_NAME);
+    const stored = await requestResult(store.get(id));
+    const current = stored === undefined ? undefined : normalizeNoteRecord(stored);
+    const matches = expected === null
+      ? current === undefined
+      : !!current && noteSnapshotKey(current) === noteSnapshotKey(expected);
+    if (!matches) {
+      await completion;
+      throw new LocalNoteConflictError(current);
+    }
+    if (current) {
+      store.put({ ...current, deleted: true, updatedAt: Date.now() });
+    }
+    await completion;
+  }
+
   async saveNoteWithPendingSync(
     note: Note,
-    { beforeAttachments }: { beforeAttachments?: Note } = {},
+    options: { beforeAttachments?: Note; expected?: Note | null } = {},
   ): Promise<PendingNoteSync> {
     validateNoteId(note.id);
     const normalized = normalizeNoteRecord(note);
+    const { beforeAttachments, expected } = options;
     const pending = pendingNoteSync(normalized, beforeAttachments);
     const db = this.getDB();
     const transaction = db.transaction([STORE_NAME, PENDING_SYNC_STORE_NAME], 'readwrite');
     const completion = transactionCompletion(transaction, 'Atomic note and sync queue write failed');
-    transaction.objectStore(STORE_NAME).put(normalized);
+    const notes = transaction.objectStore(STORE_NAME);
+    if (Object.hasOwn(options, 'expected')) {
+      const stored = await requestResult(notes.get(normalized.id));
+      const current = stored === undefined ? undefined : normalizeNoteRecord(stored);
+      const matches = expected === null
+        ? current === undefined
+        : expected === undefined
+          ? true
+          : !!current && noteSnapshotKey(current) === noteSnapshotKey(expected);
+      if (!matches) {
+        await completion;
+        throw new LocalNoteConflictError(current);
+      }
+    }
+    notes.put(normalized);
     transaction.objectStore(PENDING_SYNC_STORE_NAME).put(pending);
     await completion;
     return pending;

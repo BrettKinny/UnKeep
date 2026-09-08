@@ -19,6 +19,14 @@
   import PinIcon from './PinIcon.svelte';
   import LinkedText from './LinkedText.svelte';
 
+  function normalizeLabels(value: string): string[] {
+    return [...new Set(value.split(',').map(label => label.trim()).filter(Boolean))];
+  }
+
+  function labelsSignature(labels: readonly string[] | undefined): string {
+    return JSON.stringify(labels ?? []);
+  }
+
   let { note, onClose, readOnly = false }: { note: Note; onClose: () => void; readOnly?: boolean } = $props();
 
   // svelte-ignore state_referenced_locally
@@ -29,16 +37,73 @@
   let labelsText = $state((note.labels ?? []).join(', '));
   // svelte-ignore state_referenced_locally
   let lastNoteId = $state(note.id);
+  // svelte-ignore state_referenced_locally
+  let lastNoteHadChecklist = $state(note.checkboxes !== undefined);
+  // These are the last snapshots observed from the store. Pending echoes let
+  // us distinguish our synchronous input update from a genuinely newer
+  // same-ID snapshot without permanently marking a field dirty.
+  // svelte-ignore state_referenced_locally
+  let lastObservedContent = $state(note.content);
+  // svelte-ignore state_referenced_locally
+  let lastObservedTitle = $state(note.title ?? '');
+  // svelte-ignore state_referenced_locally
+  let lastObservedLabels = $state(labelsSignature(note.labels));
+  let pendingOwnContent: string | null = null;
+  let pendingOwnTitle: string | null = null;
+  let pendingOwnLabels: string | null = null;
 
   $effect(() => {
     if (note.id !== lastNoteId) {
       content = note.content;
       title = note.title ?? '';
       labelsText = (note.labels ?? []).join(', ');
+      lastObservedContent = note.content;
+      lastObservedTitle = note.title ?? '';
+      lastObservedLabels = labelsSignature(note.labels);
+      pendingOwnContent = null;
+      pendingOwnTitle = null;
+      pendingOwnLabels = null;
+      lastNoteHadChecklist = note.checkboxes !== undefined;
       showShareMenu = false;
       mode = 'view';
       lastNoteId = note.id;
+      return;
     }
+    const hasChecklist = note.checkboxes !== undefined;
+    if (!lastNoteHadChecklist && hasChecklist) {
+      // Content is represented by checklist items while in this mode. Any
+      // prior text draft is no longer the editor's active input.
+      pendingOwnContent = null;
+    } else if (lastNoteHadChecklist && !hasChecklist) {
+      // Checklist edits update the note in the store, but the text textarea is
+      // still mounted in the same editor instance. Refresh its snapshot when
+      // the representation changes back to text.
+      content = note.content;
+      pendingOwnContent = null;
+    } else if (!hasChecklist && note.content !== lastObservedContent) {
+      const ownEcho = pendingOwnContent === note.content;
+      if (!ownEcho && content === lastObservedContent) content = note.content;
+      pendingOwnContent = null;
+    }
+    if (note.title !== lastObservedTitle) {
+      const nextTitle = note.title ?? '';
+      const ownEcho = pendingOwnTitle === nextTitle;
+      if (!ownEcho && title === lastObservedTitle) title = nextTitle;
+      pendingOwnTitle = null;
+    }
+    const nextLabels = labelsSignature(note.labels);
+    if (nextLabels !== lastObservedLabels) {
+      const ownEcho = pendingOwnLabels === nextLabels;
+      const draftLabels = labelsSignature(normalizeLabels(labelsText));
+      if (!ownEcho && draftLabels === lastObservedLabels) {
+        labelsText = (note.labels ?? []).join(', ');
+      }
+      pendingOwnLabels = null;
+    }
+    lastObservedContent = note.content;
+    lastObservedTitle = note.title ?? '';
+    lastObservedLabels = nextLabels;
+    lastNoteHadChecklist = hasChecklist;
   });
   let showColorPicker = $state(false);
   let showShareMenu = $state(false);
@@ -75,17 +140,20 @@
 
   function handleContentChange() {
     if (readOnly) return;
+    pendingOwnContent = content;
     noteStore.updateNote(note.id, { content });
   }
 
   function handleTitleChange() {
     if (readOnly) return;
+    pendingOwnTitle = title;
     noteStore.updateNote(note.id, { title });
   }
 
   function handleLabelsChange() {
     if (readOnly) return;
-    const labels = [...new Set(labelsText.split(',').map(label => label.trim()).filter(Boolean))];
+    const labels = normalizeLabels(labelsText);
+    pendingOwnLabels = labelsSignature(labels);
     noteStore.updateNote(note.id, { labels });
   }
 
