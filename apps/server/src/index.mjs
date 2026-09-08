@@ -25,6 +25,7 @@ import {
   isValidRecordId,
   normalizeRecordEnvelope,
 } from './recordValidation.mjs';
+import { checkStorageQuota } from './storageQuota.mjs';
 
 function positiveIntegerSetting(name, fallback, maximum) {
   const configured = Number(process.env[name] || fallback);
@@ -154,6 +155,11 @@ const MAX_SHARE_FALLBACK_BODY = 512 * 1024;
 const MAX_COMPOUND_ATTACHMENTS = 1_000;
 const MAX_ATTACHMENT_STAGE_BUNDLE_LIFETIME_MS = 24 * 60 * 60_000;
 const PROTOCOL_VERSION = 3;
+const STORAGE_QUOTA_LIMITS = Object.freeze({
+  maxRecords: MAX_RECORDS,
+  maxAttachments: MAX_ATTACHMENTS,
+  maxEncryptedBytes: MAX_ENCRYPTED_RECORD_BYTES,
+});
 const pairingRateLimiter = createPairingRateLimiter({
   windowMs: PAIRING_RATE_WINDOW_MS,
   sourceLimit: PAIRING_SOURCE_RATE_LIMIT,
@@ -796,38 +802,14 @@ async function api(req, res, url) {
         db.exec('ROLLBACK');
         return json(res, 507, { error: 'attachment_count_limit' });
       }
-      const liveUsage = db.prepare(`
-        SELECT record_count AS recordCount,
-          attachment_count AS attachmentCount,
-          encrypted_bytes AS encryptedBytes
-        FROM record_storage_usage WHERE singleton=1
-      `).get();
-      const stagedUsage = db.prepare(`
-        SELECT stage_count AS stageCount,encrypted_bytes AS encryptedBytes
-        FROM attachment_stage_usage WHERE singleton=1
-      `).get();
-      if (
-        Number(liveUsage.recordCount) + Number(stagedUsage.stageCount) + 1
-          > MAX_RECORDS
-      ) {
+      const quota = checkStorageQuota(db, STORAGE_QUOTA_LIMITS, {
+        recordCount: 1,
+        attachmentCount: 1,
+        encryptedBytes: envelopeBytes,
+      });
+      if (quota.error) {
         db.exec('ROLLBACK');
-        return json(res, 507, { error: 'record_count_limit' });
-      }
-      if (
-        Number(liveUsage.attachmentCount) + Number(stagedUsage.stageCount) + 1
-          > MAX_ATTACHMENTS
-      ) {
-        db.exec('ROLLBACK');
-        return json(res, 507, { error: 'attachment_count_limit' });
-      }
-      if (
-        Number(liveUsage.encryptedBytes)
-          + Number(stagedUsage.encryptedBytes)
-          + envelopeBytes
-          > MAX_ENCRYPTED_RECORD_BYTES
-      ) {
-        db.exec('ROLLBACK');
-        return json(res, 507, { error: 'encrypted_record_bytes_limit' });
+        return json(res, 507, { error: quota.error });
       }
       const now = Date.now();
       const bundleCreatedAt = bundle.createdAt === null
@@ -994,28 +976,15 @@ async function api(req, res, url) {
         db.exec('COMMIT');
         return json(res, 409, { error: 'attachment_id_unavailable' });
       }
-      const liveUsage = db.prepare(`
-        SELECT record_count AS recordCount,encrypted_bytes AS encryptedBytes
-        FROM record_storage_usage WHERE singleton=1
-      `).get();
-      const stagedUsage = db.prepare(`
-        SELECT stage_count AS stageCount,encrypted_bytes AS encryptedBytes
-        FROM attachment_stage_usage WHERE singleton=1
-      `).get();
-      if (
-        Number(liveUsage.recordCount) + Number(stagedUsage.stageCount)
-          + (current ? 0 : 1) > MAX_RECORDS
-      ) {
+      const quota = checkStorageQuota(db, STORAGE_QUOTA_LIMITS, {
+        recordCount: current ? 0 : 1,
+        // Stages are replaced one-for-one by the attachment records below.
+        attachmentCount: 0,
+        encryptedBytes: envelopeBytes - Number(current?.envelopeBytes ?? 0),
+      });
+      if (quota.error) {
         db.exec('ROLLBACK');
-        return json(res, 507, { error: 'record_count_limit' });
-      }
-      if (
-        Number(liveUsage.encryptedBytes) + Number(stagedUsage.encryptedBytes)
-          - Number(current?.envelopeBytes ?? 0) + envelopeBytes
-          > MAX_ENCRYPTED_RECORD_BYTES
-      ) {
-        db.exec('ROLLBACK');
-        return json(res, 507, { error: 'encrypted_record_bytes_limit' });
+        return json(res, 507, { error: quota.error });
       }
       pruneMutationReceipts(1);
       let revision = nextRevision();
@@ -1263,6 +1232,10 @@ async function api(req, res, url) {
     let revision;
     db.exec('BEGIN IMMEDIATE');
     try {
+      // Stage expiry must be accounted for before ordinary writes project
+      // their quota delta. Cleanup is serialized with the write so an expired
+      // stage cannot block a reducing or otherwise valid mutation.
+      deleteExpiredAttachmentStages.run(Date.now());
       // An authorization decision made before awaiting the request body can
       // become stale. Serialize with revocation and re-read under this lock.
       const freshCredential = credentialByHash(credential.tokenHash);
@@ -1333,14 +1306,6 @@ async function api(req, res, url) {
         db.exec('ROLLBACK');
         return json(res, 409, { error: 'note_deleted' });
       }
-      const usage = db.prepare(`
-        SELECT
-          record_count AS recordCount,
-          attachment_count AS attachmentCount,
-          encrypted_bytes AS encryptedBytes
-        FROM record_storage_usage
-        WHERE singleton=1
-      `).get();
       const cascade = kind === 'note' && value.deleted
         ? db.prepare(`
           SELECT
@@ -1351,37 +1316,17 @@ async function api(req, res, url) {
           WHERE kind='attachment' AND note_id=? AND deleted=0
         `).get(id)
         : { count: 0, encryptedBytes: 0 };
-      const recordCount = Number(usage.recordCount);
-      const attachmentCount = Number(usage.attachmentCount);
-      const encryptedBytes = Number(usage.encryptedBytes);
-      const projectedRecordCount = recordCount + (current ? 0 : 1);
-      const projectedAttachmentCount = attachmentCount
-        + (kind === 'attachment' && !current ? 1 : 0);
-      const projectedEncryptedBytes = encryptedBytes
-        - Number(current?.envelopeBytes ?? 0)
-        + envelopeBytes
-        - Number(cascade.encryptedBytes)
-        + Number(cascade.count) * Buffer.byteLength('null');
-      if (
-        projectedRecordCount > MAX_RECORDS
-        && projectedRecordCount > recordCount
-      ) {
+      const quota = checkStorageQuota(db, STORAGE_QUOTA_LIMITS, {
+        recordCount: current ? 0 : 1,
+        attachmentCount: kind === 'attachment' && !current ? 1 : 0,
+        encryptedBytes: envelopeBytes
+          - Number(current?.envelopeBytes ?? 0)
+          - Number(cascade.encryptedBytes)
+          + Number(cascade.count) * Buffer.byteLength('null'),
+      });
+      if (quota.error) {
         db.exec('ROLLBACK');
-        return json(res, 507, { error: 'record_count_limit' });
-      }
-      if (
-        projectedAttachmentCount > MAX_ATTACHMENTS
-        && projectedAttachmentCount > attachmentCount
-      ) {
-        db.exec('ROLLBACK');
-        return json(res, 507, { error: 'attachment_count_limit' });
-      }
-      if (
-        projectedEncryptedBytes > MAX_ENCRYPTED_RECORD_BYTES
-        && projectedEncryptedBytes > encryptedBytes
-      ) {
-        db.exec('ROLLBACK');
-        return json(res, 507, { error: 'encrypted_record_bytes_limit' });
+        return json(res, 507, { error: quota.error });
       }
       pruneMutationReceipts(1);
       revision = nextRevision();

@@ -487,6 +487,19 @@ const SERVER_MIGRATIONS = Object.freeze([
       `);
     },
   }),
+  Object.freeze({
+    version: 12,
+    name: 'relay-storage-query-indexes',
+    up(db) {
+      db.exec(`
+        CREATE INDEX records_revision
+          ON records(revision);
+        CREATE INDEX records_attachment_owner_state
+          ON records(note_id,deleted,id)
+          WHERE kind='attachment';
+      `);
+    },
+  }),
 ]);
 
 export const CURRENT_SERVER_SCHEMA_VERSION = SERVER_MIGRATIONS.at(-1)?.version ?? 0;

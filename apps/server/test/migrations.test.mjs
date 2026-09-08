@@ -30,7 +30,7 @@ test('migrates a fresh database to the current schema with explicit metadata', t
 
   migrateDatabase(db);
 
-  assert.equal(CURRENT_SERVER_SCHEMA_VERSION, 11);
+  assert.equal(CURRENT_SERVER_SCHEMA_VERSION, 12);
   assert.deepEqual(
     db.prepare('SELECT version,name FROM schema_migrations ORDER BY version').all().map(row => ({ ...row })),
     [
@@ -45,6 +45,7 @@ test('migrates a fresh database to the current schema with explicit metadata', t
       { version: 9, name: 'protocol-record-identity-guards' },
       { version: 10, name: 'credential-hash-namespace-guards' },
       { version: 11, name: 'atomic-note-attachment-bundles' },
+      { version: 12, name: 'relay-storage-query-indexes' },
     ],
   );
   assert.deepEqual(
@@ -82,6 +83,19 @@ test('migrates a fresh database to the current schema with explicit metadata', t
       'response',
       'owner_token_hash',
       'mutation_kind',
+    ],
+  );
+  assert.deepEqual(
+    db.prepare(`
+      SELECT name
+      FROM sqlite_master
+      WHERE type='index' AND tbl_name='records'
+        AND name IN ('records_revision','records_attachment_owner_state')
+      ORDER BY name
+    `).all().map(row => ({ ...row })),
+    [
+      { name: 'records_attachment_owner_state' },
+      { name: 'records_revision' },
     ],
   );
   assert.deepEqual(
@@ -208,7 +222,38 @@ test('adopts an unversioned legacy database without losing relay data', t => {
     { id: 'mutation-one', payload_hash: 'payload-hash', revision: 7 },
   );
   assert.ok(migratedMutation.created_at > 0);
-  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get().count, 11);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get().count, 12);
+});
+
+test('storage query indexes keep revision and attachment-owner plans bounded', t => {
+  const db = new DatabaseSync(':memory:');
+  t.after(() => db.close());
+  migrateDatabase(db);
+
+  const plans = [
+    db.prepare(`
+      EXPLAIN QUERY PLAN
+      SELECT kind,id,note_id AS noteId,
+        CASE WHEN kind='note' THEN envelope END AS envelope,
+        deleted,revision
+      FROM records WHERE revision>? ORDER BY revision LIMIT 1000
+    `).all(0),
+    db.prepare(`
+      EXPLAIN QUERY PLAN
+      SELECT COALESCE(MAX(revision),0)+1 AS value FROM records
+    `).all(),
+    db.prepare(`
+      EXPLAIN QUERY PLAN
+      SELECT COUNT(*)
+      FROM records
+      WHERE kind='attachment' AND note_id=? AND deleted=0
+    `).all('note-one'),
+  ].flat().map(row => String(row.detail));
+
+  assert.equal(plans.some(detail => /SCAN records\b/.test(detail)), false);
+  assert.equal(plans.some(detail => /TEMP B-TREE/.test(detail)), false);
+  assert.equal(plans.some(detail => detail.includes('records_revision')), true);
+  assert.equal(plans.some(detail => detail.includes('records_attachment_owner_state')), true);
 });
 
 test('refuses cross-registry credential aliases on every startup without changing access', t => {
@@ -324,7 +369,9 @@ test('refuses a legacy record ID with a hidden NUL suffix without changing or ex
     ALTER TABLE mutations DROP COLUMN response;
     ALTER TABLE mutations DROP COLUMN owner_token_hash;
     ALTER TABLE mutations DROP COLUMN mutation_kind;
-    DELETE FROM schema_migrations WHERE version IN (9,10,11);
+    DROP INDEX records_revision;
+    DROP INDEX records_attachment_owner_state;
+    DELETE FROM schema_migrations WHERE version IN (9,10,11,12);
   `);
   const invalidId = 'valid-prefix\0hidden-suffix';
   db.prepare(`
@@ -424,7 +471,9 @@ test('upgrades schema v6 lineage, storage accounting, and record guards, then re
     ALTER TABLE mutations DROP COLUMN response;
     ALTER TABLE mutations DROP COLUMN owner_token_hash;
     ALTER TABLE mutations DROP COLUMN mutation_kind;
-    DELETE FROM schema_migrations WHERE version IN (7,8,9,10,11);
+    DROP INDEX records_revision;
+    DROP INDEX records_attachment_owner_state;
+    DELETE FROM schema_migrations WHERE version IN (7,8,9,10,11,12);
   `);
   db.prepare('INSERT INTO devices(id,name,token_hash) VALUES(?,?,?)').run(
     'v6-device',
@@ -449,7 +498,7 @@ test('upgrades schema v6 lineage, storage accounting, and record guards, then re
   db.close();
 
   db = new DatabaseSync(path);
-  assert.equal(migrateDatabase(db), 11);
+  assert.equal(migrateDatabase(db), 12);
   assert.deepEqual(
     { ...db.prepare(`
       SELECT id,name,approved_by_device_id
@@ -657,6 +706,7 @@ test('reopening a current database is idempotent', t => {
       { version: 9, name: 'protocol-record-identity-guards' },
       { version: 10, name: 'credential-hash-namespace-guards' },
       { version: 11, name: 'atomic-note-attachment-bundles' },
+      { version: 12, name: 'relay-storage-query-indexes' },
     ],
   );
 });
@@ -733,7 +783,8 @@ test('refuses to open a database created by a newer server schema', t => {
   const db = new DatabaseSync(':memory:');
   t.after(() => db.close());
   migrateDatabase(db);
-  db.prepare('INSERT INTO schema_migrations(version,name) VALUES(?,?)').run(12, 'future-schema');
+  db.prepare('INSERT INTO schema_migrations(version,name) VALUES(?,?)')
+    .run(CURRENT_SERVER_SCHEMA_VERSION + 1, 'future-schema');
   db.prepare('INSERT INTO instance(id,initialized) VALUES(?,?)').run('untouched-instance', 1);
 
   assert.throws(() => migrateDatabase(db), UnsupportedServerSchemaError);
