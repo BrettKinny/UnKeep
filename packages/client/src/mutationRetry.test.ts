@@ -40,6 +40,35 @@ function json(value: unknown, status = 200): Response {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('durable mutation retries', () => {
+  it('replays the exact persisted mutation after the response deadline expires', async () => {
+    vi.useFakeTimers();
+    const storage = new MemoryClientStorage();
+    let reachedFetch!: () => void;
+    const started = new Promise<void>(resolve => { reachedFetch = resolve; });
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(async (_url, init: RequestInit) => {
+        reachedFetch();
+        return new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+        });
+      })
+      .mockResolvedValueOnce(success(7));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const outcome = new EncryptedSync(session, masterKey, storage)
+        .push(note('saved before response timeout')).catch(error => error);
+      await started;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect((await outcome).name).toBe('TimeoutError');
+      await expect(new EncryptedSync(session, masterKey, storage)
+        .push(note('saved before response timeout'))).resolves.toBe(7);
+      expect(fetchMock.mock.calls[1]![1].body).toBe(fetchMock.mock.calls[0]![1].body);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reuses the exact mutation and encrypted payload after an unknown response outcome', async () => {
     const storage = new MemoryClientStorage();
     const fetchMock = vi.fn()

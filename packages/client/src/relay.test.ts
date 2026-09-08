@@ -46,6 +46,115 @@ describe('cleanRelayEndpoint', () => {
 });
 
 describe('RelayClient errors', () => {
+  it('keeps the deadline active while reading a stalled response body', async () => {
+    vi.useFakeTimers();
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => ({
+      status: 200,
+      ok: true,
+      json: () => new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      }),
+    }) as Response);
+    try {
+      const result = new RelayClient('http://localhost:3000').status().catch(error => error);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect((await result).name).toBe('TimeoutError');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      fetch.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('forwards caller cancellation and clears the deadline', async () => {
+    vi.useFakeTimers();
+    const caller = new AbortController();
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      }));
+    try {
+      const result = new RelayClient('http://localhost:3000').status(caller.signal).catch(error => error);
+      const reason = new Error('Caller stopped the request');
+      caller.abort(reason);
+      expect(await result).toBe(reason);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      fetch.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('passes a pre-aborted caller reason to fetch without retaining a deadline', async () => {
+    vi.useFakeTimers();
+    const caller = new AbortController();
+    const reason = new Error('Already cancelled');
+    caller.abort(reason);
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      expect(init?.signal?.aborted).toBe(true);
+      expect(init?.signal?.reason).toBe(reason);
+      throw init?.signal?.reason;
+    });
+    try {
+      await expect(new RelayClient('http://localhost:3000').status(caller.signal))
+        .rejects.toBe(reason);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      fetch.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels a stalled response body and clears the deadline', async () => {
+    vi.useFakeTimers();
+    const caller = new AbortController();
+    let bodyStarted!: () => void;
+    const started = new Promise<void>(resolve => { bodyStarted = resolve; });
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => ({
+      status: 200,
+      ok: true,
+      json: () => new Promise((_resolve, reject) => {
+        bodyStarted();
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      }),
+    }) as Response);
+    try {
+      const result = new RelayClient('http://localhost:3000').status(caller.signal).catch(error => error);
+      await started;
+      const reason = new Error('Stop body read');
+      caller.abort(reason);
+      expect(await result).toBe(reason);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      fetch.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds a stalled request without losing caller cancellation', async () => {
+    vi.useFakeTimers();
+    const caller = new AbortController();
+    let transportSignal: AbortSignal | null | undefined;
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      transportSignal = init?.signal;
+      return new Promise<Response>((_resolve, reject) => {
+        transportSignal?.addEventListener('abort', () => reject(transportSignal?.reason), { once: true });
+      });
+    });
+    const result = new RelayClient('http://localhost:3000').status(caller.signal).catch(error => error);
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(transportSignal?.aborted).toBe(true);
+      expect(caller.signal.aborted).toBe(false);
+      expect((await result).name).toBe('TimeoutError');
+    } finally {
+      caller.abort();
+      await result;
+      fetch.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('stages an exact attachment payload under a stable bundle mutation and validates the stage receipt', async () => {
     const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
       stageHash: 'a'.repeat(64),

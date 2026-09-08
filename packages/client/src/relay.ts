@@ -111,19 +111,35 @@ export class RelayClient {
   }
 
   private async request<T>(path: string, init: RequestInit = {}, authorization?: string): Promise<T> {
-    const response = await globalThis.fetch(`${this.endpoint}/api/v1${path}`, {
-      ...init,
-      headers: { 'content-type': 'application/json', ...(this.credential ? { authorization: `Device ${this.credential}` } : {}), ...(authorization ? { authorization } : {}), ...init.headers }
-    });
-    const value = response.status === 204 ? {} : await response.json() as { error?: string; currentRevision?: number };
-    if (!response.ok) {
-      const code = value.error || `Sync server returned ${response.status}`;
-      if (response.status === 409 && code === 'record_conflict' && Number.isSafeInteger(value.currentRevision) && value.currentRevision! >= 0) {
-        throw new RecordConflictError(value.currentRevision!);
+    const controller = new AbortController();
+    const cancel = () => controller.abort(init.signal?.reason);
+    if (init.signal?.aborted) cancel();
+    else init.signal?.addEventListener('abort', cancel, { once: true });
+    // Keep the deadline active through response-body consumption as well as
+    // connection establishment. A timeout is an unknown mutation outcome;
+    // callers retain their durable replay intent just like any network error.
+    const timeout = setTimeout(() => {
+      controller.abort(new DOMException('Sync request timed out', 'TimeoutError'));
+    }, 30_000);
+    try {
+      const response = await globalThis.fetch(`${this.endpoint}/api/v1${path}`, {
+        ...init,
+        signal: controller.signal,
+        headers: { 'content-type': 'application/json', ...(this.credential ? { authorization: `Device ${this.credential}` } : {}), ...(authorization ? { authorization } : {}), ...init.headers }
+      });
+      const value = response.status === 204 ? {} : await response.json() as { error?: string; currentRevision?: number };
+      if (!response.ok) {
+        const code = value.error || `Sync server returned ${response.status}`;
+        if (response.status === 409 && code === 'record_conflict' && Number.isSafeInteger(value.currentRevision) && value.currentRevision! >= 0) {
+          throw new RecordConflictError(value.currentRevision!);
+        }
+        throw new RelayHttpError(response.status, code);
       }
-      throw new RelayHttpError(response.status, code);
+      return value as T;
+    } finally {
+      clearTimeout(timeout);
+      init.signal?.removeEventListener('abort', cancel);
     }
-    return value as T;
   }
 
   status(signal?:AbortSignal) { return this.request<RelayStatus>('/status',{signal}); }
