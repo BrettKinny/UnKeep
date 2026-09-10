@@ -197,14 +197,13 @@ contributor commands.
 
 ## Packages
 
-<<<<<<< HEAD
 The package-root APIs and documented CLI commands are the intended public
 `0.x` surface. Deep imports, application/server modules, raw relay request
 shapes, and legacy adapter exports are internal or experimental. Release
 candidates are distributed through the GitHub source and release assets; the
 container image is published to GHCR. Build the packages from a source
 checkout, or use the bundled CLI in the release image.
-=======
+
 ## Implemented product
 
 - **Notes and checklists** — titles, bodies, checklist conversion and editing, labels, pinning, recoverable Trash, 11 colors, a masonry card grid, and safe clickable HTTP(S), `www.`, and email links in rendered note text.
@@ -466,7 +465,6 @@ See [docs/self-hosting.md](docs/self-hosting.md) before exposing a deployment.
 - Web Crypto, IndexedDB, Compression Streams, and Service Workers
 - Node.js 22.13+ built-in HTTP, crypto, and unflagged SQLite for the relay
 - pnpm workspaces
->>>>>>> 0200690 (Integrate sharing and editor deletion with recoverable Trash)
 
 ## License
 

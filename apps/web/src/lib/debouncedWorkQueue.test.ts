@@ -124,4 +124,53 @@ describe('DebouncedWorkQueue', () => {
 
     expect(retried).toEqual([]);
   });
+
+  it('waits for an in-flight stale save before an immediate superseding write', async () => {
+    vi.useFakeTimers();
+    const started = deferred();
+    const release = deferred();
+    const writes: string[] = [];
+    const queue = new DebouncedWorkQueue<string>(500);
+
+    queue.schedule('note-one', 'stale snapshot', async value => {
+      started.resolve();
+      await release.promise;
+      writes.push(value);
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    await started.promise;
+
+    const immediate = queue.supersede('note-one').then(() => {
+      writes.push('immediate snapshot');
+    });
+    expect(writes).toEqual([]);
+    release.resolve();
+    await immediate;
+
+    expect(writes).toEqual(['stale snapshot', 'immediate snapshot']);
+  });
+
+  it('tracks a save already claimed by drain for supersession ordering', async () => {
+    vi.useFakeTimers();
+    const started = deferred();
+    const release = deferred();
+    const writes: string[] = [];
+    const queue = new DebouncedWorkQueue<string>(500);
+    queue.schedule('note-one', 'draining snapshot', async () => undefined);
+
+    const draining = queue.drain(async value => {
+      started.resolve();
+      await release.promise;
+      writes.push(value);
+    });
+    await started.promise;
+
+    const immediate = queue.supersede('note-one').then(() => writes.push('immediate snapshot'));
+    expect(writes).toEqual([]);
+    release.resolve();
+    await draining;
+    await immediate;
+
+    expect(writes).toEqual(['draining snapshot', 'immediate snapshot']);
+  });
 });

@@ -23,6 +23,7 @@ export {
   LEGACY_LOCAL_DATABASE_NAME,
   LOCAL_DATABASE_VERSION,
   NOTE_CREATION_CLAIM_TTL_MS,
+  LocalNoteConflictError,
   LocalOnlyAdapter,
   localDatabaseName,
   validateVaultNamespace,

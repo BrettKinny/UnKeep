@@ -648,7 +648,9 @@ describe('pairing cancellation', () => {
     consume.resolve(jsonResponse({ consumed: true }));
 
     const result = await waiting;
-    expect(consumeRequest.signal).toBeUndefined();
+    // The transport owns a deadline, but user cancellation must not abort
+    // finalization after durable local installation.
+    expect(consumeRequest.signal?.aborted).toBe(false);
     await expect(keyStore.unlockDevice(session.instanceId)).resolves.toEqual(approved.masterKey);
     await expect(sessionStore.load()).resolves.toEqual(result.session);
     expect(result.session.credential).toBe(approved.pairing.deviceCredential);
@@ -1168,7 +1170,8 @@ describe('pairing cancellation', () => {
     }), { status: 200, headers: { 'content-type': 'application/json' } }));
 
     await expect(waiting).rejects.toMatchObject({ name: 'AbortError' });
-    expect(request.signal).toBe(controller.signal);
+    expect(request.signal?.aborted).toBe(true);
+    expect(request.signal?.reason).toBe(controller.signal.reason);
   });
 
   it('does not persist vault access when an in-flight approval poll resolves after cancellation', async () => {

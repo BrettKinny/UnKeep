@@ -243,6 +243,69 @@ test.describe.serial('UnKeep browser vault', () => {
     await editor.getByRole('button', { name: 'Close' }).click();
   });
 
+  test('refreshes the open editor after converting changed checklist items to text', async () => {
+    await page.getByRole('button', { name: 'Create a new note' }).click();
+    await page.getByLabel('Note title').fill('Checklist editor snapshot');
+    await page.getByLabel('Note content').fill('Original checklist item');
+    await page.getByRole('button', { name: 'Close' }).click();
+    await page.getByRole('button', { name: 'Edit note: Checklist editor snapshot', exact: true }).click();
+    const editor = page.getByRole('dialog', { name: 'Edit note' });
+    await editor.getByRole('button', { name: 'Edit note', exact: true }).click();
+    await editor.getByRole('button', { name: 'Convert to checklist' }).click();
+    await editor.getByLabel('Checklist item', { exact: true }).fill('Changed checklist text');
+    await editor.getByRole('button', { name: 'Convert to text' }).click();
+    await expect(editor.getByLabel('Note content')).toHaveValue('☐ Changed checklist text');
+    await editor.getByRole('button', { name: 'Close' }).click();
+  });
+
+  test('preserves saved text when a second tab pins an older snapshot', async () => {
+    const title = 'Shared tab edit protection';
+    const valuableText = 'This text was saved by the first tab and must not be overwritten.';
+    await page.getByRole('button', { name: 'Create a new note' }).click();
+    await page.getByLabel('Note title').fill(title);
+    await page.getByLabel('Note content').fill('Original text before the second tab opened.');
+    await page.getByRole('button', { name: 'Close' }).click();
+    const second = await context.newPage();
+    try {
+      await second.goto('/');
+      const secondCard = second.getByRole('button', { name: `Edit note: ${title}`, exact: true }).locator('..');
+      await expect(secondCard).toBeVisible();
+
+      await page.getByRole('button', { name: `Edit note: ${title}`, exact: true }).click();
+      const editor = page.getByRole('dialog', { name: 'Edit note' });
+      await editor.getByRole('button', { name: 'Edit note', exact: true }).click();
+      const saved = page.waitForResponse(response => response.request().method() === 'PUT'
+        && /\/api\/v1\/notes\//.test(response.url()) && response.ok());
+      await editor.getByLabel('Note content').fill(valuableText);
+      await editor.getByRole('button', { name: 'Close' }).click();
+      await saved;
+
+      // Exercise the public lifecycle wake-up, including acknowledgement of
+      // the shared cursor, before the second tab submits its stale action.
+      const firstPull = page.waitForResponse(response => response.url().includes('/api/v1/changes?'));
+      await page.evaluate(() => window.dispatchEvent(new Event('online')));
+      await firstPull;
+      await expect(page.locator('[role="status"][title="Synced"]')).toBeVisible();
+      const secondPull = second.waitForResponse(response => response.url().includes('/api/v1/changes?'));
+      await second.evaluate(() => window.dispatchEvent(new Event('online')));
+      await secondPull;
+      await expect(second.locator('[role="status"][title="Synced"]')).toBeVisible();
+
+      await secondCard.hover();
+      await secondCard.getByRole('button', { name: 'Pin', exact: true }).click();
+      const finalPull = second.waitForResponse(response => response.url().includes('/api/v1/changes?'));
+      await second.evaluate(() => window.dispatchEvent(new Event('online')));
+      await finalPull;
+      await expect(second.locator('[role="status"][title="Synced"]')).toBeVisible();
+
+      await page.reload();
+      // A conflict copy is acceptable; silently discarding saved text is not.
+      await expect(page.getByText(valuableText, { exact: true })).toBeVisible();
+    } finally {
+      await second.close();
+    }
+  });
+
   test('moves a note through the recoverable Trash view and restores it', async () => {
     const editButton = page.getByRole('button', { name: `Edit note: ${EDITED_TITLE}` });
     const card = editButton.locator('..');

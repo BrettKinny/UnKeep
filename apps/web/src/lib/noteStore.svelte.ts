@@ -16,6 +16,7 @@ import {
   type CompoundCommitHandle,
   type RelaySession,
 } from '@unkeep/client';
+import { LocalNoteConflictError } from '@unkeep/core/experimental';
 import { toastStore } from './toast.svelte';
 import { clientStorage } from './clientStorage';
 import { attachmentSizeError } from './attachments';
@@ -48,8 +49,9 @@ import { DebouncedWorkQueue } from './debouncedWorkQueue';
 
 // Debounce timer for auto-save
 const SAVE_DEBOUNCE_MS = 500;
+const SYNC_PULL_PAGE_SIZE = 1000;
+const SYNC_MAX_PULL_PAGES_PER_PASS = 8;
 const DELETE_UNDO_MS = 3000;
-const saveQueue = new DebouncedWorkQueue<Note>(SAVE_DEBOUNCE_MS);
 const PENDING_SYNC_KEY = 'unkeep-pending-note-ids';
 let pendingSyncKey = PENDING_SYNC_KEY;
 let importJournalKey = 'unkeep-pending-import';
@@ -93,6 +95,33 @@ function isRecordConflict(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false;
   const candidate = error as { status?: unknown; code?: unknown };
   return candidate.status === 409 && candidate.code === 'record_conflict';
+}
+
+function isLocalNoteConflict(error: unknown): error is LocalNoteConflictError {
+  return error instanceof LocalNoteConflictError
+    || (
+      !!error
+      && typeof error === 'object'
+      && (error as { name?: unknown }).name === 'LocalNoteConflictError'
+    );
+}
+
+const OPTIONAL_NOTE_FIELDS: Array<keyof Note> = [
+  'title',
+  'color',
+  'checkboxes',
+  'labels',
+  'images',
+  'trashedAt',
+  'deleted',
+];
+
+/** Apply a full remote snapshot without changing the UI object's identity. */
+function applyRemoteNote(existing: Note, remote: Note): void {
+  for (const field of OPTIONAL_NOTE_FIELDS) {
+    if (remote[field] === undefined) delete existing[field];
+  }
+  Object.assign(existing, remote);
 }
 
 function isPreservableRemoteConflict(error: unknown): boolean {
@@ -262,7 +291,12 @@ export class NoteStore {
   private encryptedSync: EncryptedSync | null = null;
   private unsubscribeRealtime: (() => void) | null = null;
   private readonly syncCoordinator = new VaultTaskCoordinator();
-  private readonly preservedConflicts = new Set<string>();
+  private readonly saveQueue = new DebouncedWorkQueue<Note>(SAVE_DEBOUNCE_MS);
+  /** Last stale snapshot preserved per note; distinct later edits must not be suppressed. */
+  private readonly preservedConflicts = new Map<string, string>();
+  private readonly durableNoteSnapshots = new Map<string, Note>();
+  /** Snapshot last presented in this tab; debounced edits are checked against it. */
+  private readonly visibleNoteSnapshots = new Map<string, Note>();
   private readonly localEditGenerations = new Map<string, number>();
   private readonly remoteNoteMutationTails = new Map<string, Promise<void>>();
   private importInProgress = false;
@@ -270,9 +304,11 @@ export class NoteStore {
   private readonly wakeSync = () => void this.sync();
   private readonly syncWhenVisible = () => {
     if (document.visibilityState === 'visible') void this.sync();
-    else void this.flushPendingSaves();
+    else void this.flushPendingSaves().catch(() => undefined);
   };
-  private readonly flushOnPageHide = () => void this.flushPendingSaves();
+  private readonly flushOnPageHide = () => {
+    void this.flushPendingSaves().catch(() => undefined);
+  };
 
   constructor(
     private readonly readVaultResources: () => VaultLocalResources = currentVaultResources,
@@ -312,11 +348,14 @@ export class NoteStore {
   unpinnedNotes = $derived(this.activeNotes.filter(n => !n.pinned));
 
   async init(vaultNamespace: string, migrateLegacy = false) {
+    if (this.adapter) await this.flushPendingSaves({ deferRemote: true });
     this.loading = true;
     this.syncCoordinator.reset();
     const context = this.syncCoordinator.capture();
     this.syncQuarantineCount = 0;
     this.adapter = null;
+    this.durableNoteSnapshots.clear();
+    this.visibleNoteSnapshots.clear();
     this.preservedConflicts.clear();
     this.registerLocalLifecycle();
     const resources = configureVaultNamespace(vaultNamespace, migrateLegacy);
@@ -343,6 +382,13 @@ export class NoteStore {
       }
       this.adapter = adapter;
       this.notes = notes;
+      this.durableNoteSnapshots.clear();
+      this.visibleNoteSnapshots.clear();
+      for (const note of notes) {
+        const snapshot = this.portableNote(note);
+        this.durableNoteSnapshots.set(note.id, snapshot);
+        this.visibleNoteSnapshots.set(note.id, snapshot);
+      }
     } catch (e) {
       if (!context.isCurrent()) return;
       console.error('Failed to initialize store:', e);
@@ -390,7 +436,7 @@ export class NoteStore {
     // Commit debounced edits locally and durably queue them while the old vault
     // resources are still available. Disconnecting must never turn an edit
     // into an untracked local-only write.
-    await this.flushPendingSaves({ deferRemote: true, requireDurable: true });
+    await this.flushPendingSaves({ deferRemote: true });
     this.syncCoordinator.reset();
     this.preservedConflicts.clear();
     this.unsubscribeRealtime?.();
@@ -399,11 +445,14 @@ export class NoteStore {
     this.encryptedSync = null;
     this.syncQuarantineCount = 0;
     this.adapter = null;
+    this.durableNoteSnapshots.clear();
+    this.visibleNoteSnapshots.clear();
     attachmentUrls.releaseAll();
     this.notes = [];
   }
 
   async initWithAdapter(adapter: StorageAdapter, config: Record<string, unknown>) {
+    if (this.adapter) await this.flushPendingSaves({ deferRemote: true });
     this.loading = true;
     this.syncCoordinator.reset();
     const context = this.syncCoordinator.capture();
@@ -420,6 +469,13 @@ export class NoteStore {
       if (!context.isCurrent()) return;
       this.adapter = adapter;
       this.notes = notes;
+      this.durableNoteSnapshots.clear();
+      this.visibleNoteSnapshots.clear();
+      for (const note of notes) {
+        const snapshot = this.portableNote(note);
+        this.durableNoteSnapshots.set(note.id, snapshot);
+        this.visibleNoteSnapshots.set(note.id, snapshot);
+      }
     } catch (e) {
       if (!context.isCurrent()) return;
       console.error('Failed to initialize store:', e);
@@ -465,7 +521,7 @@ export class NoteStore {
       archived: false,
     };
     this.notes.push(note);
-    void this.persistNote(note);
+    void this.persistNote(note, { expectAbsent: true });
     return note;
   }
 
@@ -607,7 +663,7 @@ export class NoteStore {
         }
         throw error;
       }
-      if (!await this.persistNote(note, {}, target)) {
+      if (!await this.persistNote(note, { expectAbsent: true }, target)) {
         for (const value of storedAttachments) {
           await target.attachments.discardStage(value.handle);
         }
@@ -623,7 +679,7 @@ export class NoteStore {
       return storedNote;
     }
     const existing = this.notes.find(value => value.id === hydrated.id);
-    if (existing) Object.assign(existing, hydrated);
+    if (existing) applyRemoteNote(existing, hydrated);
     else this.notes.push(hydrated);
     return hydrated;
   }
@@ -665,11 +721,21 @@ export class NoteStore {
   private debouncedSave(note: Note) {
     this.markLocalEdit(note.id);
     const snapshot = this.portableNote(note);
-    saveQueue.schedule(
+    // Bind this queued generation to the durable value observed when the
+    // edit was made. Looking up the expected value when the timer fires is
+    // too late: an immediate attachment/pin mutation may have committed a
+    // newer snapshot in the meantime.
+    const expectedSnapshot = this.visibleNoteSnapshots.get(note.id) ?? null;
+    const target = this.captureMutationTarget();
+    this.saveQueue.schedule(
       note.id,
       snapshot,
-      async value => {
-        if (!await this.persistNote(value)) {
+      async (value, { deferRemote = false } = {}) => {
+        if (!await this.persistNote(value, {
+          deferRemote,
+          queued: true,
+          expectedSnapshot,
+        }, target)) {
           throw new Error('Debounced note edit could not be saved locally');
         }
       },
@@ -679,23 +745,32 @@ export class NoteStore {
   private async flushPendingSaves(
     {
       deferRemote = false,
-      requireDurable = false,
-    }: { deferRemote?: boolean; requireDurable?: boolean } = {},
+    }: { deferRemote?: boolean } = {},
   ): Promise<void> {
-    await saveQueue.drain(async note => {
-      const saved = await this.persistNote(note, { deferRemote });
-      if (!saved && requireDurable) throw new Error('Pending note edits could not be saved locally');
-    });
+    await this.saveQueue.drain({ deferRemote });
   }
 
   private async persistNote(
     note: Note,
-    {
-      deferRemote = false,
-      beforeAttachments,
-    }: { deferRemote?: boolean; beforeAttachments?: Note } = {},
+    options: {
+      deferRemote?: boolean;
+      beforeAttachments?: Note;
+      queued?: boolean;
+      expectAbsent?: boolean;
+      expectedSnapshot?: Note | null;
+      deferVisibleSnapshot?: boolean;
+    } = {},
     target = this.captureMutationTarget(),
   ): Promise<boolean> {
+    const {
+      deferRemote = false,
+      beforeAttachments,
+      queued = false,
+      expectAbsent = false,
+      expectedSnapshot,
+      deferVisibleSnapshot = false,
+    } = options;
+    if (!queued) await this.saveQueue.supersede(note.id);
     this.markLocalEdit(note.id);
     // Every awaited write uses one immutable vault snapshot. A reset can make
     // this context stale, but it cannot redirect an old-vault note, attachment,
@@ -705,15 +780,55 @@ export class NoteStore {
     try {
       const portable = this.portableNote(note);
       const durable = durableNoteAdapter(adapter);
+      const hasExpectedSnapshot = Object.hasOwn(options, 'expectedSnapshot');
+      const expected = hasExpectedSnapshot
+        ? expectedSnapshot
+        : context.isCurrent() && this.adapter === adapter
+          ? this.durableNoteSnapshots.get(note.id)
+          : undefined;
       const pending = await durable.saveNoteWithPendingSync(portable, {
         ...(beforeAttachments
           ? { beforeAttachments: this.portableNote(beforeAttachments) }
           : {}),
+        ...(hasExpectedSnapshot
+          ? { expected }
+          : expected
+            ? { expected }
+            : expectAbsent
+              ? { expected: null }
+              : {}),
       });
+      if (context.isCurrent() && this.adapter === adapter) {
+        this.durableNoteSnapshots.set(note.id, portable);
+        if (!deferVisibleSnapshot) this.visibleNoteSnapshots.set(note.id, portable);
+      }
+      // Once the local snapshot is durable, a debounced save no longer needs
+      // to hold the per-note queue open on relay I/O. A newer immediate edit
+      // can therefore supersede this generation and commit locally at once;
+      // the durable outbox still serializes its remote retry afterward.
+      if (queued && !deferRemote) {
+        void this.pushPendingNote(pending, target).catch(error => {
+          console.warn('Remote sync queued:', error);
+        });
+        return true;
+      }
       const pushed = await this.pushPendingNote(pending, target, deferRemote);
       if (context.isCurrent() && !deferRemote && (!sync || pushed)) this.syncStatus = 'synced';
       return true;
     } catch (e) {
+      if (isLocalNoteConflict(e)) {
+        try {
+          await this.handleLocalNoteConflict(note, e, target);
+        } catch (conflictError) {
+          console.error('Failed to preserve local note conflict:', conflictError);
+          if (context.isCurrent()) {
+            this.syncStatus = 'error';
+            toastStore.show('Failed to preserve a concurrent edit');
+          }
+          return false;
+        }
+        return true;
+      }
       console.error('Failed to save note:', e);
       if (context.isCurrent()) {
         this.syncStatus = 'error';
@@ -728,6 +843,95 @@ export class NoteStore {
       noteId,
       (this.localEditGenerations.get(noteId) ?? 0) + 1,
     );
+  }
+
+  private async handleLocalNoteConflict(
+    desired: Note,
+    conflict: LocalNoteConflictError,
+    target: VaultMutationTarget,
+  ): Promise<void> {
+    const { context, adapter } = target;
+    if (!adapter || !conflict.current) {
+      throw new Error('The durable note disappeared during a concurrent edit');
+    }
+    // `desired` can be the same reactive object held in `this.notes`. Capture
+    // it before refreshing the winning durable snapshot, otherwise
+    // refreshLocalNoteFromSnapshot mutates the object and loses the edit we
+    // are supposed to preserve.
+    const staleSnapshot = this.portableNote(desired);
+    // Preserve the user's edit first. If quota or attachment staging fails,
+    // leave the current UI/durable value untouched so the mutation can be
+    // retried instead of silently replacing it with the winner.
+    const preserved = await this.preserveConflict(staleSnapshot, target);
+    if (!preserved || !context.isCurrent()) return;
+    await this.refreshLocalNoteFromSnapshot(conflict.current, target);
+  }
+
+  private async refreshLocalNoteFromSnapshot(
+    note: Note,
+    target: VaultMutationTarget,
+  ): Promise<Note | null> {
+    const { context, adapter, urls } = target;
+    const latest = this.portableNote(note);
+    if (context.isCurrent() && this.adapter === adapter) {
+      this.durableNoteSnapshots.set(latest.id, latest);
+    }
+    const hydrated = await urls.hydrate(latest);
+    if (!context.isCurrent()) {
+      for (const attachment of hydrated.images ?? []) urls.release(latest.id, attachment.id);
+      return null;
+    }
+    const existing = this.notes.find(value => value.id === latest.id);
+    if (existing) {
+      for (const attachment of existing.images ?? []) {
+        if (!hydrated.images?.some(value => value.id === attachment.id)) {
+          urls.release(latest.id, attachment.id);
+        }
+      }
+      applyRemoteNote(existing, hydrated);
+    } else {
+      this.notes.push(hydrated);
+    }
+    this.visibleNoteSnapshots.set(latest.id, this.portableNote(hydrated));
+    return latest;
+  }
+
+  /**
+   * Apply a pulled note only if the local durable snapshot has not changed
+   * since this sync pass began. A pull is not allowed to overwrite a newer
+   * edit made by another tab while the remote request was in flight.
+   */
+  private async saveRemoteNoteIfUnchanged(
+    note: Note,
+    target: VaultMutationTarget,
+    durable: DurableNoteStorageAdapter,
+  ): Promise<boolean> {
+    const { context, adapter } = target;
+    if (!adapter) return false;
+    const expected = this.durableNoteSnapshots.get(note.id) ?? null;
+    try {
+      if (durable.saveNoteIfUnchanged) {
+        await durable.saveNoteIfUnchanged(note, expected);
+      } else {
+        // Experimental adapters predating the conditional API remain usable,
+        // but the supported local adapter always takes the guarded branch.
+        await adapter.saveNote(note);
+      }
+    } catch (error) {
+      if (!isLocalNoteConflict(error)) throw error;
+      if (context.isCurrent() && error.current) {
+        await this.refreshLocalNoteFromSnapshot(error.current, target);
+      } else if (context.isCurrent()) {
+        this.durableNoteSnapshots.delete(note.id);
+        this.notes = this.notes.filter(value => value.id !== note.id);
+      }
+      if (context.isCurrent()) this.syncStatus = 'offline';
+      return false;
+    }
+    if (context.isCurrent() && this.adapter === adapter) {
+      this.durableNoteSnapshots.set(note.id, this.portableNote(note));
+    }
+    return true;
   }
 
   private async pushPendingNote(
@@ -1121,8 +1325,9 @@ export class NoteStore {
   ): Promise<boolean> {
     const { context, attachments, urls } = target;
     if (!context.isCurrent()) return false;
-    if (this.preservedConflicts.has(staleNote.id)) return true;
-    this.preservedConflicts.add(staleNote.id);
+    const staleKey = JSON.stringify(normalizeNoteRecord(staleNote));
+    if (this.preservedConflicts.get(staleNote.id) === staleKey) return true;
+    this.preservedConflicts.set(staleNote.id, staleKey);
     const copiedAttachments: Array<{
       attachment: NoteAttachment;
       handle: StagedAttachmentHandle;
@@ -1138,7 +1343,9 @@ export class NoteStore {
     const abandonIfStale = async () => {
       if (context.isCurrent()) return false;
       await discardCopiedAttachments();
-      this.preservedConflicts.delete(staleNote.id);
+      if (this.preservedConflicts.get(staleNote.id) === staleKey) {
+        this.preservedConflicts.delete(staleNote.id);
+      }
       return true;
     };
     try {
@@ -1159,16 +1366,17 @@ export class NoteStore {
       const hydrated = await urls.hydrate(copy);
       if (await abandonIfStale()) return false;
       this.notes.push(hydrated);
-      if (!await this.persistNote(hydrated, {}, target)) {
+      if (!await this.persistNote(hydrated, { expectAbsent: true }, target)) {
         if (context.isCurrent()) this.notes = this.notes.filter(note => note.id !== copy!.id);
         await discardCopiedAttachments();
         throw new Error('Could not preserve the conflicting edit');
       }
       if (context.isCurrent()) toastStore.show('A concurrent edit was preserved as a conflict copy');
-      else this.preservedConflicts.delete(staleNote.id);
       return true;
     } catch (error) {
-      this.preservedConflicts.delete(staleNote.id);
+      if (this.preservedConflicts.get(staleNote.id) === staleKey) {
+        this.preservedConflicts.delete(staleNote.id);
+      }
       throw error;
     }
   }
@@ -1180,7 +1388,7 @@ export class NoteStore {
     const note = this.portableNote(activeNote);
     this.markLocalEdit(id);
     const attachments = note.images ?? [];
-    saveQueue.cancel(id);
+    await this.saveQueue.supersede(id);
     const queuedAttachments: NoteAttachment[] = [];
     try {
       for (const attachment of attachments) {
@@ -1202,14 +1410,35 @@ export class NoteStore {
     }
     let pendingSync: PendingNoteSync;
     try {
-      pendingSync = await durableNoteAdapter(target.adapter).saveNoteWithPendingSync({
+      const durable = durableNoteAdapter(target.adapter);
+      const expected = target.context.isCurrent() && this.adapter === target.adapter
+        ? this.durableNoteSnapshots.get(id)
+        : undefined;
+      pendingSync = await durable.saveNoteWithPendingSync({
         ...note,
         trashedAt: undefined,
         deleted: true,
         updatedAt: Date.now(),
-      });
+      }, expected ? { expected } : {});
+      const deletedSnapshot = this.portableNote(pendingSync.note);
+      if (target.context.isCurrent() && this.adapter === target.adapter) {
+        this.durableNoteSnapshots.set(id, deletedSnapshot);
+        this.visibleNoteSnapshots.delete(id);
+      }
     } catch (error) {
-      console.error('Failed to delete note:', error);
+      if (isLocalNoteConflict(error)) {
+        try {
+          await this.handleLocalNoteConflict(note, error, target);
+          if (target.context.isCurrent()) {
+            this.syncStatus = 'offline';
+            toastStore.show('A concurrent edit was preserved as a conflict copy');
+          }
+        } catch (conflictError) {
+          console.error('Failed to preserve delete conflict:', conflictError);
+        }
+      } else {
+        console.error('Failed to delete note:', error);
+      }
       for (const attachment of queuedAttachments) {
         await target.attachments.cancelDelete(id, attachment.id);
         const stored = await target.attachments.get(id, attachment.id);
@@ -1268,7 +1497,7 @@ export class NoteStore {
     const target = this.captureMutationTarget();
     const activeNote = this.notes.find(note => note.id === id);
     if (!activeNote || !target.adapter || activeNote.trashedAt !== undefined) return false;
-    saveQueue.cancel(id);
+    await this.saveQueue.supersede(id);
     const trashed = this.portableNote({
       ...activeNote,
       archived: false,
@@ -1286,7 +1515,7 @@ export class NoteStore {
     const target = this.captureMutationTarget();
     const activeNote = this.notes.find(note => note.id === id);
     if (!activeNote || !target.adapter || activeNote.trashedAt === undefined) return false;
-    saveQueue.cancel(id);
+    await this.saveQueue.supersede(id);
     const restored = this.portableNote({
       ...activeNote,
       trashedAt: undefined,
@@ -1456,7 +1685,7 @@ export class NoteStore {
     const next = this.portableNote(note);
     next.images = [...(next.images ?? []), attachment];
     next.updatedAt = Date.now();
-    if (!await this.persistNote(next, {}, target)) {
+    if (!await this.persistNote(next, { deferVisibleSnapshot: true }, target)) {
       await target.attachments.discardStage(staged);
       return;
     }
@@ -1470,6 +1699,7 @@ export class NoteStore {
     if (current) {
       current.images = hydrated.images;
       current.updatedAt = next.updatedAt;
+      this.visibleNoteSnapshots.set(noteId, this.portableNote(current));
     }
     if (this.syncStatus === 'offline') toastStore.show('Attachment saved locally and queued for sync');
   }
@@ -1485,7 +1715,7 @@ export class NoteStore {
     next.images = next.images?.filter(value => value.id !== attachmentId);
     if (!next.images?.length) next.images = undefined;
     next.updatedAt = Date.now();
-    if (!await this.persistNote(next, { beforeAttachments }, target)) return;
+    if (!await this.persistNote(next, { beforeAttachments, deferVisibleSnapshot: true }, target)) return;
     target.urls.release(noteId, attachmentId);
     if (!target.context.isCurrent()) return;
     const current = this.notes.find(value => value === note);
@@ -1493,6 +1723,7 @@ export class NoteStore {
       current.images = current.images?.filter(value => value.id !== attachmentId);
       if (!current.images?.length) current.images = undefined;
       current.updatedAt = next.updatedAt;
+      this.visibleNoteSnapshots.set(noteId, this.portableNote(current));
     }
   }
 
@@ -1519,8 +1750,9 @@ export class NoteStore {
     if (!adapter) throw new Error('Unlock your vault before importing notes');
     const durable = durableNoteAdapter(adapter);
     const context = this.syncCoordinator.capture();
-    const store = attachmentStore;
-    const urls = attachmentUrls;
+    const importTarget = this.captureMutationTarget(context);
+    const store = importTarget.attachments;
+    const urls = importTarget.urls;
     const activeJournalKey = importJournalKey;
     const storedMetadata = await adapter.listNotes();
     const storedNotes = adapter.getAllNotes
@@ -1649,6 +1881,13 @@ export class NoteStore {
     if (context.isCurrent()) {
       // Persistence is already committed. A browser object-URL failure should
       // not turn a complete import into a false "nothing restored" report.
+      // Register the exact durable generation before the follow-up sync can
+      // pull our own relay revisions; otherwise a guarded remote apply would
+      // mistake this freshly imported note for an expected-absent note.
+      for (const note of portable) {
+        this.durableNoteSnapshots.set(note.id, note);
+        this.visibleNoteSnapshots.set(note.id, note);
+      }
       const hydrated = await Promise.all(portable.map(async note => {
         try { return await urls.hydrate(note); }
         catch { return note; }
@@ -1667,16 +1906,23 @@ export class NoteStore {
     return this.syncCoordinator.run(context => this.performSync(context));
   }
 
+  private scheduleSyncContinuation(context: VaultTaskContext): void {
+    setTimeout(() => {
+      if (!context.isCurrent()) return;
+      void this.sync();
+    }, 0);
+  }
+
   private async performSync(context: VaultTaskContext): Promise<void> {
     if (this.importInProgress) return;
     const target = this.captureMutationTarget(context);
     const adapter = target.adapter;
     const encryptedSync = target.sync;
     if (!adapter) return;
-    await this.flushPendingSaves();
-    if (!context.isCurrent()) return;
     this.syncStatus = 'syncing';
     try {
+      await this.flushPendingSaves();
+      if (!context.isCurrent()) return;
       if (encryptedSync) {
         const durable = durableNoteAdapter(adapter);
         const mutationFailures = new Set<string>();
@@ -1761,98 +2007,149 @@ export class NoteStore {
           this.syncStatus = 'offline';
           return true;
         };
-        const pulled = await encryptedSync.pull();
-        if (!context.isCurrent()) return;
-        const affectedNoteIds = new Set([
-          ...pulled.notes.map(note => note.id),
-          ...pulled.deletedIds,
-          ...pulled.attachments.map(value => value.noteId),
-          ...pulled.deletedAttachments.map(value => value.noteId),
-        ]);
-        if ([...affectedNoteIds].some(editedDuringPull)) {
-          this.syncStatus = 'offline';
-          return;
-        }
-        const attachmentBytes = new Set<string>();
-        const remoteAttachmentHandles = new Map<string, RemoteAttachmentHandle>();
-        for (const value of pulled.attachments) {
-          if (stopForLocalEdit(value.noteId)) return;
-          const handle = await target.attachments.saveRemote(
-            value.noteId,
-            value.attachment,
-            value.bytes,
-          );
-          if (!context.isCurrent() || stopForLocalEdit(value.noteId)) return;
-          const key = `${value.noteId}:${value.attachment.id}`;
-          attachmentBytes.add(key);
-          remoteAttachmentHandles.set(key, handle);
-        }
-        for (const { noteId, attachmentId } of pulled.deletedAttachments) {
-          if (stopForLocalEdit(noteId)) return;
-          target.urls.release(noteId, attachmentId);
-          await target.attachments.applyRemoteDelete(noteId, attachmentId);
-          if (!context.isCurrent() || stopForLocalEdit(noteId)) return;
-          const existing = this.notes.find(note => note.id === noteId);
-          if (!existing?.images?.some(attachment => attachment.id === attachmentId)) continue;
-          existing.images = existing.images.filter(attachment => attachment.id !== attachmentId);
-          if (!existing.images.length) existing.images = undefined;
-          await adapter.saveNote(this.portableNote(existing));
-          if (!context.isCurrent() || stopForLocalEdit(noteId)) return;
-        }
-        for (const note of pulled.notes) {
-          if (stopForLocalEdit(note.id)) return;
-          for (const attachment of note.images ?? []) {
-            const key = `${note.id}:${attachment.id}`;
-            if (!attachmentBytes.has(key) && !await target.attachments.get(note.id, attachment.id)) {
-              throw new Error(`Attachment bytes unavailable: ${attachment.name}`);
-            }
+        // Apply and acknowledge one bounded page at a time. The SDK exposes
+        // the durable cursor through pull(), so the next page starts only
+        // after this page's local writes have completed and its cursor is
+        // acknowledged. This avoids both truncating large vaults and
+        // acknowledging changes that were not durably applied.
+        let pulledPages = 0;
+        let previousPullCursor: number | null = null;
+        for (;;) {
+          const pulled = await encryptedSync.pull();
+          pulledPages++;
+          if (!context.isCurrent()) return;
+          if (
+            previousPullCursor !== null
+            && pulled.revisions.length >= SYNC_PULL_PAGE_SIZE
+            && pulled.cursor <= previousPullCursor
+          ) {
+            // A full page must advance the cursor. Stop with an actionable
+            // error rather than spinning forever or claiming the vault synced;
+            // the next normal/manual sync can retry the transport.
+            this.syncStatus = 'error';
+            return;
           }
-          const portable = this.portableNote(note);
-          await adapter.saveNote(portable);
-          if (!context.isCurrent() || stopForLocalEdit(note.id)) return;
-          for (const attachment of portable.images ?? []) {
-            const handle = remoteAttachmentHandles.get(
-              `${portable.id}:${attachment.id}`,
+          const affectedNoteIds = new Set([
+            ...pulled.notes.map(note => note.id),
+            ...pulled.deletedIds,
+            ...pulled.attachments.map(value => value.noteId),
+            ...pulled.deletedAttachments.map(value => value.noteId),
+          ]);
+          if ([...affectedNoteIds].some(editedDuringPull)) {
+            this.syncStatus = 'offline';
+            return;
+          }
+          const attachmentBytes = new Set<string>();
+          const remoteAttachmentHandles = new Map<string, RemoteAttachmentHandle>();
+          for (const value of pulled.attachments) {
+            if (stopForLocalEdit(value.noteId)) return;
+            const handle = await target.attachments.saveRemote(
+              value.noteId,
+              value.attachment,
+              value.bytes,
             );
-            if (handle && !await target.attachments.confirmRemote(handle)) {
-              throw new Error(
-                `Attachment changed locally while applying remote note: ${attachment.name}`,
-              );
-            }
-            if (stopForLocalEdit(note.id)) return;
+            if (!context.isCurrent() || stopForLocalEdit(value.noteId)) return;
+            const key = `${value.noteId}:${value.attachment.id}`;
+            attachmentBytes.add(key);
+            remoteAttachmentHandles.set(key, handle);
           }
-          const hydrated = await target.urls.hydrate(portable);
-          if (!context.isCurrent() || stopForLocalEdit(note.id)) return;
-          const existing = this.notes.find(value => value.id === note.id);
-          if (existing) {
-            for (const attachment of existing.images ?? []) {
-              if (!hydrated.images?.some(value => value.id === attachment.id)) {
-                target.urls.release(note.id, attachment.id);
+          for (const { noteId, attachmentId } of pulled.deletedAttachments) {
+            if (stopForLocalEdit(noteId)) return;
+            const existing = this.notes.find(note => note.id === noteId);
+            if (!existing?.images?.some(attachment => attachment.id === attachmentId)) continue;
+            existing.images = existing.images.filter(attachment => attachment.id !== attachmentId);
+            if (!existing.images.length) existing.images = undefined;
+            const updated = this.portableNote(existing);
+            if (!await this.saveRemoteNoteIfUnchanged(updated, target, durable)) return;
+            this.visibleNoteSnapshots.set(noteId, updated);
+            target.urls.release(noteId, attachmentId);
+            await target.attachments.applyRemoteDelete(noteId, attachmentId);
+            if (!context.isCurrent() || stopForLocalEdit(noteId)) return;
+          }
+          for (const note of pulled.notes) {
+            if (stopForLocalEdit(note.id)) return;
+            for (const attachment of note.images ?? []) {
+              const key = `${note.id}:${attachment.id}`;
+              if (!attachmentBytes.has(key) && !await target.attachments.get(note.id, attachment.id)) {
+                throw new Error(`Attachment bytes unavailable: ${attachment.name}`);
               }
             }
-            Object.assign(existing, hydrated);
-          } else {
-            this.notes.push(hydrated);
+          const portable = this.portableNote(note);
+          if (!await this.saveRemoteNoteIfUnchanged(portable, target, durable)) return;
+            if (!context.isCurrent() || stopForLocalEdit(note.id)) return;
+            for (const attachment of portable.images ?? []) {
+              const handle = remoteAttachmentHandles.get(
+                `${portable.id}:${attachment.id}`,
+              );
+              if (handle && !await target.attachments.confirmRemote(handle)) {
+                throw new Error(
+                  `Attachment changed locally while applying remote note: ${attachment.name}`,
+                );
+              }
+              if (stopForLocalEdit(note.id)) return;
+            }
+            const hydrated = await target.urls.hydrate(portable);
+            if (!context.isCurrent() || stopForLocalEdit(note.id)) return;
+            const existing = this.notes.find(value => value.id === note.id);
+            if (existing) {
+              for (const attachment of existing.images ?? []) {
+                if (!hydrated.images?.some(value => value.id === attachment.id)) {
+                  target.urls.release(note.id, attachment.id);
+                }
+              }
+              applyRemoteNote(existing, hydrated);
+            } else {
+              this.notes.push(hydrated);
+            }
+            this.visibleNoteSnapshots.set(note.id, this.portableNote(hydrated));
+            this.preservedConflicts.delete(note.id);
           }
-          this.preservedConflicts.delete(note.id);
-        }
-        for (const id of pulled.deletedIds) {
-          if (stopForLocalEdit(id)) return;
-          const existing = this.notes.find(note => note.id === id);
-          await applyRemoteNoteTombstone(adapter, id);
-          if (!context.isCurrent() || stopForLocalEdit(id)) return;
-          for (const attachment of existing?.images ?? []) {
-            target.urls.release(id, attachment.id);
-            await target.attachments.applyRemoteDelete(id, attachment.id);
+          for (const id of pulled.deletedIds) {
+            if (stopForLocalEdit(id)) return;
+            const existing = this.notes.find(note => note.id === id);
+            const expected = this.durableNoteSnapshots.get(id) ?? null;
+            try {
+              await applyRemoteNoteTombstone(adapter, id, expected);
+            } catch (error) {
+              if (!isLocalNoteConflict(error)) throw error;
+              if (context.isCurrent() && error.current) {
+                await this.refreshLocalNoteFromSnapshot(error.current, target);
+              }
+              if (context.isCurrent()) this.syncStatus = 'offline';
+              return;
+            }
             if (!context.isCurrent() || stopForLocalEdit(id)) return;
+            for (const attachment of existing?.images ?? []) {
+              target.urls.release(id, attachment.id);
+              await target.attachments.applyRemoteDelete(id, attachment.id);
+              if (!context.isCurrent() || stopForLocalEdit(id)) return;
+            }
+            this.notes = this.notes.filter(note => note.id !== id);
+            this.visibleNoteSnapshots.delete(id);
+            this.preservedConflicts.delete(id);
           }
-          this.notes = this.notes.filter(note => note.id !== id);
-          this.preservedConflicts.delete(id);
+          await encryptedSync.acknowledge(pulled.cursor, pulled.revisions);
+          if (!context.isCurrent()) return;
+          await this.refreshSyncQuarantine(encryptedSync, context);
+          if (!context.isCurrent()) return;
+          if (pulled.revisions.length < SYNC_PULL_PAGE_SIZE) break;
+          previousPullCursor = pulled.cursor;
+          if (pulledPages >= SYNC_MAX_PULL_PAGES_PER_PASS) {
+            this.syncStatus = 'offline';
+            this.scheduleSyncContinuation(context);
+            return;
+          }
+          // A user edit may have arrived while this page was being applied.
+          // Drain it before reading another page so local durability always
+          // wins the next sync turn.
+          await this.flushPendingSaves();
+          if (!context.isCurrent()) return;
+          if ((await durable.listPendingNoteSync()).length > 0) {
+            this.syncStatus = 'offline';
+            this.scheduleSyncContinuation(context);
+            return;
+          }
         }
-        await encryptedSync.acknowledge(pulled.cursor, pulled.revisions);
-        if (!context.isCurrent()) return;
-        await this.refreshSyncQuarantine(encryptedSync, context);
-        if (!context.isCurrent()) return;
       } else {
         const result = await adapter.sync();
         if (!context.isCurrent()) return;
@@ -1861,7 +2158,15 @@ export class NoteStore {
       this.syncStatus = 'synced';
     } catch {
       if (context.isCurrent()) {
-        this.syncStatus = typeof navigator !== 'undefined' && !navigator.onLine ? 'offline' : 'error';
+        // persistNote already classified local durability failures as an
+        // actionable error. Do not hide that signal behind the generic
+        // connectivity fallback (which is especially misleading in tests and
+        // non-browser runtimes where navigator.onLine is unavailable).
+        if ((this.syncStatus as NoteStore['syncStatus']) !== 'error') {
+          this.syncStatus = typeof navigator !== 'undefined' && !navigator.onLine
+            ? 'offline'
+            : 'error';
+        }
       }
     }
   }

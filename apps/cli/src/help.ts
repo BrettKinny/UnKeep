@@ -1,4 +1,12 @@
-export const VERSION = '0.2.0-rc.4';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const packageMetadata = require('../package.json') as { version?: unknown };
+if (typeof packageMetadata.version !== 'string' || !packageMetadata.version) {
+  throw new Error('apps/cli/package.json must declare a non-empty version');
+}
+
+export const VERSION = packageMetadata.version;
 
 export const HELP = `Usage: unkeep [connection options] <command> [options]
 

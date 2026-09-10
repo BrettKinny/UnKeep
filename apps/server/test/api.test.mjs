@@ -676,6 +676,350 @@ test('enforces the encrypted-record byte budget by atomic replacement delta whil
   }
 });
 
+test('applies one combined quota to staged and ordinary writes in either order', async t => {
+  const stageEnvelope = testEnvelope('mixed-stage', 'stage');
+  const noteEnvelope = testEnvelope('mixed-note', 'note');
+  const relay = await startTestServer({
+    env: {
+      UNKEEP_MAX_RECORDS: '2',
+      UNKEEP_MAX_ATTACHMENTS: '1',
+      UNKEEP_MAX_ENCRYPTED_RECORD_BYTES: String(
+        storedEnvelopeBytes(stageEnvelope) + storedEnvelopeBytes(noteEnvelope),
+      ),
+    },
+  });
+  t.after(relay.stop);
+  const owner = await initializeRelay(relay, 'mixed-quota-owner');
+  const headers = {
+    authorization: `Device ${owner.deviceCredential}`,
+    'content-type': 'application/json',
+  };
+
+  const staged = await stageTestAttachment(relay, owner.deviceCredential, {
+    bundleMutationId: 'mixed-stage-first',
+    noteId: 'mixed-note',
+    attachmentId: 'mixed-stage',
+    envelope: stageEnvelope,
+  });
+  assert.equal(staged.response.status, 201);
+
+  let response = await fetch(`${relay.endpoint}/notes/mixed-note`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({
+      mutationId: 'mixed-note-create',
+      baseRevision: 0,
+      envelope: noteEnvelope,
+      deleted: false,
+    }),
+  });
+  assert.equal(response.status, 200);
+  await response.json();
+
+  response = await fetch(`${relay.endpoint}/notes/mixed-overflow`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({
+      mutationId: 'mixed-overflow-create',
+      baseRevision: 0,
+      envelope: testEnvelope('mixed-overflow', 'overflow'),
+      deleted: false,
+    }),
+  });
+  assert.equal(response.status, 507);
+  assert.deepEqual(await response.json(), { error: 'record_count_limit' });
+
+  const database = new DatabaseSync(join(relay.dataDir, 'unkeep.sqlite'));
+  try {
+    assert.deepEqual({
+      ...database.prepare(`
+        SELECT
+          r.record_count+s.stage_count AS record_count,
+          r.attachment_count+s.stage_count AS attachment_count,
+          r.encrypted_bytes+s.encrypted_bytes AS encrypted_bytes
+        FROM record_storage_usage r
+        CROSS JOIN attachment_stage_usage s
+      `).get(),
+    }, {
+      record_count: 2,
+      attachment_count: 1,
+      encrypted_bytes: storedEnvelopeBytes(stageEnvelope) + storedEnvelopeBytes(noteEnvelope),
+    });
+  } finally {
+    database.close();
+  }
+
+  const reverseRelay = await startTestServer({
+    env: {
+      UNKEEP_MAX_RECORDS: '2',
+      UNKEEP_MAX_ATTACHMENTS: '1',
+      UNKEEP_MAX_ENCRYPTED_RECORD_BYTES: String(
+        storedEnvelopeBytes(stageEnvelope) + storedEnvelopeBytes(noteEnvelope),
+      ),
+    },
+  });
+  t.after(reverseRelay.stop);
+  const reverseOwner = await initializeRelay(reverseRelay, 'mixed-quota-reverse');
+  const reverseHeaders = {
+    authorization: `Device ${reverseOwner.deviceCredential}`,
+    'content-type': 'application/json',
+  };
+  response = await fetch(`${reverseRelay.endpoint}/notes/mixed-note`, {
+    method: 'PUT',
+    headers: reverseHeaders,
+    body: JSON.stringify({
+      mutationId: 'reverse-note-create',
+      baseRevision: 0,
+      envelope: noteEnvelope,
+      deleted: false,
+    }),
+  });
+  assert.equal(response.status, 200);
+  const reverseNote = await response.json();
+  const reverseStage = await stageTestAttachment(reverseRelay, reverseOwner.deviceCredential, {
+    bundleMutationId: 'mixed-stage-second',
+    noteId: 'mixed-note',
+    attachmentId: 'mixed-stage',
+    envelope: stageEnvelope,
+  });
+  assert.equal(reverseStage.response.status, 201);
+  const finalized = await finalizeTestBundle(reverseRelay, reverseOwner.deviceCredential, {
+    bundleMutationId: 'mixed-stage-second',
+    noteId: 'mixed-note',
+    baseRevision: reverseNote.revision,
+    newAttachments: [{ id: 'mixed-stage', stageHash: reverseStage.body.stageHash }],
+    envelope: noteEnvelope,
+  });
+  assert.equal(finalized.response.status, 200);
+  assert.deepEqual(finalized.body.attachmentRevisions, [{ id: 'mixed-stage', revision: 2 }]);
+  assert.equal(finalized.body.revision, 3);
+});
+
+test('staged attachment count is enforced independently and not double-counted by compound publish', async t => {
+  const relay = await startTestServer({
+    env: { UNKEEP_MAX_RECORDS: '10', UNKEEP_MAX_ATTACHMENTS: '1' },
+  });
+  t.after(relay.stop);
+  const owner = await initializeRelay(relay, 'attachment-budget-owner');
+  const first = await stageTestAttachment(relay, owner.deviceCredential, {
+    bundleMutationId: 'attachment-budget-first',
+    noteId: 'attachment-budget-note',
+    attachmentId: 'attachment-budget-first-file',
+  });
+  assert.equal(first.response.status, 201);
+  const second = await stageTestAttachment(relay, owner.deviceCredential, {
+    bundleMutationId: 'attachment-budget-second',
+    noteId: 'attachment-budget-note',
+    attachmentId: 'attachment-budget-second-file',
+  });
+  assert.equal(second.response.status, 507);
+  assert.deepEqual(second.body, { error: 'attachment_count_limit' });
+  const finalized = await finalizeTestBundle(relay, owner.deviceCredential, {
+    bundleMutationId: 'attachment-budget-first',
+    noteId: 'attachment-budget-note',
+    baseRevision: 0,
+    newAttachments: [{
+      id: 'attachment-budget-first-file',
+      stageHash: first.body.stageHash,
+    }],
+  });
+  assert.equal(finalized.response.status, 200);
+  const third = await stageTestAttachment(relay, owner.deviceCredential, {
+    bundleMutationId: 'attachment-budget-third',
+    noteId: 'attachment-budget-note',
+    attachmentId: 'attachment-budget-third-file',
+  });
+  assert.equal(third.response.status, 507);
+  assert.deepEqual(third.body, { error: 'attachment_count_limit' });
+  const database = new DatabaseSync(join(relay.dataDir, 'unkeep.sqlite'));
+  try {
+    assert.deepEqual({
+      ...database.prepare('SELECT * FROM record_storage_usage').get(),
+    }, {
+      singleton: 1,
+      record_count: 2,
+      attachment_count: 1,
+      encrypted_bytes: storedEnvelopeBytes(testEnvelope('attachment-budget-note', 'attachment-budget-note'))
+        + storedEnvelopeBytes(testEnvelope('attachment-budget-first-file', 'attachment-budget-first-file')),
+    });
+  } finally {
+    database.close();
+  }
+});
+
+test('ordinary PUT enforces staged bytes independently of the record-count budget', async t => {
+  const stageEnvelope = testEnvelope('staged-byte-budget-file', 'staged-bytes');
+  const noteEnvelope = testEnvelope('staged-byte-budget-note', 'note');
+  const relay = await startTestServer({
+    env: {
+      UNKEEP_MAX_RECORDS: '10',
+      UNKEEP_MAX_ATTACHMENTS: '10',
+      UNKEEP_MAX_ENCRYPTED_RECORD_BYTES: String(
+        storedEnvelopeBytes(stageEnvelope) + storedEnvelopeBytes(noteEnvelope),
+      ),
+    },
+  });
+  t.after(relay.stop);
+  const owner = await initializeRelay(relay, 'staged-byte-budget-owner');
+  const staged = await stageTestAttachment(relay, owner.deviceCredential, {
+    bundleMutationId: 'staged-byte-budget-bundle',
+    noteId: 'staged-byte-budget-note',
+    attachmentId: 'staged-byte-budget-file',
+    envelope: stageEnvelope,
+  });
+  assert.equal(staged.response.status, 201);
+  const headers = {
+    authorization: `Device ${owner.deviceCredential}`,
+    'content-type': 'application/json',
+  };
+  let response = await fetch(`${relay.endpoint}/notes/staged-byte-budget-note`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({
+      mutationId: 'staged-byte-budget-note-create',
+      baseRevision: 0,
+      envelope: noteEnvelope,
+      deleted: false,
+    }),
+  });
+  assert.equal(response.status, 200);
+  response = await fetch(`${relay.endpoint}/notes/staged-byte-budget-overflow`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({
+      mutationId: 'staged-byte-budget-overflow-create',
+      baseRevision: 0,
+      envelope: testEnvelope('staged-byte-budget-overflow', 'larger-than-budget'),
+      deleted: false,
+    }),
+  });
+  assert.equal(response.status, 507);
+  assert.deepEqual(await response.json(), {
+    error: 'encrypted_record_bytes_limit',
+  });
+});
+
+test('allows a reducing ordinary replacement while mixed live and staged usage is over budget', async t => {
+  const stageEnvelope = testEnvelope('mixed-reduction-stage', 'stage');
+  const smallEnvelope = testEnvelope('mixed-reduction-note', 'small');
+  const relay = await startTestServer({
+    env: {
+      UNKEEP_MAX_RECORDS: '10',
+      UNKEEP_MAX_ATTACHMENTS: '10',
+      UNKEEP_MAX_ENCRYPTED_RECORD_BYTES: String(storedEnvelopeBytes(stageEnvelope) + 1),
+    },
+  });
+  t.after(relay.stop);
+  const owner = await initializeRelay(relay, 'mixed-reduction-owner');
+  const staged = await stageTestAttachment(relay, owner.deviceCredential, {
+    bundleMutationId: 'mixed-reduction-bundle',
+    noteId: 'mixed-reduction-note',
+    attachmentId: 'mixed-reduction-stage',
+    envelope: stageEnvelope,
+  });
+  assert.equal(staged.response.status, 201);
+  const oversizedEnvelope = testEnvelope('mixed-reduction-note', 'x'.repeat(256));
+  const database = new DatabaseSync(join(relay.dataDir, 'unkeep.sqlite'));
+  try {
+    database.prepare(`
+      INSERT INTO records(kind,id,note_id,envelope,deleted,revision)
+      VALUES('note',?,?,?,0,1)
+    `).run(
+      'mixed-reduction-note',
+      null,
+      JSON.stringify(oversizedEnvelope),
+    );
+  } finally {
+    database.close();
+  }
+  const response = await fetch(`${relay.endpoint}/notes/mixed-reduction-note`, {
+    method: 'PUT',
+    headers: {
+      authorization: `Device ${owner.deviceCredential}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      mutationId: 'mixed-reduction-repair',
+      baseRevision: 1,
+      envelope: smallEnvelope,
+      deleted: false,
+    }),
+  });
+  assert.equal(response.status, 200);
+  const verification = new DatabaseSync(join(relay.dataDir, 'unkeep.sqlite'));
+  try {
+    const usage = verification.prepare(`
+      SELECT r.encrypted_bytes+s.encrypted_bytes AS encryptedBytes
+      FROM record_storage_usage r CROSS JOIN attachment_stage_usage s
+    `).get();
+    assert.ok(usage.encryptedBytes > storedEnvelopeBytes(stageEnvelope) + 1);
+    assert.ok(usage.encryptedBytes < storedEnvelopeBytes(oversizedEnvelope) + storedEnvelopeBytes(stageEnvelope));
+    assert.equal(
+      verification.prepare('SELECT COUNT(*) AS count FROM attachment_stages').get().count,
+      1,
+    );
+  } finally {
+    verification.close();
+  }
+});
+
+test('ordinary PUT cleans expired stages before applying quota', async t => {
+  const stageEnvelope = testEnvelope('expired-ordinary-stage', 'stage');
+  const noteEnvelope = testEnvelope('expired-ordinary-note', 'note');
+  const relay = await startTestServer({
+    env: {
+      UNKEEP_MAX_RECORDS: '1',
+      UNKEEP_MAX_ATTACHMENTS: '1',
+      UNKEEP_MAX_ENCRYPTED_RECORD_BYTES: String(
+        storedEnvelopeBytes(stageEnvelope) + storedEnvelopeBytes(noteEnvelope),
+      ),
+    },
+  });
+  t.after(relay.stop);
+  const owner = await initializeRelay(relay, 'expired-ordinary-owner');
+  const staged = await stageTestAttachment(relay, owner.deviceCredential, {
+    bundleMutationId: 'expired-ordinary-bundle',
+    noteId: 'expired-ordinary-note',
+    attachmentId: 'expired-ordinary-stage',
+    envelope: stageEnvelope,
+  });
+  assert.equal(staged.response.status, 201);
+  const database = new DatabaseSync(join(relay.dataDir, 'unkeep.sqlite'));
+  try {
+    database.prepare(`
+      UPDATE attachment_stages SET created_at=0,expires_at=1
+      WHERE bundle_mutation_id='expired-ordinary-bundle'
+    `).run();
+  } finally {
+    database.close();
+  }
+  const response = await fetch(`${relay.endpoint}/notes/expired-ordinary-note`, {
+    method: 'PUT',
+    headers: {
+      authorization: `Device ${owner.deviceCredential}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      mutationId: 'expired-ordinary-note-create',
+      baseRevision: 0,
+      envelope: noteEnvelope,
+      deleted: false,
+    }),
+  });
+  assert.equal(response.status, 200);
+  const verification = new DatabaseSync(join(relay.dataDir, 'unkeep.sqlite'));
+  try {
+    assert.equal(verification.prepare('SELECT COUNT(*) AS count FROM attachment_stages').get().count, 0);
+    assert.deepEqual({ ...verification.prepare('SELECT * FROM attachment_stage_usage').get() }, {
+      singleton: 1,
+      stage_count: 0,
+      encrypted_bytes: 0,
+    });
+  } finally {
+    verification.close();
+  }
+});
+
 test('allows storage-reducing repair while an existing vault is over its byte budget', async t => {
   const smallerEnvelope = testEnvelope('over-budget-note');
   const smallerBytes = storedEnvelopeBytes(smallerEnvelope);
