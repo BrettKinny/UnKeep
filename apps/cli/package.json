@@ -48,6 +48,6 @@
     "@types/node": "^26.1.2",
     "@unkeep/server": "workspace:*",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   }
 }
