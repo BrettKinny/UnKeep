@@ -242,6 +242,33 @@ export function parseDockerfileBase(
   return bases[0];
 }
 
+export function parseRuntimePackagePins(
+  dockerfile = readFileSync(join(REPOSITORY_ROOT, 'Dockerfile'), 'utf8'),
+) {
+  const matches = [...dockerfile.matchAll(
+    /^\s*RUN\s+apk\s+add\s+--no-cache\s+--upgrade\s+(.+?)\s*$/gmi,
+  )];
+  if (matches.length !== 1) {
+    fail('Dockerfile must contain one controlled runtime package upgrade');
+  }
+  const pins = matches[0][1].split(/\s+/).map(token => {
+    const match = /^(libcrypto3|libssl3)=([A-Za-z0-9][A-Za-z0-9+_.-]*)$/.exec(
+      token,
+    );
+    if (!match) fail(`Invalid controlled runtime package pin: ${token}`);
+    return { name: match[1], version: match[2] };
+  });
+  if (
+    pins.length !== 2
+    || pins[0].name !== 'libcrypto3'
+    || pins[1].name !== 'libssl3'
+    || pins[0].version !== pins[1].version
+  ) {
+    fail('Runtime package upgrade must pin matching libcrypto3 and libssl3');
+  }
+  return pins;
+}
+
 export function platformImageReference(indexReference, platformDigest) {
   const match = /^([^@\s]+)@sha256:[0-9a-f]{64}$/.exec(indexReference);
   if (!match) fail(`Invalid digest-pinned image index: ${indexReference}`);
@@ -254,15 +281,19 @@ export function platformImageReference(indexReference, platformDigest) {
 }
 
 function inspectPlatform(baseImage, platform, inspectNodeLicense = false) {
+  const packagePins = parseRuntimePackagePins()
+    .map(({ name, version }) => `${name}=${version}`);
   const installed = run('docker', [
     'run',
     '--rm',
     '--platform',
     platform,
     '--entrypoint',
-    'cat',
+    'sh',
     baseImage,
-    '/lib/apk/db/installed',
+    '-c',
+    `apk add --no-cache --upgrade ${packagePins.join(' ')} >/dev/null && `
+      + 'cat /lib/apk/db/installed',
   ]);
   const nodeVersion = run('docker', [
     'run',

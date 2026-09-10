@@ -22,6 +22,7 @@ import {
   fetchCommits,
   normalizeSourceSymlinks,
   parseDockerfileBase,
+  parseRuntimePackagePins,
   parseInstalledDatabase,
   platformImageReference,
   requireDescriptorDigest,
@@ -283,6 +284,26 @@ test('requires controlled license, build, and runtime stages with one base', () 
     assert.throws(
       () => parseDockerfileBase(dockerfile),
       /controlled Node license, build, and runtime stages/,
+    );
+  }
+});
+
+test('requires matching pinned OpenSSL runtime upgrades', () => {
+  const valid = 'RUN apk add --no-cache --upgrade libcrypto3=3.5.8-r0 libssl3=3.5.8-r0';
+  assert.deepEqual(parseRuntimePackagePins(valid), [
+    { name: 'libcrypto3', version: '3.5.8-r0' },
+    { name: 'libssl3', version: '3.5.8-r0' },
+  ]);
+  for (const dockerfile of [
+    '',
+    `${valid}\n${valid}`,
+    valid.replace('3.5.8-r0 libssl3', '3.5.9-r0 libssl3'),
+    valid.replace('libssl3', 'openssl'),
+    valid.replace('--upgrade ', ''),
+  ]) {
+    assert.throws(
+      () => parseRuntimePackagePins(dockerfile),
+      /controlled runtime package|matching libcrypto3 and libssl3|Invalid controlled/,
     );
   }
 });
