@@ -18,6 +18,13 @@
   import ColorPicker from './ColorPicker.svelte';
   import PinIcon from './PinIcon.svelte';
   import LinkedText from './LinkedText.svelte';
+  import LinkPreviewCard from './LinkPreviewCard.svelte';
+  import {
+    hasPreviewContent,
+    linkPreviews,
+    PREVIEW_REQUEST_DELAY_MS,
+    previewUrls,
+  } from '$lib/linkPreviews.svelte';
 
   function normalizeLabels(value: string): string[] {
     return [...new Set(value.split(',').map(label => label.trim()).filter(Boolean))];
@@ -28,6 +35,19 @@
   }
 
   let { note, onClose, readOnly = false }: { note: Note; onClose: () => void; readOnly?: boolean } = $props();
+
+  let linkUrls = $derived(previewUrls(note));
+  let linkPreviewItems = $derived(linkUrls.flatMap(url => {
+    const preview = linkPreviews.previews.get(url);
+    return hasPreviewContent(preview) ? [{ url, preview }] : [];
+  }));
+  // Trashed notes show cached previews but never trigger a fetch.
+  $effect(() => {
+    const pending = linkUrls;
+    if (readOnly || !pending.length) return;
+    const timer = setTimeout(() => linkPreviews.request(pending), PREVIEW_REQUEST_DELAY_MS);
+    return () => clearTimeout(timer);
+  });
 
   // svelte-ignore state_referenced_locally
   let content = $state(note.content);
@@ -515,6 +535,13 @@
           class="w-full mt-4 bg-transparent text-base sm:text-sm text-on-surface-muted outline-none"
           placeholder="Labels, separated by commas"
         />
+      {/if}
+      {#if linkPreviewItems.length}
+        <div class="mt-4 grid gap-2">
+          {#each linkPreviewItems as { url, preview } (url)}
+            <LinkPreviewCard {url} {preview} variant="editor" />
+          {/each}
+        </div>
       {/if}
     </div>
 

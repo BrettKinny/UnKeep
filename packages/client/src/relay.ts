@@ -14,6 +14,40 @@ export type RelayChange =
   | { kind:'note'; id:string; noteId?:string; envelope:unknown; deleted:boolean; revision:number }
   | { kind:'attachment'; id:string; noteId?:string; deleted:boolean; revision:number };
 
+/** Plaintext page metadata the relay fetched for a note URL. Render as text only. */
+export interface LinkPreview {
+  title?: string;
+  siteName?: string;
+  /** Always an https: URL. */
+  imageUrl?: string;
+}
+
+const MAX_LINK_PREVIEW_TEXT = 300;
+const MAX_LINK_PREVIEW_URL = 2_048;
+
+function normalizeLinkPreview(value: unknown): LinkPreview | null {
+  if (value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) throw new Error('Relay returned an invalid link preview');
+  const record = value as Record<string, unknown>;
+  const preview: LinkPreview = {};
+  for (const field of ['title', 'siteName'] as const) {
+    const text = record[field];
+    if (text === undefined) continue;
+    if (typeof text !== 'string' || text.length > MAX_LINK_PREVIEW_TEXT) throw new Error('Relay returned an invalid link preview');
+    preview[field] = text;
+  }
+  if (record.imageUrl !== undefined) {
+    // The relay is not trusted to choose a scheme: only https images render.
+    if (typeof record.imageUrl !== 'string' || record.imageUrl.length > MAX_LINK_PREVIEW_URL) throw new Error('Relay returned an invalid link preview');
+    try {
+      if (new URL(record.imageUrl).protocol === 'https:') preview.imageUrl = record.imageUrl;
+    } catch {
+      // Drop an unparseable image rather than the whole preview.
+    }
+  }
+  return preview;
+}
+
 export interface RelayClientOptions {
   allowInsecure?: boolean;
 }
@@ -196,6 +230,11 @@ export class RelayClient {
       attachmentRevisions.push({id:attachment.id,revision:attachment.revision});
     }
     return {revision:receipt.revision,attachmentRevisions};
+  }
+  /** Relay-fetched page metadata. Null means the page could not be previewed. */
+  async linkPreview(url:string, signal?:AbortSignal): Promise<LinkPreview|null> {
+    const response = await this.request<{preview?:unknown}>('/link-preview',{method:'POST',body:JSON.stringify({url}),signal});
+    return normalizeLinkPreview(response.preview ?? null);
   }
   getAttachment(id:string) { return this.request<{noteId:string;envelope:unknown;deleted:boolean;revision:number}>(`/attachments/${encodeURIComponent(id)}`); }
   createPairing(value:unknown) { return this.request<{requestId:string;code:string;pollSecret:string;expiresAt:string;instanceId:string}>('/pairings',{method:'POST',body:JSON.stringify(value)}); }

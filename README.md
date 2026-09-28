@@ -452,6 +452,7 @@ Common environment variables:
 | `UNKEEP_PAIRING_SOURCE_RATE_LIMIT` | Requests per source and window; defaults to 10 |
 | `UNKEEP_PAIRING_GLOBAL_RATE_LIMIT` | Requests across all sources and window; defaults to 60 |
 | `UNKEEP_TRUST_PROXY` | Set to `1` only behind a trusted proxy that replaces `X-Forwarded-For` |
+| `UNKEEP_LINK_PREVIEWS` | Set to `1` to let the relay fetch link-preview titles and thumbnails for note URLs; off by default because the relay then sees those URLs in plaintext (see [THREAT_MODEL.md](THREAT_MODEL.md#link-previews)) |
 | `PORT` | HTTP port; defaults to 3000 |
 
 See [docs/self-hosting.md](docs/self-hosting.md) before exposing a deployment.

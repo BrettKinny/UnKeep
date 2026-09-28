@@ -248,6 +248,33 @@ store, render, or redirect that fallback, but upstream infrastructure could
 observe it. The documented iOS Shortcut puts its payload in a URL fragment,
 which is not included in the HTTP request.
 
+## Link previews
+
+Link previews are disabled unless the operator sets `UNKEEP_LINK_PREVIEWS=1`.
+When enabled, the PWA sends each previewed note URL to the relay in plaintext,
+so the relay learns those URLs, and the linked sites learn the relay's network
+address. That is outside the honest-but-curious content guarantee above and
+is intended for single-owner deployments where the operator is the user. The
+relay does not persist previewed URLs or responses, but request logging at a
+reverse proxy could capture them.
+
+Only device credentials may call the preview endpoint; service credentials are
+refused, so a provisioned agent cannot drive outbound relay requests. Because
+note text is untrusted input, the fetcher accepts only `http:` and `https:`
+URLs on default ports without embedded credentials, and refuses loopback,
+private, link-local, CGNAT, multicast, documentation, and other special-purpose
+IPv4 and IPv6 destinations, including IPv4-mapped and NAT64 forms. It validates
+the resolved address used for each connection, refuses a name if any DNS answer
+is non-public, and repeats the check on every redirect hop. Requests are
+time-, size-, redirect-, rate-, and concurrency-bounded.
+
+Preview metadata is plaintext page content chosen by a third party. The client
+validates its shape, renders titles as text, and renders only `https:` image
+URLs. The browser policy therefore allows `img-src https:`; loading a thumbnail
+reveals the viewer's network address to the image host, without a referrer.
+Previews are cached per browser in IndexedDB outside the note record, are never
+synchronized, and are cleared when local vault access is forgotten.
+
 ## Integrity, availability, and deletion limits
 
 - Multi-device sync is asynchronous optimistic concurrency, not live

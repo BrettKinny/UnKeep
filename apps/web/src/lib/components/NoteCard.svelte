@@ -7,6 +7,14 @@
   import AttachmentChip from './AttachmentChip.svelte';
   import ColorPicker from './ColorPicker.svelte';
   import LinkedText from './LinkedText.svelte';
+  import LinkPreviewCard from './LinkPreviewCard.svelte';
+  import {
+    hasPreviewContent,
+    isBareLinkNote,
+    linkPreviews,
+    PREVIEW_REQUEST_DELAY_MS,
+    previewUrls,
+  } from '$lib/linkPreviews.svelte';
   import PinIcon from './PinIcon.svelte';
 
   let {
@@ -25,6 +33,7 @@
     onPermanentDelete?: (note: Note) => void;
   } = $props();
 
+  let card: HTMLElement | undefined = $state();
   let showActions = $state(false);
   let showColorPicker = $state(false);
   let mutatingTrash = $state(false);
@@ -32,6 +41,40 @@
   let visibleImages = $derived(note.images?.filter(
     attachment => isImageAttachment(attachment) && hasLocalAttachmentUrl(attachment),
   ) ?? []);
+  let urls = $derived(trashed ? [] : previewUrls(note));
+  let previews = $derived(urls.flatMap(url => {
+    const preview = linkPreviews.previews.get(url);
+    return hasPreviewContent(preview) ? [{ url, preview }] : [];
+  }));
+  // Like Keep: a note that is only a link shows the preview instead of the raw URL.
+  let hideBareLink = $derived(previews.length > 0 && isBareLinkNote(note));
+
+  // Fetch previews only once a card nears the viewport, so opening a large
+  // vault does not fire a request per link, and only after the URLs settle so
+  // typing a link in the editor does not fetch every partial URL.
+  $effect(() => {
+    const pending = urls;
+    if (!pending.length || !card) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const requestSoon = () => {
+      timer = setTimeout(() => linkPreviews.request(pending), PREVIEW_REQUEST_DELAY_MS);
+    };
+    if (typeof IntersectionObserver === 'undefined') {
+      requestSoon();
+      return () => clearTimeout(timer);
+    }
+    const observer = new IntersectionObserver(entries => {
+      if (!entries.some(entry => entry.isIntersecting)) return;
+      observer.disconnect();
+      requestSoon();
+    }, { rootMargin: '300px' });
+    observer.observe(card);
+    return () => {
+      observer.disconnect();
+      clearTimeout(timer);
+    };
+  });
+
   let editLabel = $derived.by(() => {
     const summary = note.title?.trim()
       || note.content.trim()
@@ -82,6 +125,7 @@
 </script>
 
 <article
+  bind:this={card}
   class="rounded-lg border border-border p-3 cursor-pointer transition-[box-shadow,border-color] duration-100 hover:shadow-md relative group break-inside-avoid mb-3 overflow-hidden"
   class:ring-2={selected}
   class:ring-primary={selected}
@@ -164,8 +208,16 @@
         <li class="text-on-surface-muted text-xs">+{note.checkboxes.length - 8} more items</li>
       {/if}
     </ul>
-  {:else}
+  {:else if !hideBareLink}
     <p class="text-sm text-on-surface whitespace-pre-wrap line-clamp-6"><LinkedText text={note.content} /></p>
+  {/if}
+
+  {#if previews.length}
+    <div class={hideBareLink && !note.title && !visibleImages.length && !note.pinned ? '-mt-3' : 'mt-3'}>
+      {#each previews as { url, preview } (url)}
+        <LinkPreviewCard {url} {preview} />
+      {/each}
+    </div>
   {/if}
 
   {#if note.labels?.length}

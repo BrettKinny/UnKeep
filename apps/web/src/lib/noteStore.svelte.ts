@@ -31,6 +31,7 @@ import type { ImportedAttachment } from './keepImporter';
 import type { QuickSendDraft } from './quickSend';
 import { createVaultExport } from './vaultExport';
 import { createConflictCopy } from './conflictCopy';
+import { linkPreviews } from './linkPreviews.svelte';
 import { resolveImportCollisions } from './importCollisions';
 import { commitImportBatch } from './importCommit';
 import {
@@ -415,6 +416,7 @@ export class NoteStore {
     this.syncQuarantineCount = 0;
     const encryptedSync = new EncryptedSync(session, masterKey, clientStorage);
     this.encryptedSync = encryptedSync;
+    linkPreviews.setFetcher(url => encryptedSync.fetchLinkPreview(url));
     try {
       await this.refreshSyncQuarantine(encryptedSync, context);
     } catch {
@@ -443,6 +445,7 @@ export class NoteStore {
     window.removeEventListener('online', this.wakeSync);
     this.unsubscribeRealtime = null;
     this.encryptedSync = null;
+    linkPreviews.setFetcher(null);
     this.syncQuarantineCount = 0;
     this.adapter = null;
     this.durableNoteSnapshots.clear();
