@@ -480,4 +480,88 @@ test.describe.serial('UnKeep browser vault', () => {
     await page.reload();
     await expect(savedCards).toHaveCount(2);
   });
+
+  test('drives the note grid from the keyboard', async () => {
+    await page.goto('/');
+    await expect(page.getByRole('button', { name: 'Create a new note' })).toBeVisible();
+    const shortcutsDialog = page.getByRole('dialog', { name: 'Keyboard shortcuts' });
+    const cards = page.locator('[data-note-id]');
+    const active = page.locator('[data-note-id].outline-2');
+    const noteCount = await cards.count();
+    expect(noteCount).toBeGreaterThan(1);
+
+    // `?` opens the help, Escape closes it; the app menu offers it too.
+    await page.keyboard.press('?');
+    await expect(shortcutsDialog).toBeVisible();
+    await expect(shortcutsDialog.getByText('Move the selected note to Trash')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(shortcutsDialog).toBeHidden();
+    await page.getByRole('button', { name: 'Open UnKeep menu' }).click();
+    await page.getByRole('menuitem', { name: /Keyboard shortcuts/ }).click();
+    await expect(shortcutsDialog).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(shortcutsDialog).toBeHidden();
+
+    // `/` focuses search, and typing there must not trigger shortcuts.
+    await page.keyboard.press('/');
+    await expect(page.getByLabel('Search notes')).toBeFocused();
+    await page.keyboard.type('n?');
+    await expect(shortcutsDialog).toBeHidden();
+    await expect(page.getByLabel('Search notes')).toHaveValue('n?');
+    await page.getByLabel('Search notes').fill('');
+    await page.keyboard.press('Escape');
+
+    // Arrows move the selection; vim keys deliberately do not.
+    await page.keyboard.press('ArrowDown');
+    await expect(active).toHaveCount(1);
+    const firstActive = await active.getAttribute('data-note-id') as string;
+    await page.keyboard.press('ArrowRight');
+    await expect(active).not.toHaveAttribute('data-note-id', firstActive);
+    await page.keyboard.press('ArrowLeft');
+    await expect(active).toHaveAttribute('data-note-id', firstActive);
+    await page.keyboard.press('j');
+    await page.keyboard.press('k');
+    await expect(active).toHaveAttribute('data-note-id', firstActive);
+
+    // Keys are inert while the app menu is open, and Escape only closes the menu.
+    await page.getByRole('button', { name: 'Open UnKeep menu' }).click();
+    await page.keyboard.press('Delete');
+    await expect(cards).toHaveCount(noteCount);
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('menu')).toBeHidden();
+    await expect(active).toHaveAttribute('data-note-id', firstActive);
+
+    // Enter opens the selected note, Escape closes it.
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('dialog', { name: 'Edit note' })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog', { name: 'Edit note' })).toBeHidden();
+
+    // Delete moves the selected note to Trash and Undo brings it back.
+    await page.keyboard.press('Delete');
+    await expect(cards).toHaveCount(noteCount - 1);
+    await page.getByRole('button', { name: 'Undo' }).last().click();
+    await expect(cards).toHaveCount(noteCount);
+
+    // In Trash, the keyboard can browse and view but never delete.
+    await page.locator(`[data-note-id="${firstActive}"]`).hover();
+    await page.locator(`[data-note-id="${firstActive}"]`).getByRole('button', { name: 'Move to Trash' }).click();
+    await page.getByRole('button', { name: 'Open UnKeep menu' }).click();
+    await page.getByRole('menuitem', { name: 'Trash' }).click();
+    await expect(page.getByRole('heading', { name: 'Trash' })).toBeVisible();
+    await page.keyboard.press('ArrowDown');
+    await expect(active).toHaveAttribute('data-note-id', firstActive);
+    await page.keyboard.press('Delete');
+    await page.keyboard.press('Backspace');
+    await expect(page.getByRole('alertdialog')).toHaveCount(0);
+    await expect(cards).toHaveCount(1);
+    await page.getByRole('button', { name: 'Restore note' }).click();
+    await expect(page.getByText('Trash is empty')).toBeVisible();
+
+    // `n` returns to notes with the composer ready for typing.
+    await page.keyboard.press('n');
+    await expect(page.getByLabel('Note content')).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(cards).toHaveCount(noteCount);
+  });
 });

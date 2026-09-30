@@ -11,6 +11,7 @@
     selectedIds,
     onSelect,
     onPermanentDelete,
+    activeId = null,
   }: {
     pinnedNotes: Note[];
     unpinnedNotes: Note[];
@@ -20,6 +21,7 @@
     selectedIds?: Set<string>;
     onSelect?: (note: Note, selected: boolean) => void;
     onPermanentDelete?: (note: Note) => void;
+    activeId?: string | null;
   } = $props();
 </script>
 
@@ -28,7 +30,7 @@
     <h2 class="text-xs font-semibold text-on-surface-muted uppercase tracking-wide mb-3 px-1">Pinned</h2>
     <div class="note-columns">
       {#each pinnedNotes as note (note.id)}
-        <NoteCard {note} {onEdit} {trashed} selected={selectedIds?.has(note.id)} {onSelect} {onPermanentDelete} />
+        <NoteCard {note} {onEdit} {trashed} selected={selectedIds?.has(note.id)} active={note.id === activeId} {onSelect} {onPermanentDelete} />
       {/each}
     </div>
   </div>
@@ -40,7 +42,7 @@
   {/if}
   <div class="note-columns">
     {#each unpinnedNotes as note (note.id)}
-      <NoteCard {note} {onEdit} {trashed} selected={selectedIds?.has(note.id)} {onSelect} {onPermanentDelete} />
+      <NoteCard {note} {onEdit} {trashed} selected={selectedIds?.has(note.id)} active={note.id === activeId} {onSelect} {onPermanentDelete} />
     {/each}
   </div>
 {/if}
