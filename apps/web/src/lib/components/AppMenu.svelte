@@ -9,6 +9,8 @@
     onImport,
     onExport,
     onManageAccess,
+    onShowShortcuts,
+    open = $bindable(false),
   }: {
     inTrash: boolean;
     exporting: boolean;
@@ -17,10 +19,11 @@
     onImport: () => void;
     onExport: () => void;
     onManageAccess: () => void;
+    onShowShortcuts: () => void;
+    open?: boolean;
   } = $props();
 
   const themeModes: ThemeMode[] = ['system', 'light', 'dark'];
-  let open = $state(false);
 
   function run(action: () => void) {
     open = false;
@@ -77,6 +80,11 @@
       <button type="button" class="menu-item" role="menuitem" disabled={exporting} onclick={() => run(onExport)}>
         <svg class="menu-icon" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 17v2a2 2 0 002 2h10a2 2 0 002-2v-2"/></svg>
         {exporting ? 'Preparing export…' : 'Export vault'}
+      </button>
+      <button type="button" class="menu-item" role="menuitem" onclick={() => run(onShowShortcuts)}>
+        <svg class="menu-icon" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/></svg>
+        Keyboard shortcuts
+        <kbd class="ml-auto rounded border border-border bg-surface-dim px-1.5 text-xs text-on-surface-muted">?</kbd>
       </button>
 
       <div class="my-2 border-t border-border"></div>

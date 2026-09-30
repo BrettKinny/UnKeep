@@ -6,6 +6,12 @@
   let title = $state('');
   let inputEl: HTMLTextAreaElement | undefined = $state();
 
+  /** Expand the composer and put the cursor in it (also used by the `n` shortcut). */
+  export function focusInput() {
+    expanded = true;
+    setTimeout(() => inputEl?.focus(), 0);
+  }
+
   function handleClose() {
     if (content.trim() || title.trim()) {
       noteStore.createNote(content.trim(), title.trim());
@@ -66,7 +72,7 @@
       <button
         type="button"
         aria-label="Create a new note"
-        onclick={() => { expanded = true; setTimeout(() => inputEl?.focus(), 0); }}
+        onclick={focusInput}
         class="w-full cursor-text rounded-lg p-4 text-left text-on-surface-muted"
       >
         Take a note...

@@ -4,6 +4,7 @@
   import { toastStore } from '$lib/toast.svelte';
   import { colorMap } from '$lib/colors';
   import { hasLocalAttachmentUrl, isImageAttachment } from '$lib/attachments';
+  import { trashNoteWithUndo } from '$lib/noteActions';
   import AttachmentChip from './AttachmentChip.svelte';
   import ColorPicker from './ColorPicker.svelte';
   import LinkedText from './LinkedText.svelte';
@@ -14,13 +15,17 @@
     onEdit,
     trashed = false,
     selected = false,
+    active = false,
     onSelect,
     onPermanentDelete,
   }: {
     note: Note;
     onEdit: (note: Note) => void;
     trashed?: boolean;
+    /** Checked for a bulk Trash action. */
     selected?: boolean;
+    /** Current keyboard-navigation target. */
+    active?: boolean;
     onSelect?: (note: Note, selected: boolean) => void;
     onPermanentDelete?: (note: Note) => void;
   } = $props();
@@ -48,15 +53,7 @@
     if (mutatingTrash) return;
     mutatingTrash = true;
     try {
-      if (await noteStore.trashNote(note.id)) {
-        toastStore.show('Moved to Trash', {
-          action: {
-            label: 'Undo',
-            fn: () => void noteStore.restoreTrashedNote(note.id),
-          },
-          timeout: 5000,
-        });
-      }
+      await trashNoteWithUndo(note.id);
     } finally {
       mutatingTrash = false;
     }
@@ -82,9 +79,14 @@
 </script>
 
 <article
+  data-note-id={note.id}
   class="rounded-lg border border-border p-3 cursor-pointer transition-[box-shadow,border-color] duration-100 hover:shadow-md relative group break-inside-avoid mb-3 overflow-hidden"
   class:ring-2={selected}
   class:ring-primary={selected}
+  class:outline-2={active}
+  class:outline-offset-2={active}
+  class:outline-primary={active}
+  class:shadow-md={active}
   style="background-color: {bgColor()}"
   onmouseenter={() => showActions = true}
   onmouseleave={() => { showActions = false; showColorPicker = false; }}
