@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount, tick } from 'svelte';
   import type { Note } from '@unkeep/core';
   import { noteStore } from '$lib/noteStore.svelte';
   import NoteInput from '$lib/components/NoteInput.svelte';
@@ -10,8 +11,12 @@
   import AuthVaultGate, { type VaultReady } from '$lib/components/AuthVaultGate.svelte';
   import KeepImporter from '$lib/components/KeepImporter.svelte';
   import AppMenu from '$lib/components/AppMenu.svelte';
+  import ShortcutsDialog from '$lib/components/ShortcutsDialog.svelte';
   import { listPendingShares, removePendingShares } from '$lib/shareTarget';
   import { toastStore } from '$lib/toast.svelte';
+  import { trashNoteWithUndo } from '$lib/noteActions';
+  import { isTextEntryTarget, matchShortcut, type ShortcutAction } from '$lib/shortcuts';
+  import { nextNoteId, readNoteRects, type Direction } from '$lib/gridNavigation';
 
   type ContentView = 'notes' | 'trash';
   interface DeleteConfirmation { ids: string[]; emptyAll: boolean }
@@ -27,6 +32,109 @@
   let destructiveBusy = $state(false);
   let deleteDialog: HTMLDivElement | undefined = $state();
   let previousSearch = noteStore.searchQuery;
+  let showShortcuts = $state(false);
+  let menuOpen = $state(false);
+  let activeNoteId: string | null = $state(null);
+  let noteInput: ReturnType<typeof NoteInput> | undefined = $state();
+
+  /** Notes currently on screen, in the order the grid renders them. */
+  let visibleNotes = $derived(contentView === 'trash'
+    ? noteStore.trashedNotes
+    : [...noteStore.pinnedNotes, ...noteStore.unpinnedNotes]);
+
+  // Drop the keyboard selection when its note leaves the view (trashed, filtered out, view change).
+  $effect(() => {
+    if (activeNoteId && !visibleNotes.some(note => note.id === activeNoteId)) {
+      activeNoteId = null;
+    }
+  });
+
+  onMount(() => {
+    window.addEventListener('keydown', handleGlobalKeydown);
+    return () => window.removeEventListener('keydown', handleGlobalKeydown);
+  });
+
+  function handleGlobalKeydown(event: KeyboardEvent) {
+    // Dialogs handle their own Escape and mark it handled; never act twice.
+    if (event.defaultPrevented || !vaultReady) return;
+
+    const editingText = isTextEntryTarget(event.target);
+    const shortcut = matchShortcut(event, {
+      editingText,
+      hasSelection: activeNoteId !== null,
+      modalOpen: Boolean(editingNote) || showImporter || showAccessManager || showShortcuts
+        || deleteConfirmation !== null || menuOpen,
+      inTrash: contentView === 'trash',
+    });
+    if (!shortcut) return;
+
+    event.preventDefault();
+    runShortcut(shortcut.action, editingText);
+  }
+
+  function runShortcut(action: ShortcutAction, editingText: boolean) {
+    switch (action) {
+      case 'help': showShortcuts = true; break;
+      case 'search': document.getElementById('note-search')?.focus(); break;
+      case 'new-note': void openComposer(); break;
+      case 'dismiss': dismiss(editingText); break;
+      case 'move-up': moveSelection('up'); break;
+      case 'move-down': moveSelection('down'); break;
+      case 'move-left': moveSelection('left'); break;
+      case 'move-right': moveSelection('right'); break;
+      case 'open': openActive(); break;
+      case 'pin': if (activeNoteId) noteStore.togglePin(activeNoteId); break;
+      case 'trash': void trashActive(); break;
+    }
+  }
+
+  async function openComposer() {
+    // The composer only exists in the notes view.
+    if (contentView !== 'notes') {
+      showNotes();
+      await tick();
+    }
+    noteInput?.focusInput();
+  }
+
+  function dismiss(editingText: boolean) {
+    if (menuOpen) { menuOpen = false; return; }
+    if (showShortcuts) { showShortcuts = false; return; }
+    if (deleteConfirmation) { if (!destructiveBusy) deleteConfirmation = null; return; }
+    if (showImporter) { showImporter = false; return; }
+    if (showAccessManager) { showAccessManager = false; return; }
+    if (editingNote) { editingNote = null; return; }
+    if (editingText) {
+      if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+      return;
+    }
+    activeNoteId = null;
+  }
+
+  function moveSelection(direction: Direction) {
+    const next = nextNoteId(readNoteRects(), activeNoteId, direction);
+    if (!next) return;
+    activeNoteId = next;
+    document
+      .querySelector(`[data-note-id="${CSS.escape(next)}"]`)
+      ?.scrollIntoView({ block: 'nearest' });
+  }
+
+  function openActive() {
+    const note = visibleNotes.find(candidate => candidate.id === activeNoteId);
+    if (note) editingNote = note;
+  }
+
+  async function trashActive() {
+    const id = activeNoteId;
+    if (!id) return;
+    // Advance the selection first so repeated deletes keep working.
+    const rects = readNoteRects();
+    const below = nextNoteId(rects, id, 'down');
+    const successor = below && below !== id ? below : nextNoteId(rects, id, 'up');
+    activeNoteId = successor && successor !== id ? successor : null;
+    await trashNoteWithUndo(id);
+  }
 
   let allTrashedNotes = $derived(noteStore.notes
     .filter(note => !note.deleted && note.trashedAt !== undefined));
@@ -227,6 +335,8 @@
             onImport={() => showImporter = true}
             onExport={() => void handleExport()}
             onManageAccess={() => showAccessManager = true}
+            onShowShortcuts={() => showShortcuts = true}
+            bind:open={menuOpen}
           />
         </div>
       </div>
@@ -287,14 +397,16 @@
             selectedIds={selectedTrashIds}
             onSelect={setTrashSelected}
             onPermanentDelete={(note) => requestPermanentDelete([note])}
+            activeId={activeNoteId}
           />
         </section>
       {:else}
-        <NoteInput />
+        <NoteInput bind:this={noteInput} />
         <NoteGrid
           pinnedNotes={noteStore.pinnedNotes}
           unpinnedNotes={noteStore.unpinnedNotes}
           onEdit={(note) => editingNote = note}
+          activeId={activeNoteId}
         />
       {/if}
     </div>
@@ -306,6 +418,10 @@
 
   {#if showImporter}
     <KeepImporter onClose={() => showImporter = false} />
+  {/if}
+
+  {#if showShortcuts}
+    <ShortcutsDialog onClose={() => showShortcuts = false} />
   {/if}
 
   {#if deleteConfirmation}

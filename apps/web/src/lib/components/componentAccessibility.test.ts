@@ -45,6 +45,40 @@ describe('component accessibility contracts', () => {
     expect(linkedText).toContain('rel="noopener noreferrer"');
   });
 
+  it('marks note cards for grid navigation without reusing the Trash selection style', () => {
+    const source = componentSource('NoteCard');
+
+    expect(source).toContain('data-note-id={note.id}');
+    expect(source).toContain('class:ring-2={selected}');
+    expect(source).toContain('class:outline-2={active}');
+    expect(source).toContain('class:outline-primary={active}');
+  });
+
+  it('shares one recoverable move-to-Trash path between the card and the keyboard', () => {
+    expect(componentSource('NoteCard')).toContain('await trashNoteWithUndo(note.id);');
+  });
+
+  it('focuses, traps Tab within, and restores focus from the shortcuts dialog', () => {
+    const source = componentSource('ShortcutsDialog');
+
+    expect(source).toContain('bind:this={dialogEl}');
+    expect(source).toContain('aria-modal="true"');
+    expect(source).toContain('aria-labelledby="shortcuts-dialog-title"');
+    expect(source).toContain('onkeydown={handleDialogKeydown}');
+    expect(source).toMatch(/if \(event\.key === 'Escape'\)[\s\S]*event\.preventDefault\(\)[\s\S]*onClose\(\)/);
+    expect(source).toMatch(/onMount\([\s\S]*dialogEl\?\.focus\(\)/);
+    expect(source).toContain('previouslyFocused.focus()');
+    expect(source).toContain("event.key !== 'Tab'");
+    expect(source).toMatch(/<button\s+type="button"[^>]*onclick=\{onClose\}[^>]*aria-label="Close keyboard shortcuts"/s);
+  });
+
+  it('lists keyboard shortcuts in the app menu and exposes its open state', () => {
+    const source = componentSource('AppMenu');
+
+    expect(source).toContain('open = $bindable(false)');
+    expect(source).toMatch(/run\(onShowShortcuts\)[\s\S]*Keyboard shortcuts/);
+  });
+
   it('prevents duplicate Trash mutations while persistence is pending', () => {
     const source = componentSource('NoteCard');
 
