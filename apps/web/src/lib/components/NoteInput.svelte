@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { noteStore } from '$lib/noteStore.svelte';
 
   let expanded = $state(false);
@@ -66,7 +67,13 @@
       <button
         type="button"
         aria-label="Create a new note"
-        onclick={() => { expanded = true; setTimeout(() => inputEl?.focus(), 0); }}
+        onclick={async () => {
+          expanded = true;
+          // Focus once the textarea mounts, before input events can reach the
+          // title field; a timer could fire mid-typing and steal the text.
+          await tick();
+          inputEl?.focus();
+        }}
         class="w-full cursor-text rounded-lg p-4 text-left text-on-surface-muted"
       >
         Take a note...
