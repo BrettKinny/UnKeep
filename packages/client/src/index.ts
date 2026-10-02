@@ -15,6 +15,7 @@ export type {
   RelayCompoundAttachmentRevision,
   RelayCompoundNoteReceipt,
 } from './relay.js';
+export type { LinkPreview } from './relay.js';
 export { RelayClient, RelayHttpError, RecordConflictError, cleanRelayEndpoint } from './relay.js';
 export { RelaySessionStore } from './session.js';
 export type {
