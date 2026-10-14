@@ -513,16 +513,21 @@ export class NoteStore {
     return Promise.all(notes.map(note => urls.hydrate(note)));
   }
 
-  createNote(content: string = '', title: string = ''): Note {
+  createNote(
+    content: string = '',
+    title: string = '',
+    options: { pinned?: boolean; color?: NoteColor } = {},
+  ): Note {
     const note: Note = {
       id: nanoid(),
       title,
       content,
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      pinned: false,
+      pinned: options.pinned ?? false,
       archived: false,
     };
+    if (options.color && options.color !== 'default') note.color = options.color;
     this.notes.push(note);
     void this.persistNote(note, { expectAbsent: true });
     return note;
