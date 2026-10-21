@@ -4,10 +4,15 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Majors (framework migrations) arrive as individual PRs instead of
+    # blocking the routine minor/patch group.
     groups:
       pnpm-dependencies:
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: docker
     directory: /
