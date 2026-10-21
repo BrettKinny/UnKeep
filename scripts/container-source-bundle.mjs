@@ -28,6 +28,12 @@ const DOCKER_NODE_RECIPE_COMMIT =
   'bc0a422bce0f729dd85790639d9f1918143f1235';
 const APORTS_REPOSITORY =
   'https://gitlab.alpinelinux.org/alpine/aports.git';
+// gitlab.alpinelinux.org answers GitHub-hosted runners with HTTP 418. Alpine's
+// official GitHub mirror serves the same Git objects, and every fetched commit
+// is still checked against its exact requested ID.
+const APORTS_FALLBACK_REPOSITORIES = [
+  'https://github.com/alpinelinux/aports.git',
+];
 const SPDX_LICENSE_LIST_REPOSITORY =
   'https://github.com/spdx/license-list-data.git';
 const SPDX_LICENSE_LIST_COMMIT =
@@ -53,10 +59,10 @@ function validateToken(value, pattern, label) {
   return value;
 }
 
-function validateVersion(value) {
+export function validateVersion(value) {
   return validateToken(
     value,
-    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-rc\.(0|[1-9]\d*)$/,
+    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-rc\.(0|[1-9]\d*))?$/,
     'release version',
   );
 }
@@ -431,19 +437,30 @@ function fetchCommit(repository, commit) {
   }
 }
 
-export function fetchCommits(repository, commits) {
+export function fetchCommits(repository, commits, fallbackRemotes = []) {
   const uniqueCommits = [...new Set(commits.map(commit =>
     validateGitCommit(commit, 'source Git commit')))];
   if (uniqueCommits.length === 0) fail('No source Git commits were requested');
   const reference = commit => `refs/unkeep-sources/${commit}`;
-  run('git', [
-    'fetch',
-    '--quiet',
-    '--depth=1',
-    '--no-tags',
-    'origin',
-    ...uniqueCommits.map(commit => `${commit}:${reference(commit)}`),
-  ], { cwd: repository });
+  const errors = [];
+  let fetched = false;
+  for (const remote of ['origin', ...fallbackRemotes]) {
+    try {
+      run('git', [
+        'fetch',
+        '--quiet',
+        '--depth=1',
+        '--no-tags',
+        remote,
+        ...uniqueCommits.map(commit => `${commit}:${reference(commit)}`),
+      ], { cwd: repository });
+      fetched = true;
+      break;
+    } catch (error) {
+      errors.push(`${remote}: ${error.message}`);
+    }
+  }
+  if (!fetched) fail(`All source Git remotes failed\n${errors.join('\n')}`);
   for (const commit of uniqueCommits) {
     const actual = run('git', [
       'rev-parse',
@@ -782,6 +799,10 @@ async function fetchAlpineDistfiles(bundleRoot, origins) {
     '  builder=sourcebuilder',
     'fi',
     'mkdir -p /tmp/aports-work',
+    // Alpine's distfile cache holds the exact archives its builders used, so
+    // abuild tries it before upstream hosts that refuse CI runners;
+    // abuild verify then checks every file against the APKBUILD sha512sums.
+    'distfiles_mirror="https://distfiles.alpinelinux.org/distfiles/v$(cut -d. -f1,2 /etc/alpine-release)"',
     'while IFS= read -r origin; do',
     '  case "$origin" in (*[!A-Za-z0-9+_.-]*|\"\") exit 70;; esac',
     '  work="/tmp/aports-work/$origin"',
@@ -790,7 +811,7 @@ async function fetchAlpineDistfiles(bundleRoot, origins) {
     '  chown -R "$HOST_UID" "$work" "/bundle/alpine/$origin/distfiles"',
     '  for architecture in x86_64 aarch64; do',
     '    attempt=1',
-    '    while ! su "$builder" -s /bin/sh -c "cd \\"$work\\" && CARCH=\\"$architecture\\" SRCDEST=\\"/bundle/alpine/$origin/distfiles\\" abuild fetch"; do',
+    '    while ! su "$builder" -s /bin/sh -c "cd \\"$work\\" && export CARCH=\\"$architecture\\" SRCDEST=\\"/bundle/alpine/$origin/distfiles\\" DISTFILES_MIRROR=\\"$distfiles_mirror\\" && abuild fetch && abuild verify"; do',
     '      if [ "$attempt" -ge 3 ]; then exit 71; fi',
     '      sleep "$((attempt * 5))"',
     '      attempt="$((attempt + 1))"',
@@ -1086,6 +1107,7 @@ async function buildBundle(options) {
     fetchCommits(
       aportsRepository,
       origins.map(item => item.aportsCommit),
+      APORTS_FALLBACK_REPOSITORIES,
     );
     for (const item of origins) {
       const recipePath = listRecipePath(

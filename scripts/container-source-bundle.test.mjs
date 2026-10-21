@@ -27,6 +27,7 @@ import {
   platformImageReference,
   requireDescriptorDigest,
   validateArchiveListings,
+  validateVersion,
   verifyBinding,
   verifyBundle,
 } from './container-source-bundle.mjs';
@@ -206,6 +207,14 @@ function verifyFixtureOptions(fixture) {
   };
 }
 
+test('accepts stable and release-candidate versions only', () => {
+  assert.equal(validateVersion('0.2.0'), '0.2.0');
+  assert.equal(validateVersion('0.2.0-rc.4'), '0.2.0-rc.4');
+  for (const version of ['0.2', '00.2.0', '0.2.0-beta.1', '0.2.0-rc.01', 'v0.2.0', '0.2.0/x']) {
+    assert.throws(() => validateVersion(version), /Invalid release version/);
+  }
+});
+
 test('parses only source identity fields from an Alpine installed database', () => {
   assert.deepEqual(parseInstalledDatabase(installed), [
     {
@@ -351,6 +360,34 @@ test('fetches multiple immutable source commits in one shallow transaction', () 
         commit,
       );
     }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('fetches source commits from a fallback remote after the primary fails', () => {
+  const root = mkdtempSync(join(tmpdir(), 'unkeep-source-git-fallback-test-'));
+  const mirror = join(root, 'mirror');
+  const checkout = join(root, 'checkout');
+  try {
+    mkdirSync(mirror);
+    git(mirror, ['init', '--quiet']);
+    git(mirror, ['config', 'user.email', 'fixture@example.invalid']);
+    git(mirror, ['config', 'user.name', 'Fixture']);
+    writeFileSync(join(mirror, 'value'), 'mirrored\n');
+    git(mirror, ['add', 'value']);
+    git(mirror, ['commit', '--quiet', '-m', 'mirrored']);
+    const commit = git(mirror, ['rev-parse', 'HEAD']);
+    mkdirSync(checkout);
+    git(checkout, ['init', '--quiet']);
+    git(checkout, ['remote', 'add', 'origin', join(root, 'unreachable')]);
+
+    assert.throws(() => fetchCommits(checkout, [commit]), /All source Git remotes failed/);
+    fetchCommits(checkout, [commit], [mirror]);
+    assert.equal(
+      git(checkout, ['rev-parse', `refs/unkeep-sources/${commit}^{commit}`]),
+      commit,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
