@@ -13,6 +13,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Stay on the Node 22 LTS line; major runtime moves are deliberate upgrades.
+    ignore:
+      - dependency-name: node
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: github-actions
     directory: /
