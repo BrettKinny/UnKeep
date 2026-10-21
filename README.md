@@ -76,9 +76,14 @@ and covers upgrades and backups:
 
 [Follow the verified release procedure in `docs/self-hosting.md`.](docs/self-hosting.md)
 
-The first published release line is planned as the `0.2.0-rc.4` preview. Once published,
-pin exact preview versions while the project is `0.x`; minor releases may
-still contain breaking changes.
+`0.2.0` is the first stable release. Pin an exact version or image digest
+while the project is `0.x`; minor releases may still contain breaking changes.
+
+### Run on Unraid
+
+Install **UnKeep** from Community Applications. Read the
+[Unraid settings](docs/self-hosting.md#unraid-settings) first: the container
+runs as `nobody:users`, and it must be published over HTTPS.
 
 ## Use it with an agent
 
