@@ -1,9 +1,10 @@
-name: Release candidate
+name: Release
 
 on:
   push:
     tags:
       - "v*-rc.*"
+      - "v[0-9]+.[0-9]+.[0-9]+"
   workflow_dispatch:
     inputs:
       ref:
@@ -33,6 +34,8 @@ jobs:
     timeout-minutes: 10
     outputs:
       image: ${{ steps.release.outputs.image }}
+      moving_tags: ${{ steps.release.outputs.moving_tags }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
       publish: ${{ steps.release.outputs.publish }}
       release_sha: ${{ steps.release.outputs.release_sha }}
       version: ${{ steps.release.outputs.version }}
@@ -69,10 +72,10 @@ jobs:
             value: JSON.parse(readFileSync(manifest.path, "utf8")),
           }));
           const version = packages[0].value.version;
-          const rc = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-rc\.(0|[1-9]\d*)$/;
+          const release = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-rc\.(0|[1-9]\d*))?$/;
 
-          if (!rc.test(version)) {
-            throw new Error(`Release candidates require an X.Y.Z-rc.N version, received ${version}`);
+          if (!release.test(version)) {
+            throw new Error(`Releases require an X.Y.Z or X.Y.Z-rc.N version, received ${version}`);
           }
           for (const pkg of packages) {
             if (pkg.value.name !== pkg.name) {
@@ -141,14 +144,37 @@ jobs:
           release_sha="$(git rev-parse HEAD)"
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           publish=false
+          prerelease=true
+          moving_tags=""
+          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            prerelease=false
+            # Stable releases also move the X.Y and latest tags, but only when
+            # no higher stable release exists, so a backport cannot regress them.
+            stable_tags="$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)"
+            minor="${version%.*}"
+            highest_minor="$(
+              { printf 'v%s\n' "$version"; printf '%s\n' "$stable_tags"; } |
+                grep -E "^v${minor//./\\.}\.[0-9]+$" | sort -V | tail -n 1
+            )"
+            highest="$(
+              { printf 'v%s\n' "$version"; printf '%s\n' "$stable_tags"; } |
+                grep -E '^v[0-9]' | sort -V | tail -n 1
+            )"
+            if [[ "$highest_minor" == "v$version" ]]; then
+              moving_tags="$minor"
+            fi
+            if [[ "$highest" == "v$version" ]]; then
+              moving_tags="${moving_tags:+$moving_tags }latest"
+            fi
+          fi
 
           if [[ "$EVENT_NAME" == "push" ]]; then
             if [[ "$REF_PROTECTED" != "true" ]]; then
               echo "::error::Release tags must match an active GitHub tag-protection rule"
               exit 1
             fi
-            if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
-              echo "::error::Release tag must have the form vX.Y.Z-rc.N"
+            if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+              echo "::error::Release tag must have the form vX.Y.Z or vX.Y.Z-rc.N"
               exit 1
             fi
             if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
@@ -168,6 +194,8 @@ jobs:
 
           {
             echo "image=$image"
+            echo "moving_tags=$moving_tags"
+            echo "prerelease=$prerelease"
             echo "publish=$publish"
             echo "release_sha=$release_sha"
             echo "version=$version"
@@ -175,6 +203,8 @@ jobs:
 
           echo "Candidate: $version at $release_sha"
           echo "Image: $image"
+          echo "Prerelease: $prerelease"
+          echo "Moving tags: ${moving_tags:-none}"
           echo "Publishing enabled: $publish"
 
       - name: Validate curated changelog release notes
@@ -584,6 +614,8 @@ jobs:
     env:
       BASE_DIGEST: ${{ needs.container-sources.outputs.base_digest }}
       IMAGE: ${{ needs.prepare.outputs.image }}
+      MOVING_TAGS: ${{ needs.prepare.outputs.moving_tags }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
       RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
@@ -959,6 +991,8 @@ jobs:
       ARM64_DIGEST: ${{ needs.stage_container.outputs.arm64_digest }}
       BASE_DIGEST: ${{ needs.stage_container.outputs.base_digest }}
       IMAGE: ${{ needs.prepare.outputs.image }}
+      MOVING_TAGS: ${{ needs.prepare.outputs.moving_tags }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
       RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
@@ -1072,7 +1106,7 @@ jobs:
             exit 1
           fi
 
-      - name: Create and require the draft prerelease before image promotion
+      - name: Create and require the draft release before image promotion
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           STAGE_MANIFEST_SHA256: ${{ needs.stage_container.outputs.stage_manifest_sha256 }}
@@ -1082,7 +1116,7 @@ jobs:
             > "$RUNNER_TEMP/release-notes.md"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = "true"
-            test "$(gh release view "$GITHUB_REF_NAME" --json isPrerelease --jq .isPrerelease)" = "true"
+            test "$(gh release view "$GITHUB_REF_NAME" --json isPrerelease --jq .isPrerelease)" = "$PRERELEASE"
             gh release edit "$GITHUB_REF_NAME" \
               --notes-file "$RUNNER_TEMP/release-notes.md" \
               --title "UnKeep $VERSION"
@@ -1091,7 +1125,7 @@ jobs:
             gh release create "$GITHUB_REF_NAME" \
               --verify-tag \
               --draft \
-              --prerelease \
+              --prerelease="$PRERELEASE" \
               --latest=false \
               --notes-file "$RUNNER_TEMP/release-notes.md" \
               --title "UnKeep $VERSION" \
@@ -1105,7 +1139,7 @@ jobs:
           )" = "true"
           test "$(
             jq -r '.isPrerelease' "$RUNNER_TEMP/prepromotion-release-metadata.json"
-          )" = "true"
+          )" = "$PRERELEASE"
           test "$(
             jq -r '.name' "$RUNNER_TEMP/prepromotion-release-metadata.json"
           )" = "UnKeep $VERSION"
@@ -1165,7 +1199,7 @@ jobs:
           )" = "true"
           test "$(
             jq -r '.isPrerelease' "$RUNNER_TEMP/immediate-prepromotion-release-metadata.json"
-          )" = "true"
+          )" = "$PRERELEASE"
           test "$(
             jq -r '.name' "$RUNNER_TEMP/immediate-prepromotion-release-metadata.json"
           )" = "UnKeep $VERSION"
@@ -1175,15 +1209,24 @@ jobs:
             "$RUNNER_TEMP/release-notes.md" \
             "$RUNNER_TEMP/immediate-prepromotion-release-notes.md"
 
+          # Moving tags (X.Y, latest) are mutable by design and are
+          # written in the same manifest operation as the immutable tags.
+          moving_references=()
+          for tag in $MOVING_TAGS; do
+            moving_references+=("$IMAGE:$tag")
+          done
+          tag_arguments=(--tag "$IMAGE:$VERSION" --tag "$IMAGE:sha-$RELEASE_SHA")
+          for reference in "${moving_references[@]}"; do
+            tag_arguments+=(--tag "$reference")
+          done
           metadata="$RUNNER_TEMP/release-image-metadata.json"
           docker buildx imagetools create \
             --metadata-file "$metadata" \
-            --tag "$IMAGE:$VERSION" \
-            --tag "$IMAGE:sha-$RELEASE_SHA" \
+            "${tag_arguments[@]}" \
             "$IMAGE@$AMD64_DIGEST" \
             "$IMAGE@$ARM64_DIGEST"
           digest="$(jq -er '."containerimage.descriptor".digest' "$metadata")"
-          for reference in "$IMAGE:$VERSION" "$IMAGE:sha-$RELEASE_SHA"; do
+          for reference in "$IMAGE:$VERSION" "$IMAGE:sha-$RELEASE_SHA" "${moving_references[@]}"; do
             actual="$(
               docker buildx imagetools inspect "$reference" \
                 --format '{{json .Manifest}}' | jq -er '.digest'
@@ -1250,7 +1293,7 @@ jobs:
 
 
   finalize_release:
-    name: Verify and publish GitHub prerelease
+    name: Verify and publish GitHub release
     if: >-
       needs.prepare.outputs.publish == 'true' &&
       needs.stage_container.outputs.release_gate == 'release-environment-v1'
@@ -1266,6 +1309,8 @@ jobs:
     env:
       BASE_DIGEST: ${{ needs.stage_container.outputs.base_digest }}
       IMAGE: ${{ needs.prepare.outputs.image }}
+      MOVING_TAGS: ${{ needs.prepare.outputs.moving_tags }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
       RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
@@ -1394,7 +1439,7 @@ jobs:
           )" = "true"
           test "$(
             jq -r '.isPrerelease' "$RUNNER_TEMP/prefinalize-release-metadata.json"
-          )" = "true"
+          )" = "$PRERELEASE"
           test "$(
             jq -r '.name' "$RUNNER_TEMP/prefinalize-release-metadata.json"
           )" = "UnKeep $VERSION"
@@ -1461,7 +1506,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      - name: Stage, verify, and publish the prerelease
+      - name: Stage, verify, and publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE_DIGEST: ${{ needs.promote_image.outputs.image_digest }}
@@ -1478,7 +1523,7 @@ jobs:
               --json body,isDraft,isPrerelease,name \
               > "$metadata_path"
             test "$(jq -r '.isDraft' "$metadata_path")" = "true"
-            test "$(jq -r '.isPrerelease' "$metadata_path")" = "true"
+            test "$(jq -r '.isPrerelease' "$metadata_path")" = "$PRERELEASE"
             test "$(jq -r '.name' "$metadata_path")" = "UnKeep $VERSION"
             jq -j '.body' "$metadata_path" > "$remote_notes_path"
             cmp "$RUNNER_TEMP/release-notes.md" "$remote_notes_path"
@@ -1536,8 +1581,8 @@ jobs:
             --title "UnKeep $VERSION" \
             --notes-file "$RUNNER_TEMP/release-notes.md" \
             --draft=false \
-            --prerelease \
-            --latest=false
+            --prerelease="$PRERELEASE" \
+            --latest="$([[ " $MOVING_TAGS " == *" latest "* ]] && echo true || echo false)"
           gh release view "$GITHUB_REF_NAME" \
             --json body,isDraft,isImmutable,isPrerelease,name \
             > "$RUNNER_TEMP/published-release-metadata.json"
@@ -1549,7 +1594,7 @@ jobs:
           )" = "true"
           test "$(
             jq -r '.isPrerelease' "$RUNNER_TEMP/published-release-metadata.json"
-          )" = "true"
+          )" = "$PRERELEASE"
           test "$(
             jq -r '.name' "$RUNNER_TEMP/published-release-metadata.json"
           )" = "UnKeep $VERSION"
