@@ -148,7 +148,7 @@ in its `ref` input. It must not create a release or push a release image.
 For publication, create an annotated tag from a commit contained in `main`:
 
 ```sh
-version=0.2.0
+version=0.2.1
 git tag --sign --annotate "v$version" -m "UnKeep $version"
 git push origin "v$version"
 ```
@@ -189,7 +189,7 @@ incomplete public GitHub release.
 Replace the version and source SHA below for a later release:
 
 ```sh
-version=0.2.0
+version=0.2.1
 docker buildx imagetools inspect "ghcr.io/brettkinny/unkeep:$version"
 gh attestation verify \
   "oci://ghcr.io/brettkinny/unkeep:$version" \
@@ -235,6 +235,10 @@ staged images remain unpublished. Publication continues with
 `v0.2.0-rc.4`; do not move or reuse either earlier tag. The `v0.2.0-rc.5`
 tag failed validation before any external write (its CLI manifest still
 reported `0.2.0-rc.4`), so it published nothing and its version is retired.
+The `v0.2.0` tag stopped in `stage_container` while binding sources (it ran
+`apk add` inside the non-root staged image) after pushing only untagged
+platform images; no immutable image tag or GitHub release exists for it, and
+publication continues with `v0.2.1`.
 
 If either immutable GHCR tag or the GitHub release exists, preserve the failed
 candidate as an incident record. Do not expect a rebuild to complete missing

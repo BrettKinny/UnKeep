@@ -10,11 +10,11 @@ Because UnKeep is still `0.x`, minor releases may include breaking changes.
 
 No changes yet.
 
-## [0.2.0] - 2026-10-21
+## [0.2.1] - 2026-10-21
 
 The first stable release, and the first published image since `0.2.0-rc.4`.
-It includes everything listed under `0.2.0-rc.5`, which was tagged but never
-published.
+It includes everything listed under `0.2.0-rc.5` and `0.2.0`, which were
+tagged but never published.
 
 ### Added
 
@@ -57,6 +57,13 @@ published.
   the note body mid-word.
 - URLs in notes open when activated.
 - Runtime OpenSSL packages are pinned to the patched `3.5.9-r0`.
+
+## [0.2.0] - 2026-10-21 (not published)
+
+This tag stopped at release staging before any image tag or GitHub release
+was created: binding the container sources ran `apk add` inside the staged
+non-root image. Its changes ship in `0.2.1`, which reads the staged image's
+package database as shipped.
 
 ## [0.2.0-rc.5] - 2026-08-18 (not published)
 

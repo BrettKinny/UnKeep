@@ -286,7 +286,14 @@ export function platformImageReference(indexReference, platformDigest) {
   return `${match[1]}@${digest}`;
 }
 
-function inspectPlatform(baseImage, platform, inspectNodeLicense = false) {
+// Base images are inspected after replaying the Dockerfile's pinned runtime
+// upgrade; staged release images already contain it, run as the non-root
+// node user, and must be read exactly as shipped.
+function inspectPlatform(
+  baseImage,
+  platform,
+  { inspectNodeLicense = false, applyRuntimePins = false } = {},
+) {
   const packagePins = parseRuntimePackagePins()
     .map(({ name, version }) => `${name}=${version}`);
   const installed = run('docker', [
@@ -298,8 +305,10 @@ function inspectPlatform(baseImage, platform, inspectNodeLicense = false) {
     'sh',
     baseImage,
     '-c',
-    `apk add --no-cache --upgrade ${packagePins.join(' ')} >/dev/null && `
-      + 'cat /lib/apk/db/installed',
+    applyRuntimePins
+      ? `apk add --no-cache --upgrade ${packagePins.join(' ')} >/dev/null && `
+        + 'cat /lib/apk/db/installed'
+      : 'cat /lib/apk/db/installed',
   ]);
   const nodeVersion = run('docker', [
     'run',
@@ -1058,10 +1067,12 @@ async function buildBundle(options) {
   const amd64 = inspectPlatform(
     platformImageReference(baseImage, oci.platforms.amd64.digest),
     'linux/amd64',
+    { applyRuntimePins: true },
   );
   const arm64 = inspectPlatform(
     platformImageReference(baseImage, oci.platforms.arm64.digest),
     'linux/arm64',
+    { applyRuntimePins: true },
   );
   compareAlpineInventories(amd64.packages, arm64.packages);
   if (amd64.nodeVersion !== arm64.nodeVersion) {
@@ -1722,7 +1733,7 @@ export function bindBundle(options) {
     const runtimeInventory = inspectPlatform(
       `${imageRepository}@${digest}`,
       `linux/${architecture}`,
-      true,
+      { inspectNodeLicense: true },
     );
     compareRuntimeCorrespondence(
       verified.sourceInventory,

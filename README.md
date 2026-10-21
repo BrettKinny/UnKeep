@@ -76,7 +76,7 @@ and covers upgrades and backups:
 
 [Follow the verified release procedure in `docs/self-hosting.md`.](docs/self-hosting.md)
 
-`0.2.0` is the first stable release. Pin an exact version or image digest
+`0.2.1` is the first stable release. Pin an exact version or image digest
 while the project is `0.x`; minor releases may still contain breaking changes.
 
 ### Run on Unraid
