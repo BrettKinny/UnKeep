@@ -24,7 +24,8 @@ const config = {
         'connect-src': ['self', 'https:'],
         'font-src': ['self'],
         'form-action': ['none'],
-        'img-src': ['self', 'data:', 'blob:'],
+        // Link-preview thumbnails load from the linked site over HTTPS.
+        'img-src': ['self', 'data:', 'blob:', 'https:'],
         'object-src': ['none'],
         'script-src': ['self'],
         'script-src-attr': ['none'],

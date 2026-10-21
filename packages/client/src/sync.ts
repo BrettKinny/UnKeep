@@ -1,6 +1,7 @@
 import { MAX_ATTACHMENT_MIME_TYPE_LENGTH, MAX_ATTACHMENT_NAME_LENGTH, MAX_NOTE_ATTACHMENTS, MAX_NOTE_ATTACHMENT_SIZE, decryptAttachment, decryptNote, encryptAttachment, encryptNote, isValidNoteId, normalizeNoteRecord, type EncryptedEnvelope, type Note, type NoteAttachment } from '@unkeep/core';
 import {
   RelayClient,
+  type LinkPreview,
   type RelayAttachmentStageRequest,
   type RelayChange,
   type RelayCompoundNoteReceipt,
@@ -1039,6 +1040,7 @@ export class EncryptedSync {
       return this.sendPending(key,pending);
     });
   }
+  fetchLinkPreview(url:string,signal?:AbortSignal):Promise<LinkPreview|null> { return this.relay.linkPreview(url,signal); }
   async getCursor():Promise<number> { return (await this.state()).cursor; }
   async getQuarantinedRecords():Promise<QuarantinedRecord[]> {
     await this.quarantineOperations;

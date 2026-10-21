@@ -4,6 +4,7 @@
   import { importRecoveryKit } from '@unkeep/core';
   import { approvePairingRequest, clearDeviceAccess, createPairingRequest, inspectPairingCode, resumePairingFinalization, waitForPairing, RelayClient, type DeviceCredential, type PairingSession, type PendingPairingRequest, type RelaySession, type ServiceCredential, type ServiceCredentialScope } from '@unkeep/client';
   import { deviceKeyStore, relaySessionStore } from '$lib/clientStorage';
+  import { linkPreviews } from '$lib/linkPreviews.svelte';
   import { downloadRecoveryKit, readRecoveryKitFile } from '$lib/recoveryKit';
   import { loadLocalVault } from '$lib/vaultBoot';
   import {
@@ -159,7 +160,7 @@
   async function revokeDevice(id:string,name:string){if(!activeSession||id===activeSession.deviceId||!window.confirm(`Revoke ${name}? That device, its known paired descendants, their service credentials, and pending approvals will lose relay access.`))return;credentialsBusy=true;error=null;try{await new RelayClient(activeSession.endpoint,activeSession.credential).revokeDevice(id);await loadCredentials()}catch(e){error=e instanceof Error?e.message:String(e)}finally{credentialsBusy=false}}
   async function revokeService(id:string){if(!activeSession)return;credentialsBusy=true;error=null;try{await new RelayClient(activeSession.endpoint,activeSession.credential).revokeServiceCredential(id);await loadCredentials()}catch(e){error=e instanceof Error?e.message:String(e)}finally{credentialsBusy=false}}
   async function disconnect(){busy=true;error=null;try{accessLifecycle+=1;pairingOperation+=1;abort?.abort();abort=null;await onSignedOut?.();await relaySessionStore.clear();accessInvalidationChannel?.publish('disconnect');activeKey=null;activeSession=null;initializingSession=null;hasLocalKey=await deviceKeyStore.hasDeviceKeys();onManageAccessClose();view='connect'}catch(e){error=e instanceof Error?e.message:String(e)}finally{busy=false}}
-  async function forgetLocalAccess(){if(!window.confirm('Forget this vault key and connection on this browser? Local vault data will stay isolated until you pair that vault again.'))return;busy=true;error=null;try{accessLifecycle+=1;pairingOperation+=1;abort?.abort();abort=null;await onSignedOut?.();await clearDeviceAccess(deviceKeyStore,relaySessionStore);accessInvalidationChannel?.publish('forget');activeKey=null;activeSession=null;initializingSession=null;hasLocalKey=false;onManageAccessClose();notice='Stored vault access cleared. You can now connect a different vault.';view='connect'}catch(e){error=e instanceof Error?e.message:String(e)}finally{busy=false}}
+  async function forgetLocalAccess(){if(!window.confirm('Forget this vault key and connection on this browser? Local vault data will stay isolated until you pair that vault again.'))return;busy=true;error=null;try{accessLifecycle+=1;pairingOperation+=1;abort?.abort();abort=null;await onSignedOut?.();await clearDeviceAccess(deviceKeyStore,relaySessionStore);await linkPreviews.clear().catch(()=>undefined);accessInvalidationChannel?.publish('forget');activeKey=null;activeSession=null;initializingSession=null;hasLocalKey=false;onManageAccessClose();notice='Stored vault access cleared. You can now connect a different vault.';view='connect'}catch(e){error=e instanceof Error?e.message:String(e)}finally{busy=false}}
 </script>
 
 {#if view==='ready'}

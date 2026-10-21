@@ -349,6 +349,22 @@ infrastructure could observe the body even though UnKeep neither stores nor
 renders it. Use the fragment-based iOS Shortcut pattern on platforms or threat
 models where that fallback exposure is unacceptable.
 
+## Link previews
+
+Set `UNKEEP_LINK_PREVIEWS=1` to show a title and thumbnail under note-card
+URLs, like Google Keep. It is off by default because it changes what the relay
+learns: when a card with a link scrolls into view, the PWA sends that URL to
+the relay in plaintext and the relay fetches the page from its own network
+connection. Thumbnails then load directly from the linked site's image host.
+
+Only device credentials can request previews; agent service credentials
+cannot. The relay refuses loopback, private, link-local, CGNAT, and other
+non-public addresses, including after redirects and when any DNS answer is
+private, and only fetches ports 80 and 443. So previews never work for LAN
+URLs such as a router or NAS page. The relay does not store fetched URLs or
+metadata; each browser keeps its own unsynced preview cache, which "Forget
+stored vault key" clears. The relay needs outbound HTTPS for this to work.
+
 ## Terminal access
 
 The image bundles the `unkeep` CLI, but run it as the separate one-shot
@@ -481,5 +497,6 @@ backup, because schema migrations are one-way.
 - Optional variable: `UNKEEP_PAIRING_SOURCE_RATE_LIMIT` (requests per source and window; defaults to 10)
 - Optional variable: `UNKEEP_PAIRING_GLOBAL_RATE_LIMIT` (requests across all sources and window; defaults to 60)
 - Optional variable: `UNKEEP_TRUST_PROXY=1` only when a trusted reverse proxy replaces, rather than appends to, client-supplied `X-Forwarded-For`
+- Optional variable: `UNKEEP_LINK_PREVIEWS=1` to show Keep-style link previews on note cards (the relay needs outbound internet access and sees previewed URLs in plaintext)
 - Reverse proxy: HTTPS is required
 - Tailscale: prefer Tailscale Serve on the Unraid host; avoid an ephemeral sidecar that must reauthenticate after every restart. The Unraid UI may already own port 443, so use a free HTTPS port such as 3443.

@@ -31,6 +31,7 @@ import type { ImportedAttachment } from './keepImporter';
 import type { QuickSendDraft } from './quickSend';
 import { createVaultExport } from './vaultExport';
 import { createConflictCopy } from './conflictCopy';
+import { linkPreviews } from './linkPreviews.svelte';
 import { resolveImportCollisions } from './importCollisions';
 import { commitImportBatch } from './importCommit';
 import {
@@ -415,6 +416,7 @@ export class NoteStore {
     this.syncQuarantineCount = 0;
     const encryptedSync = new EncryptedSync(session, masterKey, clientStorage);
     this.encryptedSync = encryptedSync;
+    linkPreviews.setFetcher(url => encryptedSync.fetchLinkPreview(url));
     try {
       await this.refreshSyncQuarantine(encryptedSync, context);
     } catch {
@@ -443,6 +445,7 @@ export class NoteStore {
     window.removeEventListener('online', this.wakeSync);
     this.unsubscribeRealtime = null;
     this.encryptedSync = null;
+    linkPreviews.setFetcher(null);
     this.syncQuarantineCount = 0;
     this.adapter = null;
     this.durableNoteSnapshots.clear();
@@ -510,16 +513,21 @@ export class NoteStore {
     return Promise.all(notes.map(note => urls.hydrate(note)));
   }
 
-  createNote(content: string = '', title: string = ''): Note {
+  createNote(
+    content: string = '',
+    title: string = '',
+    options: { pinned?: boolean; color?: NoteColor } = {},
+  ): Note {
     const note: Note = {
       id: nanoid(),
       title,
       content,
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      pinned: false,
+      pinned: options.pinned ?? false,
       archived: false,
     };
+    if (options.color && options.color !== 'default') note.color = options.color;
     this.notes.push(note);
     void this.persistNote(note, { expectAbsent: true });
     return note;

@@ -439,4 +439,30 @@ describe('RelayClient errors', () => {
       fetch.mockRestore();
     }
   });
+
+  it('posts link preview requests and keeps only https preview images', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        preview: { title: 'Title', siteName: 'Site', imageUrl: 'https://img.example.com/a.jpg' },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        preview: { title: 'Title', imageUrl: 'javascript:alert(1)' },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ preview: null }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ preview: { title: 42 } }), { status: 200 }));
+    try {
+      const client = new RelayClient('http://localhost:3000', 'credential');
+      await expect(client.linkPreview('https://example.com/'))
+        .resolves.toEqual({ title: 'Title', siteName: 'Site', imageUrl: 'https://img.example.com/a.jpg' });
+      expect(fetch).toHaveBeenCalledWith(
+        'http://localhost:3000/api/v1/link-preview',
+        expect.objectContaining({ method: 'POST', body: JSON.stringify({ url: 'https://example.com/' }) }),
+      );
+      await expect(client.linkPreview('https://example.com/')).resolves.toEqual({ title: 'Title' });
+      await expect(client.linkPreview('https://example.com/')).resolves.toBeNull();
+      await expect(client.linkPreview('https://example.com/')).rejects.toThrow(/invalid link preview/i);
+    } finally {
+      fetch.mockRestore();
+    }
+  });
 });

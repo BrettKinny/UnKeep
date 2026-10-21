@@ -26,6 +26,7 @@ import {
   normalizeRecordEnvelope,
 } from './recordValidation.mjs';
 import { checkStorageQuota } from './storageQuota.mjs';
+import { createLinkPreviewFetcher, LinkPreviewError } from './linkPreview.mjs';
 
 function positiveIntegerSetting(name, fallback, maximum) {
   const configured = Number(process.env[name] || fallback);
@@ -144,6 +145,11 @@ const ATTACHMENT_STAGE_TTL_MS = storageLimitSetting(
   24 * 60 * 60_000,
 );
 const TRUST_PROXY = process.env.UNKEEP_TRUST_PROXY === '1';
+// Off by default: when enabled, the relay fetches note URLs in plaintext on
+// behalf of paired devices. See THREAT_MODEL.md "Link previews".
+const LINK_PREVIEWS_ENABLED = process.env.UNKEEP_LINK_PREVIEWS === '1';
+const MAX_LINK_PREVIEW_BODY_BYTES = 4 * 1024;
+const MAX_CONCURRENT_LINK_PREVIEWS = 4;
 const MAX_ATTACHMENT_SIZE = storageLimitSetting(
   'UNKEEP_MAX_ATTACHMENT_SIZE',
   DEFAULT_MAX_ATTACHMENT_SIZE,
@@ -170,6 +176,17 @@ const setupRateLimiter = createFailedSecretRateLimiter({
   sourceLimit: ADMIN_SOURCE_RATE_LIMIT,
   globalLimit: ADMIN_GLOBAL_RATE_LIMIT,
 });
+const linkPreviewRateLimiter = createPairingRateLimiter({
+  windowMs: 60_000,
+  sourceLimit: 60,
+  globalLimit: 300,
+});
+const fetchLinkPreview = createLinkPreviewFetcher(
+  process.env.NODE_ENV === 'test' && process.env.UNKEEP_TEST_LINK_PREVIEW_ALLOW_ALL === '1'
+    ? { isAllowedAddress: () => true, anyPort: true }
+    : {},
+);
+let activeLinkPreviews = 0;
 const recoveryRateLimiter = createFailedSecretRateLimiter({
   windowMs: ADMIN_RATE_WINDOW_MS,
   sourceLimit: ADMIN_SOURCE_RATE_LIMIT,
@@ -696,6 +713,33 @@ async function api(req, res, url) {
   const credential = requireCredential(req);
   if (!credential) return invalidCredential(req, res);
   if (req.method === 'GET' && url.pathname === '/api/v1/vault') return json(res, 200, { vaultId: instance.id });
+  if (url.pathname === '/api/v1/link-preview') {
+    if (req.method !== 'POST') return json(res, 405, { error: 'method_not_allowed' });
+    if (!LINK_PREVIEWS_ENABLED) return json(res, 404, { error: 'link_previews_disabled' });
+    // Agents never need previews; keeping this device-only means a service
+    // bundle cannot drive outbound relay requests at all.
+    if (credential.kind !== 'device') return json(res, 403, { error: 'device_credential_required' });
+    const value = await body(req, MAX_LINK_PREVIEW_BODY_BYTES);
+    if (typeof value.url !== 'string') return json(res, 400, { error: 'invalid_url' });
+    const limit = linkPreviewRateLimiter.attempt(credential.id);
+    if (!limit.allowed || activeLinkPreviews >= MAX_CONCURRENT_LINK_PREVIEWS) {
+      res.setHeader('retry-after', String(Math.ceil((limit.retryAfterMs ?? 1_000) / 1_000)));
+      return json(res, 429, { error: 'link_preview_rate_limited' });
+    }
+    activeLinkPreviews += 1;
+    try {
+      return json(res, 200, { preview: await fetchLinkPreview(value.url) });
+    } catch (error) {
+      if (!(error instanceof LinkPreviewError)) throw error;
+      if (error.code === 'invalid_url') return json(res, 400, { error: 'invalid_url' });
+      if (error.transient) return json(res, 502, { error: 'link_preview_unavailable' });
+      // The target cannot be previewed. That is a normal, cacheable answer
+      // rather than a relay failure, so clients do not retry it in a loop.
+      return json(res, 200, { preview: null });
+    } finally {
+      activeLinkPreviews -= 1;
+    }
+  }
   const attachmentStage = url.pathname.match(
     /^\/api\/v1\/note-mutations\/([A-Za-z0-9_-]+)\/attachments\/([A-Za-z0-9_-]+)$/,
   );

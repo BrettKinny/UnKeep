@@ -18,6 +18,13 @@
   import ColorPicker from './ColorPicker.svelte';
   import PinIcon from './PinIcon.svelte';
   import LinkedText from './LinkedText.svelte';
+  import LinkPreviewCard from './LinkPreviewCard.svelte';
+  import {
+    hasPreviewContent,
+    linkPreviews,
+    PREVIEW_REQUEST_DELAY_MS,
+    previewUrls,
+  } from '$lib/linkPreviews.svelte';
 
   function normalizeLabels(value: string): string[] {
     return [...new Set(value.split(',').map(label => label.trim()).filter(Boolean))];
@@ -28,6 +35,19 @@
   }
 
   let { note, onClose, readOnly = false }: { note: Note; onClose: () => void; readOnly?: boolean } = $props();
+
+  let linkUrls = $derived(previewUrls(note));
+  let linkPreviewItems = $derived(linkUrls.flatMap(url => {
+    const preview = linkPreviews.previews.get(url);
+    return hasPreviewContent(preview) ? [{ url, preview }] : [];
+  }));
+  // Trashed notes show cached previews but never trigger a fetch.
+  $effect(() => {
+    const pending = linkUrls;
+    if (readOnly || !pending.length) return;
+    const timer = setTimeout(() => linkPreviews.request(pending), PREVIEW_REQUEST_DELAY_MS);
+    return () => clearTimeout(timer);
+  });
 
   // svelte-ignore state_referenced_locally
   let content = $state(note.content);
@@ -516,11 +536,44 @@
           placeholder="Labels, separated by commas"
         />
       {/if}
+      {#if linkPreviewItems.length}
+        <div class="mt-4 grid gap-2">
+          {#each linkPreviewItems as { url, preview } (url)}
+            <LinkPreviewCard {url} {preview} variant="editor" />
+          {/each}
+        </div>
+      {/if}
     </div>
 
     <!-- Toolbar -->
     <div class="flex items-center gap-1 p-3 border-t border-border/30">
       {#if !readOnly}
+      <button
+        onclick={() => noteStore.togglePin(note.id)}
+        class="p-2 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors"
+        title={note.pinned ? 'Unpin' : 'Pin'}
+        aria-label={note.pinned ? 'Unpin' : 'Pin'}
+      >
+        <PinIcon filled={note.pinned} />
+      </button>
+      <div class="relative">
+        <button
+          onclick={() => showColorPicker = !showColorPicker}
+          class="p-2 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors"
+          title="Change color"
+          aria-label="Change color"
+        >
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01"/></svg>
+        </button>
+        {#if showColorPicker}
+          <div class="absolute bottom-full left-0 mb-1 z-10">
+            <ColorPicker
+              selected={note.color ?? 'default'}
+              onSelect={(color) => { noteStore.setColor(note.id, color); showColorPicker = false; }}
+            />
+          </div>
+        {/if}
+      </div>
       <button
         type="button"
         onclick={() => void toggleEditMode()}
@@ -559,32 +612,6 @@
         <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
       </button>
       {/if}
-      <div class="relative">
-        <button
-          onclick={() => showColorPicker = !showColorPicker}
-          class="p-2 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors"
-          title="Change color"
-          aria-label="Change color"
-        >
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01"/></svg>
-        </button>
-        {#if showColorPicker}
-          <div class="absolute bottom-full left-0 mb-1 z-10">
-            <ColorPicker
-              selected={note.color ?? 'default'}
-              onSelect={(color) => { noteStore.setColor(note.id, color); showColorPicker = false; }}
-            />
-          </div>
-        {/if}
-      </div>
-      <button
-        onclick={() => noteStore.togglePin(note.id)}
-        class="p-2 rounded-full hover:bg-black/10 text-on-surface-muted hover:text-on-surface transition-colors"
-        title={note.pinned ? 'Unpin' : 'Pin'}
-        aria-label={note.pinned ? 'Unpin' : 'Pin'}
-      >
-        <PinIcon filled={note.pinned} />
-      </button>
       <div class="relative">
         <button
           bind:this={shareButtonEl}
