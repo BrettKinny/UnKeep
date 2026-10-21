@@ -28,6 +28,10 @@ published.
   `UNKEEP_LINK_PREVIEWS=1`. The relay fetches only public destinations, with
   bounds on time, size, redirects, rate, and concurrency. Previews are cached
   per browser and never synced.
+- **Keyboard shortcuts** — `?` lists them, `/` focuses search, `n` starts a
+  note, arrow keys move between notes, `Enter` opens one, `p` pins it, and
+  `Delete` moves it to Trash with Undo. Shortcuts never permanently delete
+  notes, and `Enter` keeps its normal action on a focused button or link.
 - **Pin and colour controls** while composing a new note, with the toolbar
   order aligned to the editor.
 - **Stable releases** — `vX.Y.Z` tags publish a non-prerelease GitHub release
