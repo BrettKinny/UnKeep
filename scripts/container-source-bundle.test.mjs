@@ -27,6 +27,7 @@ import {
   platformImageReference,
   requireDescriptorDigest,
   validateArchiveListings,
+  validateVersion,
   verifyBinding,
   verifyBundle,
 } from './container-source-bundle.mjs';
@@ -205,6 +206,14 @@ function verifyFixtureOptions(fixture) {
     'metadata-sha': sha256(fixture.metadataPath),
   };
 }
+
+test('accepts stable and release-candidate versions only', () => {
+  assert.equal(validateVersion('0.2.0'), '0.2.0');
+  assert.equal(validateVersion('0.2.0-rc.4'), '0.2.0-rc.4');
+  for (const version of ['0.2', '00.2.0', '0.2.0-beta.1', '0.2.0-rc.01', 'v0.2.0', '0.2.0/x']) {
+    assert.throws(() => validateVersion(version), /Invalid release version/);
+  }
+});
 
 test('parses only source identity fields from an Alpine installed database', () => {
   assert.deepEqual(parseInstalledDatabase(installed), [

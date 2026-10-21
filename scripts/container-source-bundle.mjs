@@ -53,10 +53,10 @@ function validateToken(value, pattern, label) {
   return value;
 }
 
-function validateVersion(value) {
+export function validateVersion(value) {
   return validateToken(
     value,
-    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-rc\.(0|[1-9]\d*)$/,
+    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-rc\.(0|[1-9]\d*))?$/,
     'release version',
   );
 }

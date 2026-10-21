@@ -202,7 +202,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-## devalue@5.8.2
+## devalue@5.9.3
 
 License: MIT
 Project: sveltejs/devalue
@@ -689,7 +689,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## vite@6.4.3
+## vite@6.4.5
 
 License: MIT
 Project: https://vite.dev
