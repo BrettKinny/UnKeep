@@ -482,17 +482,22 @@ applies these settings. Use them directly if you create the container by hand.
   before updating)
 - Web UI / container port: `3000`
 - Persistent path: `/data`, mapped to `/mnt/user/appdata/unkeep`
-- User: add `--user 99:100` to **Extra Parameters** so the relay runs as
-  Unraid's `nobody:users` and owns its appdata like other containers. The
-  directory must be owned by that user before first start:
-  `mkdir -p /mnt/user/appdata/unkeep && chown 99:100 /mnt/user/appdata/unkeep`.
-  If the relay cannot write it, it stops at startup with an
-  `UNKEEP_DATA_DIR is not usable` message naming the UID and GID to `chown` to.
-  An existing installation that ran as the image's default UID 1000 needs a
-  one-time `chown -R 99:100` of its data directory, taken while the container
-  is stopped.
-- Hardening: also add `--init --read-only --tmpfs /tmp:size=16m,mode=1777
-  --cap-drop ALL --security-opt no-new-privileges` to **Extra Parameters**
+- User: container variables `PUID=99` and `PGID=100` (Unraid's
+  `nobody:users`), with **Extra Parameters**
+  `--user 0:0 --read-only --tmpfs /tmp:size=16m,mode=1777 --cap-drop ALL
+  --cap-add CHOWN --cap-add SETUID --cap-add SETGID --security-opt no-new-privileges`.
+  No manual `chown` is needed. The relay starts as root only long enough to
+  give `/data` to `PUID:PGID`, which covers a freshly created appdata folder
+  and one that an earlier container owned as UID 1000. It then permanently
+  switches to that user before opening the database. Switching away from root
+  clears every capability, so the running relay is unprivileged and has an
+  empty effective capability set, as in the Compose deployment. Leave out
+  `--init`: the relay handles `SIGTERM` itself and starts no child processes,
+  so it can run as PID 1 and nothing in the container stays root.
+  `PUID`/`PGID` must be non-zero. Without a root start they must match the
+  running user; otherwise the relay refuses to start. Without
+  `--cap-add CHOWN` (or `SETUID`/`SETGID`) it stops with a message naming the
+  missing capability.
 - Container variable: `UNKEEP_HOST=0.0.0.0` (the official image already sets
   this explicitly; restrict exposure with the host port mapping or container
   network)

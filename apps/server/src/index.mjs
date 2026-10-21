@@ -6,6 +6,7 @@ import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { completeSensitiveDataScrub, migrateDatabase } from './migrations.mjs';
 import { prepareDataDirectory } from './dataDirectory.mjs';
+import { adoptDataDirectory, dropPrivileges, resolveRuntimeIdentity } from './runtimeIdentity.mjs';
 import { assertJsonContentType, readJsonObject } from './httpBody.mjs';
 import { applySecurityHeaders } from './httpSecurity.mjs';
 import { listenHostForUrl, validatedListenHost } from './networkConfig.mjs';
@@ -194,6 +195,17 @@ const recoveryRateLimiter = createFailedSecretRateLimiter({
   globalLimit: ADMIN_GLOBAL_RATE_LIMIT,
 });
 process.umask(0o077);
+// Started as root (the Unraid template): hand the data directory to
+// PUID/PGID, then drop to them before touching the database.
+const RUNTIME_IDENTITY = typeof process.getuid === 'function'
+  ? resolveRuntimeIdentity(process.env, { uid: process.getuid(), gid: process.getgid() })
+  : null;
+if (RUNTIME_IDENTITY) {
+  if (adoptDataDirectory(DATA_DIR, RUNTIME_IDENTITY)) {
+    console.log(`Gave ${DATA_DIR} to UID ${RUNTIME_IDENTITY.uid} GID ${RUNTIME_IDENTITY.gid}`);
+  }
+  dropPrivileges(RUNTIME_IDENTITY);
+}
 const DATABASE_PATH = join(DATA_DIR, 'unkeep.sqlite');
 prepareDataDirectory(DATA_DIR, DATABASE_PATH);
 const db = new DatabaseSync(DATABASE_PATH);
