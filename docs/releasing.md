@@ -1,17 +1,20 @@
 # Releasing UnKeep
 
-Release candidates are produced by `.github/workflows/release.yml`. The
-workflow is tag-gated: a manual dispatch validates a candidate without
-publishing, while an annotated `vX.Y.Z-rc.N` tag enters one serialized
-publication chain.
+Releases are produced by `.github/workflows/release.yml`. The workflow is
+tag-gated: a manual dispatch validates a candidate without publishing, while an
+annotated `vX.Y.Z-rc.N` (prerelease) or `vX.Y.Z` (stable) tag enters one
+serialized publication chain.
 
 The release surface is GitHub and GHCR only. The workflow publishes:
 
 - `linux/amd64` and `linux/arm64` images to
   `ghcr.io/brettkinny/unkeep`;
 - immutable-by-policy image tags for the exact version and source SHA;
+- for stable releases only, the moving `X.Y` and `latest` tags, each moved only
+  when no higher stable release exists in that line, so a backport cannot
+  regress them (Unraid and other tag-watching hosts follow these);
 - OCI SBOM and provenance attestations alongside the GHCR image; and
-- a prerelease GitHub Release containing the image digest, exported amd64
+- a GitHub Release (marked prerelease for `-rc.N` versions) containing the image digest, exported amd64
   SPDX SBOM, `compose.release.yaml`, `THIRD_PARTY_NOTICES.md`, the preserved
   Node runtime license, the exact container corresponding-source archive and
   metadata, and `SHA256SUMS`.
@@ -71,7 +74,9 @@ squashed public history.
    `BrettKinny/UnKeep:container-compliance:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32:v1`.
    The digest is bound to the Dockerfile's pinned Node/Alpine base image. Any
    base-image change requires a new reviewed bundle and sentinel value.
-7. Restrict the environment to selected tags matching `v*-rc.*`.
+7. Restrict the environment to selected tags matching `v*-rc.*` and
+   `v*.*.*` (the workflow itself rejects any tag that is not exactly
+   `vX.Y.Z` or `vX.Y.Z-rc.N`).
 8. Require maintainer approval for deployments, prevent self-review where the
    repository plan permits it, and disable administrator bypass if practical.
 9. Protect release tags with a repository ruleset so only maintainers can
@@ -114,9 +119,9 @@ The guards are configuration interlocks, not authentication. They do not
 replace tag protection, required reviewers, release immutability, or the
 documented source and notice review.
 
-## Prepare and validate a candidate
+## Prepare and validate a release
 
-Update the candidate version consistently in the workspace manifests, CLI
+Update the release version consistently in the workspace manifests, CLI
 version, release Compose image reference, and curated `CHANGELOG.md` section.
 Run the checks from the reviewed source commit:
 
@@ -143,7 +148,7 @@ in its `ref` input. It must not create a release or push a release image.
 For publication, create an annotated tag from a commit contained in `main`:
 
 ```sh
-version=0.2.0-rc.4
+version=0.2.0
 git tag --sign --annotate "v$version" -m "UnKeep $version"
 git push origin "v$version"
 ```
@@ -164,14 +169,16 @@ record bind each step to the previously verified candidate.
    and notices, and stages the release assets. A registry error fails closed.
 2. `promote_image` creates or validates the GitHub prerelease draft and uploads
    the checked assets, then promotes only the verified platform digests to the
-   version and source-SHA tags and attaches provenance attestations. One token
+   version and source-SHA tags (plus the eligible moving tags for a stable
+   release) and attaches provenance attestations. One token
    owns the draft-and-promotion transaction; the job rechecks the source
    binding, draft, labels, digest, and anonymous read path immediately before
    irreversible writes.
 3. `finalize_release` verifies the promoted digest, attestations, checksums,
    release metadata, and every local asset against the immutable release
    attestation before clearing draft state and publishing the GitHub
-   prerelease.
+   release. A stable release that moved `latest` is also marked as GitHub's
+   latest release.
 
 The release stays a draft until the final verification succeeds. A later
 failure therefore leaves a maintainer-visible recovery record instead of an
@@ -179,10 +186,10 @@ incomplete public GitHub release.
 
 ## Verify published artifacts
 
-Replace the version and source SHA below for a later candidate:
+Replace the version and source SHA below for a later release:
 
 ```sh
-version=0.2.0-rc.4
+version=0.2.0
 docker buildx imagetools inspect "ghcr.io/brettkinny/unkeep:$version"
 gh attestation verify \
   "oci://ghcr.io/brettkinny/unkeep:$version" \
@@ -210,7 +217,8 @@ reproducibility matters.
 ## Failure and rollback policy
 
 Versioned GHCR tags, source-SHA GHCR tags, annotated release tags, and
-published GitHub releases are immutable by policy. Do not delete, overwrite,
+published GitHub releases are immutable by policy. The moving `X.Y` and
+`latest` tags are the only image tags the workflow ever rewrites. Do not delete, overwrite,
 or recreate any of them.
 
 A tag-triggered run may be retried for the same candidate only when it stopped
@@ -224,7 +232,9 @@ The failed `v0.2.0-rc.2` and `v0.2.0-rc.3` attempts are preserved as incident
 records. The former exposed cross-job draft visibility; the latter exposed a
 QEMU crash while building arm64 application assets. Their drafts and untagged
 staged images remain unpublished. Publication continues with
-`v0.2.0-rc.4`; do not move or reuse either earlier tag.
+`v0.2.0-rc.4`; do not move or reuse either earlier tag. The `v0.2.0-rc.5`
+tag failed validation before any external write (its CLI manifest still
+reported `0.2.0-rc.4`), so it published nothing and its version is retired.
 
 If either immutable GHCR tag or the GitHub release exists, preserve the failed
 candidate as an incident record. Do not expect a rebuild to complete missing

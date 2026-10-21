@@ -112,6 +112,8 @@ release_sha="$(git rev-parse HEAD)"
 docker compose --env-file .env up --build -d
 ```
 
+## Serve it over HTTPS
+
 The official image explicitly binds the relay to `0.0.0.0` inside its isolated
 network namespace so its published port works. Compose publishes port 3000 only
 to host `127.0.0.1` by default. Put that loopback
@@ -471,8 +473,26 @@ backup, because schema migrations are one-way.
 
 ## Unraid settings
 
+The Unraid Community Applications template
+([BrettKinny/unraid-templates](https://github.com/BrettKinny/unraid-templates))
+applies these settings. Use them directly if you create the container by hand.
+
+- Image: `ghcr.io/brettkinny/unkeep:latest` (or `:0.2` to stay on one minor
+  line; `0.x` minor releases may include breaking changes, so back up `/data`
+  before updating)
 - Web UI / container port: `3000`
-- Persistent path: `/data`
+- Persistent path: `/data`, mapped to `/mnt/user/appdata/unkeep`
+- User: add `--user 99:100` to **Extra Parameters** so the relay runs as
+  Unraid's `nobody:users` and owns its appdata like other containers. The
+  directory must be owned by that user before first start:
+  `mkdir -p /mnt/user/appdata/unkeep && chown 99:100 /mnt/user/appdata/unkeep`.
+  If the relay cannot write it, it stops at startup with an
+  `UNKEEP_DATA_DIR is not usable` message naming the UID and GID to `chown` to.
+  An existing installation that ran as the image's default UID 1000 needs a
+  one-time `chown -R 99:100` of its data directory, taken while the container
+  is stopped.
+- Hardening: also add `--init --read-only --tmpfs /tmp:size=16m,mode=1777
+  --cap-drop ALL --security-opt no-new-privileges` to **Extra Parameters**
 - Container variable: `UNKEEP_HOST=0.0.0.0` (the official image already sets
   this explicitly; restrict exposure with the host port mapping or container
   network)
@@ -498,5 +518,9 @@ backup, because schema migrations are one-way.
 - Optional variable: `UNKEEP_PAIRING_GLOBAL_RATE_LIMIT` (requests across all sources and window; defaults to 60)
 - Optional variable: `UNKEEP_TRUST_PROXY=1` only when a trusted reverse proxy replaces, rather than appends to, client-supplied `X-Forwarded-For`
 - Optional variable: `UNKEEP_LINK_PREVIEWS=1` to show Keep-style link previews on note cards (the relay needs outbound internet access and sees previewed URLs in plaintext)
-- Reverse proxy: HTTPS is required
+- HTTPS is required. Opening `http://<server-ip>:3000` (including the Unraid
+  **WebUI** button) shows an "UnKeep needs HTTPS" page instead of the vault,
+  because browsers withhold Web Crypto from plain-HTTP origins. Use Tailscale
+  Serve, a reverse proxy such as Nginx Proxy Manager or SWAG, or Cloudflare
+  Tunnel.
 - Tailscale: prefer Tailscale Serve on the Unraid host; avoid an ephemeral sidecar that must reauthenticate after every restart. The Unraid UI may already own port 443, so use a free HTTPS port such as 3443.

@@ -1,10 +1,11 @@
 import { createServer } from 'node:http';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { chmodSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { chmodSync, readFileSync, statSync } from 'node:fs';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { completeSensitiveDataScrub, migrateDatabase } from './migrations.mjs';
+import { prepareDataDirectory } from './dataDirectory.mjs';
 import { assertJsonContentType, readJsonObject } from './httpBody.mjs';
 import { applySecurityHeaders } from './httpSecurity.mjs';
 import { listenHostForUrl, validatedListenHost } from './networkConfig.mjs';
@@ -193,10 +194,8 @@ const recoveryRateLimiter = createFailedSecretRateLimiter({
   globalLimit: ADMIN_GLOBAL_RATE_LIMIT,
 });
 process.umask(0o077);
-mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
-chmodSync(DATA_DIR, 0o700);
-
 const DATABASE_PATH = join(DATA_DIR, 'unkeep.sqlite');
+prepareDataDirectory(DATA_DIR, DATABASE_PATH);
 const db = new DatabaseSync(DATABASE_PATH);
 chmodSync(DATABASE_PATH, 0o600);
 db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
