@@ -365,6 +365,34 @@ test('fetches multiple immutable source commits in one shallow transaction', () 
   }
 });
 
+test('fetches source commits from a fallback remote after the primary fails', () => {
+  const root = mkdtempSync(join(tmpdir(), 'unkeep-source-git-fallback-test-'));
+  const mirror = join(root, 'mirror');
+  const checkout = join(root, 'checkout');
+  try {
+    mkdirSync(mirror);
+    git(mirror, ['init', '--quiet']);
+    git(mirror, ['config', 'user.email', 'fixture@example.invalid']);
+    git(mirror, ['config', 'user.name', 'Fixture']);
+    writeFileSync(join(mirror, 'value'), 'mirrored\n');
+    git(mirror, ['add', 'value']);
+    git(mirror, ['commit', '--quiet', '-m', 'mirrored']);
+    const commit = git(mirror, ['rev-parse', 'HEAD']);
+    mkdirSync(checkout);
+    git(checkout, ['init', '--quiet']);
+    git(checkout, ['remote', 'add', 'origin', join(root, 'unreachable')]);
+
+    assert.throws(() => fetchCommits(checkout, [commit]), /All source Git remotes failed/);
+    fetchCommits(checkout, [commit], [mirror]);
+    assert.equal(
+      git(checkout, ['rev-parse', `refs/unkeep-sources/${commit}^{commit}`]),
+      commit,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('uses an allowlisted fallback only after primary failure and verifies it', async () => {
   const root = mkdtempSync(join(tmpdir(), 'unkeep-source-fallback-test-'));
   const destination = join(root, 'zlib-1.3.1.tar.gz');

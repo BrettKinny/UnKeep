@@ -28,6 +28,12 @@ const DOCKER_NODE_RECIPE_COMMIT =
   'bc0a422bce0f729dd85790639d9f1918143f1235';
 const APORTS_REPOSITORY =
   'https://gitlab.alpinelinux.org/alpine/aports.git';
+// gitlab.alpinelinux.org answers GitHub-hosted runners with HTTP 418. Alpine's
+// official GitHub mirror serves the same Git objects, and every fetched commit
+// is still checked against its exact requested ID.
+const APORTS_FALLBACK_REPOSITORIES = [
+  'https://github.com/alpinelinux/aports.git',
+];
 const SPDX_LICENSE_LIST_REPOSITORY =
   'https://github.com/spdx/license-list-data.git';
 const SPDX_LICENSE_LIST_COMMIT =
@@ -431,19 +437,30 @@ function fetchCommit(repository, commit) {
   }
 }
 
-export function fetchCommits(repository, commits) {
+export function fetchCommits(repository, commits, fallbackRemotes = []) {
   const uniqueCommits = [...new Set(commits.map(commit =>
     validateGitCommit(commit, 'source Git commit')))];
   if (uniqueCommits.length === 0) fail('No source Git commits were requested');
   const reference = commit => `refs/unkeep-sources/${commit}`;
-  run('git', [
-    'fetch',
-    '--quiet',
-    '--depth=1',
-    '--no-tags',
-    'origin',
-    ...uniqueCommits.map(commit => `${commit}:${reference(commit)}`),
-  ], { cwd: repository });
+  const errors = [];
+  let fetched = false;
+  for (const remote of ['origin', ...fallbackRemotes]) {
+    try {
+      run('git', [
+        'fetch',
+        '--quiet',
+        '--depth=1',
+        '--no-tags',
+        remote,
+        ...uniqueCommits.map(commit => `${commit}:${reference(commit)}`),
+      ], { cwd: repository });
+      fetched = true;
+      break;
+    } catch (error) {
+      errors.push(`${remote}: ${error.message}`);
+    }
+  }
+  if (!fetched) fail(`All source Git remotes failed\n${errors.join('\n')}`);
   for (const commit of uniqueCommits) {
     const actual = run('git', [
       'rev-parse',
@@ -1086,6 +1103,7 @@ async function buildBundle(options) {
     fetchCommits(
       aportsRepository,
       origins.map(item => item.aportsCommit),
+      APORTS_FALLBACK_REPOSITORIES,
     );
     for (const item of origins) {
       const recipePath = listRecipePath(
