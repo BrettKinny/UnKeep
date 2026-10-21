@@ -264,7 +264,7 @@ jobs:
 
       - name: Preserve Playwright diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-playwright-${{ needs.prepare.outputs.release_sha }}
           path: test-results/playwright
@@ -468,7 +468,7 @@ jobs:
 
       - name: Upload exact container source assets
         id: upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: container-source-assets-${{ needs.prepare.outputs.version }}-${{ needs.prepare.outputs.release_sha }}
           path: container-source-assets
@@ -575,7 +575,7 @@ jobs:
           upload-release-assets: false
 
       - name: Upload dry-run compliance assets
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-dry-run-${{ needs.prepare.outputs.release_sha }}
           path: |
@@ -946,7 +946,7 @@ jobs:
           echo "sha256=$(sha256sum "$RUNNER_TEMP/staged-release-assets.sha256" | awk '{ print $1 }')" >> "$GITHUB_OUTPUT"
 
       - name: Preserve the verified staging bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: staged-release-assets-${{ env.VERSION }}
           path: |
@@ -957,7 +957,7 @@ jobs:
           retention-days: 90
 
       - name: Preserve the staging bundle manifest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: staged-release-manifest-${{ env.VERSION }}
           path: ${{ runner.temp }}/staged-release-assets.sha256
@@ -1280,7 +1280,7 @@ jobs:
           } > "promotion-assets/unkeep-$VERSION-image-digest.txt"
 
       - name: Preserve the promoted image identity
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: promoted-image-${{ env.VERSION }}
           path: promotion-assets
@@ -1496,7 +1496,7 @@ jobs:
             <(find release-assets -maxdepth 1 -type f -printf '%f\n' | sort)
 
       - name: Preserve the final release bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-assets-${{ env.VERSION }}
           path: |
