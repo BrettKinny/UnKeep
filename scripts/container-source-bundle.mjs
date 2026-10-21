@@ -799,6 +799,10 @@ async function fetchAlpineDistfiles(bundleRoot, origins) {
     '  builder=sourcebuilder',
     'fi',
     'mkdir -p /tmp/aports-work',
+    // Alpine's distfile cache holds the exact archives its builders used, so
+    // abuild tries it before upstream hosts that refuse CI runners;
+    // abuild verify then checks every file against the APKBUILD sha512sums.
+    'distfiles_mirror="https://distfiles.alpinelinux.org/distfiles/v$(cut -d. -f1,2 /etc/alpine-release)"',
     'while IFS= read -r origin; do',
     '  case "$origin" in (*[!A-Za-z0-9+_.-]*|\"\") exit 70;; esac',
     '  work="/tmp/aports-work/$origin"',
@@ -807,7 +811,7 @@ async function fetchAlpineDistfiles(bundleRoot, origins) {
     '  chown -R "$HOST_UID" "$work" "/bundle/alpine/$origin/distfiles"',
     '  for architecture in x86_64 aarch64; do',
     '    attempt=1',
-    '    while ! su "$builder" -s /bin/sh -c "cd \\"$work\\" && CARCH=\\"$architecture\\" SRCDEST=\\"/bundle/alpine/$origin/distfiles\\" abuild fetch"; do',
+    '    while ! su "$builder" -s /bin/sh -c "cd \\"$work\\" && export CARCH=\\"$architecture\\" SRCDEST=\\"/bundle/alpine/$origin/distfiles\\" DISTFILES_MIRROR=\\"$distfiles_mirror\\" && abuild fetch && abuild verify"; do',
     '      if [ "$attempt" -ge 3 ]; then exit 71; fi',
     '      sleep "$((attempt * 5))"',
     '      attempt="$((attempt + 1))"',
