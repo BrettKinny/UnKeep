@@ -531,7 +531,19 @@ test.describe.serial('UnKeep browser vault', () => {
     await expect(page.getByRole('menu')).toBeHidden();
     await expect(active).toHaveAttribute('data-note-id', firstActive);
 
-    // Enter opens the selected note, Escape closes it.
+    // Enter on a focused control keeps its native activation.
+    await expect(page.getByRole('button', { name: 'Open UnKeep menu' })).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('menu')).toBeVisible();
+    await expect(page.getByRole('dialog', { name: 'Edit note' })).toBeHidden();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('menu')).toBeHidden();
+
+    // Arrow keys carry real focus to the selected card, so Enter opens it.
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('ArrowLeft');
+    await expect(active).toHaveAttribute('data-note-id', firstActive);
+    await expect(active.getByRole('button', { name: /^Edit note:/ })).toBeFocused();
     await page.keyboard.press('Enter');
     await expect(page.getByRole('dialog', { name: 'Edit note' })).toBeVisible();
     await page.keyboard.press('Escape');

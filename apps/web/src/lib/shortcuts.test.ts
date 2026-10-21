@@ -61,6 +61,12 @@ describe('matchShortcut', () => {
     expect(matchShortcut({ key: 'ArrowDown' })?.action).toBe('move-down');
   });
 
+  it('leaves Enter to a focused button or link', () => {
+    expect(matchShortcut({ key: 'Enter' }, { onActivatableControl: true, hasSelection: true })).toBeNull();
+    expect(matchShortcut({ key: 'e' }, { onActivatableControl: true, hasSelection: true })?.action).toBe('open');
+    expect(matchShortcut({ key: 'Enter' }, { hasSelection: true })?.action).toBe('open');
+  });
+
   it('suppresses everything but Escape while typing', () => {
     expect(matchShortcut({ key: 'n' }, { editingText: true })).toBeNull();
     expect(matchShortcut({ key: 'ArrowDown' }, { editingText: true })).toBeNull();

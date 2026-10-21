@@ -15,7 +15,7 @@
   import { listPendingShares, removePendingShares } from '$lib/shareTarget';
   import { toastStore } from '$lib/toast.svelte';
   import { trashNoteWithUndo } from '$lib/noteActions';
-  import { isTextEntryTarget, matchShortcut, type ShortcutAction } from '$lib/shortcuts';
+  import { isActivatableTarget, isTextEntryTarget, matchShortcut, type ShortcutAction } from '$lib/shortcuts';
   import { nextNoteId, readNoteRects, type Direction } from '$lib/gridNavigation';
 
   type ContentView = 'notes' | 'trash';
@@ -51,8 +51,29 @@
 
   onMount(() => {
     window.addEventListener('keydown', handleGlobalKeydown);
-    return () => window.removeEventListener('keydown', handleGlobalKeydown);
+    window.addEventListener('focusin', followFocusedNote);
+    return () => {
+      window.removeEventListener('keydown', handleGlobalKeydown);
+      window.removeEventListener('focusin', followFocusedNote);
+    };
   });
+
+  // Keep the keyboard selection on the card that holds real focus (Tab, click),
+  // so Enter on a focused card and the shortcut selection always agree.
+  function followFocusedNote(event: FocusEvent) {
+    if (!(event.target instanceof HTMLElement)) return;
+    const id = event.target.closest<HTMLElement>('[data-note-id]')?.dataset.noteId;
+    if (id) activeNoteId = id;
+  }
+
+  /** Select a note and move focus to its card's open button. */
+  function focusNote(id: string | null) {
+    activeNoteId = id;
+    if (!id) return;
+    const card = document.querySelector<HTMLElement>(`[data-note-id="${CSS.escape(id)}"]`);
+    card?.scrollIntoView({ block: 'nearest' });
+    card?.querySelector<HTMLButtonElement>(':scope > button')?.focus({ preventScroll: true });
+  }
 
   function handleGlobalKeydown(event: KeyboardEvent) {
     // Dialogs handle their own Escape and mark it handled; never act twice.
@@ -61,6 +82,7 @@
     const editingText = isTextEntryTarget(event.target);
     const shortcut = matchShortcut(event, {
       editingText,
+      onActivatableControl: isActivatableTarget(event.target),
       hasSelection: activeNoteId !== null,
       modalOpen: Boolean(editingNote) || showImporter || showAccessManager || showShortcuts
         || deleteConfirmation !== null || menuOpen,
@@ -113,11 +135,7 @@
 
   function moveSelection(direction: Direction) {
     const next = nextNoteId(readNoteRects(), activeNoteId, direction);
-    if (!next) return;
-    activeNoteId = next;
-    document
-      .querySelector(`[data-note-id="${CSS.escape(next)}"]`)
-      ?.scrollIntoView({ block: 'nearest' });
+    if (next) focusNote(next);
   }
 
   function openActive() {
@@ -132,7 +150,7 @@
     const rects = readNoteRects();
     const below = nextNoteId(rects, id, 'down');
     const successor = below && below !== id ? below : nextNoteId(rects, id, 'up');
-    activeNoteId = successor && successor !== id ? successor : null;
+    focusNote(successor && successor !== id ? successor : null);
     await trashNoteWithUndo(id);
   }
 

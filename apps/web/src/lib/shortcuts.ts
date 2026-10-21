@@ -81,9 +81,22 @@ export function isTextEntryTarget(target: EventTarget | null): boolean {
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
 }
 
+/**
+ * True when the event target is a control whose native activation key is
+ * Enter (buttons, links, ARIA widgets), so Enter must not be taken over.
+ */
+export function isActivatableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.closest(
+    'button, a[href], summary, [role="button"], [role="link"], [role="menuitem"], [role="checkbox"], [role="switch"], [role="tab"], [role="option"]',
+  ) !== null;
+}
+
 export interface MatchOptions {
   /** Focus is in a text field: only `Escape` still resolves. */
   editingText?: boolean;
+  /** Focus is on a button or link: Enter keeps its native activation. */
+  onActivatableControl?: boolean;
   /** A note is currently selected in the grid. */
   hasSelection?: boolean;
   /** A modal or menu owns the keyboard: only `Escape` still resolves. */
@@ -106,6 +119,7 @@ export function matchShortcut(event: ShortcutKeyEvent, options: MatchOptions = {
 
   // While typing or inside a modal, Escape is the only shortcut left.
   if ((options.editingText || options.modalOpen) && match.action !== 'dismiss') return null;
+  if (event.key === 'Enter' && options.onActivatableControl) return null;
   if (match.requiresSelection && !options.hasSelection) return null;
   if (match.notInTrash && options.inTrash) return null;
 
