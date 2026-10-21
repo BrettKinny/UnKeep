@@ -15,6 +15,15 @@
   let draftEl: HTMLDivElement | undefined = $state();
   let inputEl: HTMLTextAreaElement | undefined = $state();
 
+  /** Expand the composer and put the cursor in it (also used by the `n` shortcut). */
+  export async function focusInput() {
+    expanded = true;
+    // Focus once the textarea mounts, before input events can reach the
+    // title field; a timer could fire mid-typing and steal the text.
+    await tick();
+    inputEl?.focus();
+  }
+
   function handleClose() {
     if (content.trim() || title.trim()) {
       noteStore.createNote(content.trim(), title.trim(), { pinned, color });
@@ -124,13 +133,7 @@
       <button
         type="button"
         aria-label="Create a new note"
-        onclick={async () => {
-          expanded = true;
-          // Focus once the textarea mounts, before input events can reach the
-          // title field; a timer could fire mid-typing and steal the text.
-          await tick();
-          inputEl?.focus();
-        }}
+        onclick={focusInput}
         class="w-full cursor-text rounded-lg p-4 text-left text-on-surface-muted"
       >
         Take a note...

@@ -22,3 +22,41 @@ describe('main page responsive shell', () => {
     expect(source).toContain('This cannot be undone.');
   });
 });
+
+describe('main page keyboard shortcuts', () => {
+  it('registers and tears down a single global keydown listener', () => {
+    expect(source).toContain("window.addEventListener('keydown', handleGlobalKeydown)");
+    expect(source).toContain("window.removeEventListener('keydown', handleGlobalKeydown)");
+  });
+
+  it('defers to dialogs that already handled the key', () => {
+    expect(source).toContain('if (event.defaultPrevented || !vaultReady) return;');
+  });
+
+  it('treats every dialog and the app menu as owning the keyboard', () => {
+    expect(source).toMatch(
+      /modalOpen: Boolean\(editingNote\) \|\| showImporter \|\| showAccessManager \|\| showShortcuts\s*\|\| deleteConfirmation !== null \|\| menuOpen/,
+    );
+    expect(source).toContain('bind:open={menuOpen}');
+  });
+
+  it('turns off note-changing shortcuts in Trash', () => {
+    expect(source).toContain("inTrash: contentView === 'trash'");
+  });
+
+  it('never permanently deletes from the keyboard', () => {
+    const shortcutHandlers = source.slice(
+      source.indexOf('function runShortcut'),
+      source.indexOf('let allTrashedNotes'),
+    );
+    expect(shortcutHandlers).toContain('await trashNoteWithUndo(id);');
+    expect(shortcutHandlers).not.toContain('permanentlyDeleteNote');
+    expect(shortcutHandlers).not.toContain('requestPermanentDelete');
+  });
+
+  it('drops the keyboard selection when its note leaves the current view', () => {
+    expect(source).toMatch(
+      /if \(activeNoteId && !visibleNotes\.some\(note => note\.id === activeNoteId\)\)[\s\S]*activeNoteId = null/,
+    );
+  });
+});
