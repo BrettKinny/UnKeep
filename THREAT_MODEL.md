@@ -377,3 +377,11 @@ publishing works, while the supplied Compose files publish only to host
 loopback. Terminate HTTPS with a maintained reverse proxy, restrict CORS to the
 deployed origin, protect `/data`, and promptly install security updates. See
 [docs/self-hosting.md](docs/self-hosting.md) for operational guidance.
+
+The image runs as the non-root `node` user. The Unraid template instead
+starts it as root with only `CHOWN`, `SETUID`, and `SETGID`. Before opening
+the database, the relay gives `/data` to `PUID:PGID` without following
+symlinks, then permanently switches to that non-zero user. Switching away
+from root clears every capability. Code that runs before the switch only
+parses configuration, so a flaw there would run as root with those three
+capabilities. Keep that startup path minimal.

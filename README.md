@@ -82,7 +82,7 @@ while the project is `0.x`; minor releases may still contain breaking changes.
 ### Run on Unraid
 
 Install **UnKeep** from Community Applications. Read the
-[Unraid settings](docs/self-hosting.md#unraid-settings) first: the container
+[Unraid settings](docs/self-hosting.md#unraid-settings) first: the relay
 runs as `nobody:users`, and it must be published over HTTPS.
 
 ## Use it with an agent

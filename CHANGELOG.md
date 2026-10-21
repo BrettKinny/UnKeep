@@ -19,13 +19,19 @@ published.
 ### Added
 
 - **Unraid support** — documented Unraid settings and a Community
-  Applications template. The container runs as `nobody:users`
-  (`--user 99:100`) with the same read-only, no-capabilities hardening as the
-  Compose files.
+  Applications template. Started as root with `PUID`/`PGID`, the relay gives
+  its data directory to that user and permanently drops to it before opening
+  the database, so the appdata folder needs no manual `chown`. The running
+  relay has no capabilities and runs on a read-only root filesystem, as in the
+  Compose deployment.
 - **Keep-style link previews** on note cards and in the editor, opt-in with
   `UNKEEP_LINK_PREVIEWS=1`. The relay fetches only public destinations, with
   bounds on time, size, redirects, rate, and concurrency. Previews are cached
   per browser and never synced.
+- **Keyboard shortcuts** — `?` lists them, `/` focuses search, `n` starts a
+  note, arrow keys move between notes, `Enter` opens one, `p` pins it, and
+  `Delete` moves it to Trash with Undo. Shortcuts never permanently delete
+  notes, and `Enter` keeps its normal action on a focused button or link.
 - **Pin and colour controls** while composing a new note, with the toolbar
   order aligned to the editor.
 - **Stable releases** — `vX.Y.Z` tags publish a non-prerelease GitHub release
