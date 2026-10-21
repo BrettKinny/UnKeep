@@ -10,7 +10,52 @@ Because UnKeep is still `0.x`, minor releases may include breaking changes.
 
 No changes yet.
 
-## [0.2.0-rc.5] - 2026-08-18
+## [0.2.0] - 2026-10-21
+
+The first stable release, and the first published image since `0.2.0-rc.4`.
+It includes everything listed under `0.2.0-rc.5`, which was tagged but never
+published.
+
+### Added
+
+- **Unraid support** — documented Unraid settings and a Community
+  Applications template. The container runs as `nobody:users`
+  (`--user 99:100`) with the same read-only, no-capabilities hardening as the
+  Compose files.
+- **Keep-style link previews** on note cards and in the editor, opt-in with
+  `UNKEEP_LINK_PREVIEWS=1`. The relay fetches only public destinations, with
+  bounds on time, size, redirects, rate, and concurrency. Previews are cached
+  per browser and never synced.
+- **Pin and colour controls** while composing a new note, with the toolbar
+  order aligned to the editor.
+- **Stable releases** — `vX.Y.Z` tags publish a non-prerelease GitHub release
+  and move the `X.Y` and `latest` image tags when no higher stable release
+  exists.
+
+### Changed
+
+- Opening UnKeep on a plain-HTTP, non-local address now shows an "UnKeep
+  needs HTTPS" page instead of stalling on "Opening your vault…".
+- The relay stops at startup with an `UNKEEP_DATA_DIR is not usable` message
+  naming the UID and GID to `chown` to when its data directory or database is
+  not writable.
+- Relay storage quotas are enforced across live records and attachment
+  stages together, and relay requests from clients have bounded deadlines
+  while uncertain mutations still replay exactly.
+
+### Fixed
+
+- Concurrent local edits from stale tabs or queued snapshots are preserved as
+  conflict copies instead of overwriting durable edits.
+- Typing a title right after opening the composer no longer moves focus to
+  the note body mid-word.
+- URLs in notes open when activated.
+- Runtime OpenSSL packages are pinned to the patched `3.5.9-r0`.
+
+## [0.2.0-rc.5] - 2026-08-18 (not published)
+
+This tag failed release validation before any external write; its changes
+ship in `0.2.0`.
 
 ### Added
 
