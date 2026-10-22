@@ -8,7 +8,11 @@ Because UnKeep is still `0.x`, minor releases may include breaking changes.
 
 ## [Unreleased]
 
-No changes yet.
+### Changed
+
+- Shorter README and self-hosting guide. Reference material moved to new
+  [configuration](docs/configuration.md), [architecture](docs/architecture.md),
+  and [upgrading from previews](docs/upgrading.md) pages.
 
 ## [0.2.1] - 2026-10-21
 
