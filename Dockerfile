@@ -1,7 +1,7 @@
 ARG NODE_LICENSE_PLATFORM=linux/amd64
-FROM --platform=${NODE_LICENSE_PLATFORM} node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS node-license
+FROM --platform=${NODE_LICENSE_PLATFORM} node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS node-license
 
-FROM --platform=${BUILDPLATFORM} node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS build
+FROM --platform=${BUILDPLATFORM} node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS build
 ARG UNKEEP_VERSION=dev
 ARG UNKEEP_REVISION=unknown
 ENV UNKEEP_BUILD_VERSION=${UNKEEP_VERSION} \
@@ -18,7 +18,7 @@ RUN pnpm install --frozen-lockfile
 COPY . .
 RUN pnpm build
 
-FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
 RUN apk add --no-cache --upgrade libcrypto3=3.5.9-r0 libssl3=3.5.9-r0
 ARG UNKEEP_VERSION=dev
 ARG UNKEEP_REVISION=unknown
