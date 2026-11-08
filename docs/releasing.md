@@ -71,7 +71,7 @@ squashed public history.
 6. Leave `UNKEEP_CONTAINER_COMPLIANCE_GUARD` unset until the exact container
    source and notice review is complete. Then add it to `release` with the
    exact value
-   `BrettKinny/UnKeep:container-compliance:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32:v1`.
+   `BrettKinny/UnKeep:container-compliance:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402:v1`.
    The digest is bound to the Dockerfile's pinned Node/Alpine base image. Any
    base-image change requires a new reviewed bundle and sentinel value.
 7. Restrict the environment to selected tags matching `v*-rc.*` and
@@ -274,3 +274,16 @@ The Docker setup actions and container scanner also fetch executables and
 images, so pin their transitive inputs rather than relying on mutable
 defaults. Verify replacements against their official upstream release and
 confirm both `linux/amd64` and `linux/arm64` are present before updating.
+
+## Dependabot and dependency updates
+
+The repository is in maintenance mode. Dependabot opens no routine npm
+version-update PRs; only security updates (grouped into one PR) and, monthly,
+one grouped GitHub Actions PR. Semver-major npm updates are ignored, so they
+are deliberate migrations.
+
+Dependabot cannot regenerate `THIRD_PARTY_NOTICES.md`. On any Dependabot npm
+security PR, check out the branch, run `pnpm notices`, and commit the result;
+otherwise `pnpm notices:check` fails CI with "THIRD_PARTY_NOTICES.md is
+stale". A Dockerfile base-image digest change also requires updating the
+`UNKEEP_CONTAINER_COMPLIANCE_GUARD` value as described above.

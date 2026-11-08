@@ -30,7 +30,7 @@ env:
 jobs:
   prepare:
     name: Validate release identity
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       image: ${{ steps.release.outputs.image }}
@@ -213,7 +213,7 @@ jobs:
   verify:
     name: Full release gates
     needs: prepare
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - name: Check out the validated commit
@@ -273,7 +273,7 @@ jobs:
   verify-node-20:
     name: Node 20 package compatibility
     needs: prepare
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Check out the validated commit
@@ -305,7 +305,7 @@ jobs:
   verify-container:
     name: Container gate (${{ matrix.platform }})
     needs: prepare
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     strategy:
       fail-fast: false
@@ -406,7 +406,7 @@ jobs:
   container-sources:
     name: Build exact container source bundle
     needs: prepare
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
       contents: read
@@ -429,7 +429,7 @@ jobs:
           platforms: arm64
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           version: ${{ env.BUILDX_VERSION }}
           driver-opts: |
@@ -486,7 +486,7 @@ jobs:
       - verify-node-20
       - verify-container
       - container-sources
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -524,7 +524,7 @@ jobs:
             --metadata-sha "$METADATA_SHA256"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           version: ${{ env.BUILDX_VERSION }}
           driver-opts: |
@@ -566,7 +566,7 @@ jobs:
             /usr/local/LICENSE > release-assets/NODE_RUNTIME_LICENSE
 
       - name: Generate dry-run image SBOM
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: unkeep:release-dry-run
           format: spdx-json
@@ -595,7 +595,7 @@ jobs:
       - verify-node-20
       - verify-container
       - container-sources
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     environment: release
     permissions:
@@ -709,14 +709,14 @@ jobs:
           platforms: arm64
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           version: ${{ env.BUILDX_VERSION }}
           driver-opts: |
             image=${{ env.BUILDKIT_IMAGE }}
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -889,7 +889,7 @@ jobs:
             docker pull --platform linux/amd64 "$IMAGE@$AMD64_DIGEST"
 
       - name: Export an amd64 image SBOM for the GitHub release
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: unkeep:published-amd64
           format: spdx-json
@@ -976,7 +976,7 @@ jobs:
     needs:
       - prepare
       - stage_container
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: release
     permissions:
@@ -1059,14 +1059,14 @@ jobs:
             --arm64-digest "$ARM64_DIGEST"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           version: ${{ env.BUILDX_VERSION }}
           driver-opts: |
             image=${{ env.BUILDKIT_IMAGE }}
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -1301,7 +1301,7 @@ jobs:
       - prepare
       - stage_container
       - promote_image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: release
     permissions:
@@ -1409,7 +1409,7 @@ jobs:
             --arm64-digest "$ARM64_DIGEST"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           version: ${{ env.BUILDX_VERSION }}
           driver-opts: |
