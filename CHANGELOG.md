@@ -8,6 +8,13 @@ Because UnKeep is still `0.x`, minor releases may include breaking changes.
 
 ## [Unreleased]
 
+No changes yet.
+
+## [0.2.2] - 2026-11-08
+
+Maintenance release: a refreshed and patched base image, a shorter README and
+self-hosting guide, and updated build tooling.
+
 ### Changed
 
 - Refreshed the Node base image and updated development dependencies and
@@ -19,6 +26,9 @@ Because UnKeep is still `0.x`, minor releases may include breaking changes.
 
 ### Security
 
+- The relay image's Node base image is refreshed, and the Dockerfile now pins
+  patched `musl-utils` (`1.2.6-r3`) and `zlib` (`1.4-r0`) Alpine packages
+  alongside the patched OpenSSL packages. These ship in the image.
 - Updated `vitest`, `brace-expansion`, and `postcss-selector-parser` to
   patched releases. These are build and test tooling and are not shipped in
   the relay image.
@@ -278,7 +288,9 @@ collaboration.
 
 - Initial client-side encryption and input-hardening work.
 
-[Unreleased]: https://github.com/BrettKinny/UnKeep/compare/v0.2.0-rc.4...HEAD
+[Unreleased]: https://github.com/BrettKinny/UnKeep/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/BrettKinny/UnKeep/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/BrettKinny/UnKeep/compare/v0.2.0-rc.4...v0.2.1
 [0.2.0-rc.4]: https://github.com/BrettKinny/UnKeep/compare/v0.2.0-rc.3...v0.2.0-rc.4
 [0.2.0-rc.3]: https://github.com/BrettKinny/UnKeep/compare/v0.2.0-rc.2...v0.2.0-rc.3
 [0.2.0-rc.2]: https://github.com/BrettKinny/UnKeep/compare/v0.2.0-rc.1...v0.2.0-rc.2
