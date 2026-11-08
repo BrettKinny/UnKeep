@@ -1,18 +1,29 @@
 version: 2
 updates:
+  # Maintenance mode: npm gets security updates only.
   - package-ecosystem: npm
     directory: /
     schedule:
       interval: weekly
-    # Majors (framework migrations) arrive as individual PRs instead of
-    # blocking the routine minor/patch group.
+    # A limit of 0 turns off routine version-update PRs. Security-update PRs
+    # have their own fixed limit (10) that this setting does not affect, so
+    # Dependabot security updates (enabled in the repository settings) still
+    # open.
+    open-pull-requests-limit: 0
+    # Security fixes arrive as one PR instead of one per advisory. Dependabot
+    # cannot regenerate THIRD_PARTY_NOTICES.md, so run `pnpm notices` on that
+    # branch and commit the result (see docs/releasing.md).
     groups:
-      pnpm-dependencies:
+      npm-security:
+        applies-to: security-updates
         patterns:
           - "*"
+    # Major upgrades (for example SvelteKit 3) are deliberate migrations, never
+    # automatic.
+    ignore:
+      - dependency-name: "*"
         update-types:
-          - minor
-          - patch
+          - version-update:semver-major
 
   - package-ecosystem: docker
     directory: /
@@ -27,4 +38,11 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
+    # One PR for all actions keeps github/codeql-action init and analyze in
+    # lockstep; the action refuses mismatched versions. Action majors are not
+    # ignored.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
