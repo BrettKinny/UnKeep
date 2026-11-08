@@ -10,9 +10,18 @@ Because UnKeep is still `0.x`, minor releases may include breaking changes.
 
 ### Changed
 
+- Refreshed the Node base image and updated development dependencies and
+  GitHub Actions.
+- CI and release jobs now run on `ubuntu-24.04` instead of `ubuntu-latest`.
 - Shorter README and self-hosting guide. Reference material moved to new
   [configuration](docs/configuration.md), [architecture](docs/architecture.md),
   and [upgrading from previews](docs/upgrading.md) pages.
+
+### Security
+
+- Updated `vitest`, `brace-expansion`, and `postcss-selector-parser` to
+  patched releases. These are build and test tooling and are not shipped in
+  the relay image.
 
 ## [0.2.1] - 2026-10-21
 
