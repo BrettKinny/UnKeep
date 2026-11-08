@@ -38,8 +38,10 @@ const SPDX_LICENSE_LIST_REPOSITORY =
   'https://github.com/spdx/license-list-data.git';
 const SPDX_LICENSE_LIST_COMMIT =
   'd46e94e2c78ceede1cfc63cfa0396472d2798d4c';
+// Antoine du Hamel's key, listed in nodejs/node's README release keys and
+// used by the pinned docker-node recipe; it signs the 22.23.x SHASUMS256.txt.
 const NODE_RELEASE_KEY_FINGERPRINT =
-  'CC68F5A3106FF448322E48ED27F5E38D5B0A215F';
+  '5BE8A3F6C8A5C01D106C0AD820B1A390B168D356';
 // zlib.net has occasionally returned an HTML/error body with HTTP 200. Keep
 // the fallback deliberately narrow: this is an alternate transport for the
 // exact upstream zlib archive, not a general-purpose mirror selector.

@@ -18,8 +18,8 @@ under `0.2.2`, which was tagged but never published.
 ### Fixed
 
 - The release workflow's corresponding-source bundle now pins the refreshed
-  Node base image's source provenance (the `nodejs/docker-node` recipe commit)
-  and accepts the patched `musl-utils` and `zlib` runtime package pins, so the
+  Node base image's source provenance (the `nodejs/docker-node` recipe commit
+  and the Node release signing key) and accepts the patched `musl-utils` and `zlib` runtime package pins, so the
   bundle covers the packages actually in the image. The `0.2.2` release run
   stopped at this check before publishing anything.
 
