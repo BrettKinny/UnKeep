@@ -25,7 +25,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const DOCKER_NODE_REPOSITORY = 'https://github.com/nodejs/docker-node.git';
 const DOCKER_NODE_RECIPE_COMMIT =
-  'bc0a422bce0f729dd85790639d9f1918143f1235';
+  '81f419144a1251854c6d9afb09eaa39928e724e8';
 const APORTS_REPOSITORY =
   'https://gitlab.alpinelinux.org/alpine/aports.git';
 // gitlab.alpinelinux.org answers GitHub-hosted runners with HTTP 418. Alpine's
@@ -257,20 +257,22 @@ export function parseRuntimePackagePins(
   if (matches.length !== 1) {
     fail('Dockerfile must contain one controlled runtime package upgrade');
   }
+  const allowed = ['libcrypto3', 'libssl3', 'musl-utils', 'zlib'];
   const pins = matches[0][1].split(/\s+/).map(token => {
-    const match = /^(libcrypto3|libssl3)=([A-Za-z0-9][A-Za-z0-9+_.-]*)$/.exec(
-      token,
-    );
+    const match = /^(libcrypto3|libssl3|musl-utils|zlib)=([A-Za-z0-9][A-Za-z0-9+_.-]*)$/
+      .exec(token);
     if (!match) fail(`Invalid controlled runtime package pin: ${token}`);
     return { name: match[1], version: match[2] };
   });
   if (
-    pins.length !== 2
-    || pins[0].name !== 'libcrypto3'
-    || pins[1].name !== 'libssl3'
+    pins.length !== allowed.length
+    || pins.some((pin, index) => pin.name !== allowed[index])
     || pins[0].version !== pins[1].version
   ) {
-    fail('Runtime package upgrade must pin matching libcrypto3 and libssl3');
+    fail(
+      'Runtime package upgrade must pin libcrypto3, libssl3 (matching), '
+      + 'musl-utils, and zlib, in that order',
+    );
   }
   return pins;
 }

@@ -73,7 +73,13 @@ squashed public history.
    exact value
    `BrettKinny/UnKeep:container-compliance:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402:v1`.
    The digest is bound to the Dockerfile's pinned Node/Alpine base image. Any
-   base-image change requires a new reviewed bundle and sentinel value.
+   base-image change requires a new reviewed bundle and sentinel value. It
+   also requires updating the base-image-bound pins in
+   `scripts/container-source-bundle.mjs` (the `nodejs/docker-node` recipe
+   commit, the Alpine release it expects, and the runtime package pins). Pull
+   request CI does not run that script: only a release run, or a
+   validation-only dispatch, exercises those pins, so dispatch one against the
+   branch before merging the change.
 7. Restrict the environment to selected tags matching `v*-rc.*` and
    `v*.*.*` (the workflow itself rejects any tag that is not exactly
    `vX.Y.Z` or `vX.Y.Z-rc.N`).
@@ -148,7 +154,7 @@ in its `ref` input. It must not create a release or push a release image.
 For publication, create an annotated tag from a commit contained in `main`:
 
 ```sh
-version=0.2.2
+version=0.2.3
 git tag --sign --annotate "v$version" -m "UnKeep $version"
 git push origin "v$version"
 ```
@@ -189,7 +195,7 @@ incomplete public GitHub release.
 Replace the version and source SHA below for a later release:
 
 ```sh
-version=0.2.2
+version=0.2.3
 docker buildx imagetools inspect "ghcr.io/brettkinny/unkeep:$version"
 gh attestation verify \
   "oci://ghcr.io/brettkinny/unkeep:$version" \
@@ -239,6 +245,11 @@ The `v0.2.0` tag stopped in `stage_container` while binding sources (it ran
 `apk add` inside the non-root staged image) after pushing only untagged
 platform images; no immutable image tag or GitHub release exists for it, and
 publication continues with `v0.2.1`.
+The `v0.2.2` tag stopped in the source-bundle job before any external write:
+the script's pins still described the previous base image, so the refreshed
+image's provenance annotations were rejected. No image tag or GitHub release
+exists for it, so its version is retired, and publication continues with
+`v0.2.3`.
 
 If either immutable GHCR tag or the GitHub release exists, preserve the failed
 candidate as an incident record. Do not expect a rebuild to complete missing
@@ -286,4 +297,5 @@ Dependabot cannot regenerate `THIRD_PARTY_NOTICES.md`. On any Dependabot npm
 security PR, check out the branch, run `pnpm notices`, and commit the result;
 otherwise `pnpm notices:check` fails CI with "THIRD_PARTY_NOTICES.md is
 stale". A Dockerfile base-image digest change also requires updating the
-`UNKEEP_CONTAINER_COMPLIANCE_GUARD` value as described above.
+`UNKEEP_CONTAINER_COMPLIANCE_GUARD` value and the pins in
+`scripts/container-source-bundle.mjs`, as described above.
