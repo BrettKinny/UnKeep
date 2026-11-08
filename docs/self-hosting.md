@@ -22,19 +22,19 @@ tag that moves later can't change what you run.
 ```sh
 set -eu
 mkdir unkeep && cd unkeep
-release_url=https://github.com/BrettKinny/UnKeep/releases/download/v0.2.1
+release_url=https://github.com/BrettKinny/UnKeep/releases/download/v0.2.2
 curl -fsSLO "$release_url/compose.release.yaml"
-curl -fsSLO "$release_url/unkeep-0.2.1-image-digest.txt"
+curl -fsSLO "$release_url/unkeep-0.2.2-image-digest.txt"
 curl -fsSLO "$release_url/SHA256SUMS"
 grep -E \
-  '^[0-9a-f]{64}  (compose\.release\.yaml|unkeep-0\.2\.1-image-digest\.txt)$' \
+  '^[0-9a-f]{64}  (compose\.release\.yaml|unkeep-0\.2\.2-image-digest\.txt)$' \
   SHA256SUMS > RELEASE_SHA256SUMS
 test "$(wc -l < RELEASE_SHA256SUMS)" -eq 2
 sha256sum --check --strict RELEASE_SHA256SUMS
 rm RELEASE_SHA256SUMS
 release_digest="$(
   sed -n 's/^digest=\(sha256:[0-9a-f]\{64\}\)$/\1/p' \
-    unkeep-0.2.1-image-digest.txt
+    unkeep-0.2.2-image-digest.txt
 )"
 printf '%s\n' "$release_digest" | grep -Eq '^sha256:[0-9a-f]{64}$'
 mv compose.release.yaml compose.yaml
@@ -66,10 +66,10 @@ Run these after downloading the files and before `mv compose.release.yaml`.
 They confirm the release is immutable and the files match its attestations.
 
 ```sh
-gh release verify v0.2.1 --repo BrettKinny/UnKeep
-gh release verify-asset v0.2.1 compose.release.yaml --repo BrettKinny/UnKeep
-gh release verify-asset v0.2.1 unkeep-0.2.1-image-digest.txt --repo BrettKinny/UnKeep
-gh release verify-asset v0.2.1 SHA256SUMS --repo BrettKinny/UnKeep
+gh release verify v0.2.2 --repo BrettKinny/UnKeep
+gh release verify-asset v0.2.2 compose.release.yaml --repo BrettKinny/UnKeep
+gh release verify-asset v0.2.2 unkeep-0.2.2-image-digest.txt --repo BrettKinny/UnKeep
+gh release verify-asset v0.2.2 SHA256SUMS --repo BrettKinny/UnKeep
 ```
 
 </details>
@@ -78,7 +78,7 @@ gh release verify-asset v0.2.1 SHA256SUMS --repo BrettKinny/UnKeep
 <summary>Build from source instead</summary>
 
 ```sh
-git clone --branch v0.2.1 https://github.com/BrettKinny/UnKeep.git
+git clone --branch v0.2.2 https://github.com/BrettKinny/UnKeep.git
 cd UnKeep
 install -d -m 700 data
 sudo chown 1000:1000 data
@@ -86,7 +86,7 @@ install -m 600 /dev/null .env
 {
   printf 'UNKEEP_SETUP_TOKEN=%s\n' "$(openssl rand -base64 32)"
   printf 'UNKEEP_RECOVERY_TOKEN=%s\n' "$(openssl rand -base64 32)"
-  printf 'UNKEEP_BUILD_VERSION=0.2.1\n'
+  printf 'UNKEEP_BUILD_VERSION=0.2.2\n'
   printf 'UNKEEP_BUILD_REVISION=%s\n' "$(git rev-parse HEAD)"
 } > .env
 docker compose --env-file .env up --build -d

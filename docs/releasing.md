@@ -148,7 +148,7 @@ in its `ref` input. It must not create a release or push a release image.
 For publication, create an annotated tag from a commit contained in `main`:
 
 ```sh
-version=0.2.1
+version=0.2.2
 git tag --sign --annotate "v$version" -m "UnKeep $version"
 git push origin "v$version"
 ```
@@ -189,7 +189,7 @@ incomplete public GitHub release.
 Replace the version and source SHA below for a later release:
 
 ```sh
-version=0.2.1
+version=0.2.2
 docker buildx imagetools inspect "ghcr.io/brettkinny/unkeep:$version"
 gh attestation verify \
   "oci://ghcr.io/brettkinny/unkeep:$version" \
