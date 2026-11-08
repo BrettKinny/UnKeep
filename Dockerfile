@@ -19,7 +19,7 @@ COPY . .
 RUN pnpm build
 
 FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
-RUN apk add --no-cache --upgrade libcrypto3=3.5.9-r0 libssl3=3.5.9-r0 musl-utils=1.2.6-r3 zlib=1.3.2-r1
+RUN apk add --no-cache --upgrade libcrypto3=3.5.9-r0 libssl3=3.5.9-r0 musl-utils=1.2.6-r3 zlib=1.4-r0
 ARG UNKEEP_VERSION=dev
 ARG UNKEEP_REVISION=unknown
 WORKDIR /app
