@@ -10,6 +10,19 @@ Because UnKeep is still `0.x`, minor releases may include breaking changes.
 
 No changes yet.
 
+## [0.2.3] - 2026-11-08
+
+The first release since `0.2.1` to be published. It includes everything listed
+under `0.2.2`, which was tagged but never published.
+
+### Fixed
+
+- The release workflow's corresponding-source bundle now pins the refreshed
+  Node base image's source provenance (the `nodejs/docker-node` recipe commit
+  and the Node release signing key) and accepts the patched `musl-utils` and `zlib` runtime package pins, so the
+  bundle covers the packages actually in the image. The `0.2.2` release run
+  stopped at this check before publishing anything.
+
 ## [0.2.2] - 2026-11-08
 
 Maintenance release: a refreshed and patched base image, a shorter README and
@@ -288,7 +301,8 @@ collaboration.
 
 - Initial client-side encryption and input-hardening work.
 
-[Unreleased]: https://github.com/BrettKinny/UnKeep/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/BrettKinny/UnKeep/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/BrettKinny/UnKeep/compare/v0.2.1...v0.2.3
 [0.2.2]: https://github.com/BrettKinny/UnKeep/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/BrettKinny/UnKeep/compare/v0.2.0-rc.4...v0.2.1
 [0.2.0-rc.4]: https://github.com/BrettKinny/UnKeep/compare/v0.2.0-rc.3...v0.2.0-rc.4

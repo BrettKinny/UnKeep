@@ -25,7 +25,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const DOCKER_NODE_REPOSITORY = 'https://github.com/nodejs/docker-node.git';
 const DOCKER_NODE_RECIPE_COMMIT =
-  'bc0a422bce0f729dd85790639d9f1918143f1235';
+  '81f419144a1251854c6d9afb09eaa39928e724e8';
 const APORTS_REPOSITORY =
   'https://gitlab.alpinelinux.org/alpine/aports.git';
 // gitlab.alpinelinux.org answers GitHub-hosted runners with HTTP 418. Alpine's
@@ -38,8 +38,10 @@ const SPDX_LICENSE_LIST_REPOSITORY =
   'https://github.com/spdx/license-list-data.git';
 const SPDX_LICENSE_LIST_COMMIT =
   'd46e94e2c78ceede1cfc63cfa0396472d2798d4c';
+// Antoine du Hamel's key, listed in nodejs/node's README release keys and
+// used by the pinned docker-node recipe; it signs the 22.23.x SHASUMS256.txt.
 const NODE_RELEASE_KEY_FINGERPRINT =
-  'CC68F5A3106FF448322E48ED27F5E38D5B0A215F';
+  '5BE8A3F6C8A5C01D106C0AD820B1A390B168D356';
 // zlib.net has occasionally returned an HTML/error body with HTTP 200. Keep
 // the fallback deliberately narrow: this is an alternate transport for the
 // exact upstream zlib archive, not a general-purpose mirror selector.
@@ -257,20 +259,22 @@ export function parseRuntimePackagePins(
   if (matches.length !== 1) {
     fail('Dockerfile must contain one controlled runtime package upgrade');
   }
+  const allowed = ['libcrypto3', 'libssl3', 'musl-utils', 'zlib'];
   const pins = matches[0][1].split(/\s+/).map(token => {
-    const match = /^(libcrypto3|libssl3)=([A-Za-z0-9][A-Za-z0-9+_.-]*)$/.exec(
-      token,
-    );
+    const match = /^(libcrypto3|libssl3|musl-utils|zlib)=([A-Za-z0-9][A-Za-z0-9+_.-]*)$/
+      .exec(token);
     if (!match) fail(`Invalid controlled runtime package pin: ${token}`);
     return { name: match[1], version: match[2] };
   });
   if (
-    pins.length !== 2
-    || pins[0].name !== 'libcrypto3'
-    || pins[1].name !== 'libssl3'
+    pins.length !== allowed.length
+    || pins.some((pin, index) => pin.name !== allowed[index])
     || pins[0].version !== pins[1].version
   ) {
-    fail('Runtime package upgrade must pin matching libcrypto3 and libssl3');
+    fail(
+      'Runtime package upgrade must pin libcrypto3, libssl3 (matching), '
+      + 'musl-utils, and zlib, in that order',
+    );
   }
   return pins;
 }

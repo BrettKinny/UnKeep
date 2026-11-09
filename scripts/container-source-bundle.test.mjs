@@ -182,7 +182,7 @@ function createVerifiedFixture({ extraFile = false, symlink = false } = {}) {
     baseDigest,
     basePlatformDigests: platformDigests,
     nodeVersion: '22.23.2',
-    dockerNodeRecipeCommit: 'bc0a422bce0f729dd85790639d9f1918143f1235',
+    dockerNodeRecipeCommit: '81f419144a1251854c6d9afb09eaa39928e724e8',
     bundleFile: bundleName,
     bundleSha256: sha256(bundlePath),
     sourceManifestSha256: sha256(join(root, 'SOURCE-MANIFEST.json')),
@@ -297,11 +297,15 @@ test('requires controlled license, build, and runtime stages with one base', () 
   }
 });
 
-test('requires matching pinned OpenSSL runtime upgrades', () => {
-  const valid = 'RUN apk add --no-cache --upgrade libcrypto3=3.5.8-r0 libssl3=3.5.8-r0';
+test('requires the exact pinned runtime upgrades with matching OpenSSL', () => {
+  const valid =
+    'RUN apk add --no-cache --upgrade libcrypto3=3.5.8-r0 libssl3=3.5.8-r0 '
+    + 'musl-utils=1.2.6-r3 zlib=1.4-r0';
   assert.deepEqual(parseRuntimePackagePins(valid), [
     { name: 'libcrypto3', version: '3.5.8-r0' },
     { name: 'libssl3', version: '3.5.8-r0' },
+    { name: 'musl-utils', version: '1.2.6-r3' },
+    { name: 'zlib', version: '1.4-r0' },
   ]);
   for (const dockerfile of [
     '',
@@ -309,10 +313,14 @@ test('requires matching pinned OpenSSL runtime upgrades', () => {
     valid.replace('3.5.8-r0 libssl3', '3.5.9-r0 libssl3'),
     valid.replace('libssl3', 'openssl'),
     valid.replace('--upgrade ', ''),
+    valid.replace(' musl-utils=1.2.6-r3', ''),
+    valid.replace(' zlib=1.4-r0', ''),
+    `${valid} busybox=1.37.0-r0`,
+    valid.replace('musl-utils=1.2.6-r3 zlib=1.4-r0', 'zlib=1.4-r0 musl-utils=1.2.6-r3'),
   ]) {
     assert.throws(
       () => parseRuntimePackagePins(dockerfile),
-      /controlled runtime package|matching libcrypto3 and libssl3|Invalid controlled/,
+      /controlled runtime package|libcrypto3, libssl3|Invalid controlled/,
     );
   }
 });
