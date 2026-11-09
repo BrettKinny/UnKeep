@@ -558,9 +558,13 @@ test.describe.serial('UnKeep browser vault', () => {
     // In Trash, the keyboard can browse and view but never delete.
     await page.locator(`[data-note-id="${firstActive}"]`).hover();
     await page.locator(`[data-note-id="${firstActive}"]`).getByRole('button', { name: 'Move to Trash' }).click();
+    await expect(cards).toHaveCount(noteCount - 1);
     await page.getByRole('button', { name: 'Open UnKeep menu' }).click();
     await page.getByRole('menuitem', { name: 'Trash' }).click();
     await expect(page.getByRole('heading', { name: 'Trash' })).toBeVisible();
+    await expect(page.getByRole('menu')).toBeHidden();
+    // Arrow selection measures rendered cards, so wait for the trashed card first.
+    await expect(cards).toHaveCount(1);
     await page.keyboard.press('ArrowDown');
     await expect(active).toHaveAttribute('data-note-id', firstActive);
     await page.keyboard.press('Delete');
