@@ -24,6 +24,9 @@ import {
   parseDockerfileBase,
   parseRuntimePackagePins,
   parseInstalledDatabase,
+  parseNodeKeyFingerprints,
+  selectSignerFingerprint,
+  zlibFallbackUrls,
   platformImageReference,
   requireDescriptorDigest,
   validateArchiveListings,
@@ -762,4 +765,66 @@ test('bind rejects duplicate staged digests before inspecting an image', () => {
   } finally {
     rmSync(fixture.temporaryRoot, { recursive: true, force: true });
   }
+});
+
+test('zlib fallback URLs accept X.Y and X.Y.Z versions only', () => {
+  assert.deepEqual(zlibFallbackUrls('https://zlib.net/zlib-1.4.tar.gz'), [
+    'https://github.com/madler/zlib/releases/download/v1.4/zlib-1.4.tar.gz',
+    'https://gstreamer.freedesktop.org/src/mirror/zlib/zlib-1.4.tar.gz',
+  ]);
+  assert.deepEqual(
+    zlibFallbackUrls('https://zlib.net/fossils/zlib-1.3.1.tar.gz'),
+    [
+      'https://github.com/madler/zlib/releases/download/v1.3.1/'
+        + 'zlib-1.3.1.tar.gz',
+      'https://gstreamer.freedesktop.org/src/mirror/zlib/zlib-1.3.1.tar.gz',
+    ],
+  );
+  for (const bad of [
+    'https://zlib.net/zlib-1.tar.gz',
+    'https://zlib.net/zlib-1.3.1.2.tar.gz',
+    'https://zlib.net/zlib-1.x.tar.gz',
+    'https://zlib.net/zlib-1.3.1.tar.gz.asc',
+    'https://example.com/zlib-1.4.tar.gz',
+  ]) {
+    assert.deepEqual(zlibFallbackUrls(bad), [], bad);
+  }
+});
+
+const KEY_A = '5BE8A3F6C8A5C01D106C0AD820B1A390B168D356';
+const KEY_B = 'DD792F5973C6DE52C432CBDAC77ABFA00DDBF2B7';
+
+test('docker-node key list parsing is strict', () => {
+  assert.deepEqual(
+    parseNodeKeyFingerprints(`${KEY_A}\n\n${KEY_B}\n`),
+    [KEY_A, KEY_B],
+  );
+  assert.throws(() => parseNodeKeyFingerprints(''), /empty/);
+  assert.throws(() => parseNodeKeyFingerprints('abc123'), /Invalid/);
+  assert.throws(
+    () => parseNodeKeyFingerprints(`${KEY_A}\n${KEY_A}`),
+    /duplicate/,
+  );
+});
+
+test('signer selection requires exactly one allowed key', () => {
+  const status = keyId =>
+    `[GNUPG:] NEWSIG\n[GNUPG:] ERRSIG ${keyId} 1 10 01 1700000000 9 ${KEY_A}\n`
+    + `[GNUPG:] NO_PUBKEY ${keyId}\n`;
+  assert.equal(
+    selectSignerFingerprint(status(KEY_B.slice(-16)), [KEY_A, KEY_B]),
+    KEY_B,
+  );
+  assert.throws(
+    () => selectSignerFingerprint(status('0123456789ABCDEF'), [KEY_A, KEY_B]),
+    /not one of/,
+  );
+  assert.throws(
+    () => selectSignerFingerprint(status(KEY_A.slice(-16)), [KEY_B]),
+    /not one of/,
+  );
+  assert.throws(
+    () => selectSignerFingerprint('[GNUPG:] NEWSIG\n', [KEY_A]),
+    /exactly one issuer/,
+  );
 });

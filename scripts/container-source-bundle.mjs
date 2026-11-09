@@ -38,10 +38,12 @@ const SPDX_LICENSE_LIST_REPOSITORY =
   'https://github.com/spdx/license-list-data.git';
 const SPDX_LICENSE_LIST_COMMIT =
   'd46e94e2c78ceede1cfc63cfa0396472d2798d4c';
-// Antoine du Hamel's key, listed in nodejs/node's README release keys and
-// used by the pinned docker-node recipe; it signs the 22.23.x SHASUMS256.txt.
-const NODE_RELEASE_KEY_FINGERPRINT =
-  '5BE8A3F6C8A5C01D106C0AD820B1A390B168D356';
+// The Node release keys are not pinned individually. They are the fingerprints
+// in nodejs/docker-node's keys/node.keys at DOCKER_NODE_RECIPE_COMMIT, which is
+// exactly what the upstream image build trusts. The list is read from that
+// content-addressed commit at run time (see fetchDockerNodeReleaseKeys), never
+// from a branch, and it is checked against the SHASUMS256.txt signature.
+const DOCKER_NODE_KEYS_PATH = 'keys/node.keys';
 // zlib.net has occasionally returned an HTML/error body with HTTP 200. Keep
 // the fallback deliberately narrow: this is an alternate transport for the
 // exact upstream zlib archive, not a general-purpose mirror selector.
@@ -658,7 +660,7 @@ async function download(url, destination) {
   });
 }
 
-function zlibFallbackUrls(sourceUrl) {
+export function zlibFallbackUrls(sourceUrl) {
   let parsed;
   try {
     parsed = new URL(sourceUrl);
@@ -670,7 +672,7 @@ function zlibFallbackUrls(sourceUrl) {
     && parsed.hostname !== 'www.zlib.net'
   ) return [];
   const filename = basename(parsed.pathname);
-  const match = /^zlib-(\d+\.\d+(?:\.\d+)+)\.tar\.gz$/.exec(filename);
+  const match = /^zlib-(\d+\.\d+(?:\.\d+)?)\.tar\.gz$/.exec(filename);
   if (!match) return [];
   const version = match[1];
   return [
@@ -867,12 +869,86 @@ async function fetchAlpineDistfiles(bundleRoot, origins) {
   }
 }
 
+export function parseNodeKeyFingerprints(source) {
+  const fingerprints = source
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line !== '' && !line.startsWith('#'));
+  if (fingerprints.length === 0) fail('docker-node key list is empty');
+  for (const fingerprint of fingerprints) {
+    validateToken(fingerprint, /^[0-9A-F]{40}$/, 'Node release key fingerprint');
+  }
+  if (new Set(fingerprints).size !== fingerprints.length) {
+    fail('docker-node key list contains duplicate fingerprints');
+  }
+  return fingerprints;
+}
+
+function fetchDockerNodeReleaseKeys(temporaryRoot) {
+  const repository = join(temporaryRoot, 'docker-node-keys.git');
+  initializeRepository(repository, DOCKER_NODE_REPOSITORY);
+  fetchCommit(repository, DOCKER_NODE_RECIPE_COMMIT);
+  return parseNodeKeyFingerprints(run('git', [
+    'show',
+    `${DOCKER_NODE_RECIPE_COMMIT}:${DOCKER_NODE_KEYS_PATH}`,
+  ], { cwd: repository }));
+}
+
+// Find which allowed key made the signature, without trusting any key yet: an
+// empty keyring reports only the 64-bit issuer key ID, which must be the tail
+// of exactly one allowed fingerprint.
+export function selectSignerFingerprint(statusOutput, allowedFingerprints) {
+  const keyIds = new Set(
+    statusOutput.split('\n')
+      .map(line => /^\[GNUPG:\] (?:ERRSIG|NO_PUBKEY) ([0-9A-F]{16})(?:\s|$)/
+        .exec(line)?.[1])
+      .filter(Boolean),
+  );
+  if (keyIds.size !== 1) {
+    fail('Node release checksum signature must have exactly one issuer key');
+  }
+  const [keyId] = keyIds;
+  const matches = allowedFingerprints.filter(fingerprint =>
+    fingerprint.endsWith(keyId));
+  if (matches.length !== 1) {
+    fail(
+      `Node release checksum signature issuer ${keyId} is not one of the `
+      + 'docker-node release keys at the pinned recipe commit',
+    );
+  }
+  return matches[0];
+}
+
+function discoverNodeSignerFingerprint(
+  temporaryRoot,
+  signaturePath,
+  allowedFingerprints,
+) {
+  const emptyHome = join(temporaryRoot, 'gnupg-empty');
+  mkdirSync(emptyHome, { mode: 0o700 });
+  // Exits non-zero because the key is missing; only the status lines matter.
+  const result = spawnSync('gpg', [
+    '--homedir',
+    emptyHome,
+    '--batch',
+    '--status-fd',
+    '1',
+    '--output',
+    join(temporaryRoot, 'unverified-node-shasums.txt'),
+    '--decrypt',
+    signaturePath,
+  ], { encoding: 'utf8' });
+  if (result.error) throw result.error;
+  return selectSignerFingerprint(result.stdout ?? '', allowedFingerprints);
+}
+
 function verifyNodeReleaseSignature(
   temporaryRoot,
   keyPath,
   signaturePath,
   checksumsPath,
   exportedKeyPath,
+  signerFingerprint,
 ) {
   const gpgHome = join(temporaryRoot, 'gnupg');
   mkdirSync(gpgHome, { mode: 0o700 });
@@ -892,7 +968,7 @@ function verifyNodeReleaseSignature(
   ]).split('\n')
     .filter(line => line.startsWith('fpr:'))
     .map(line => line.split(':')[9]);
-  if (!fingerprints.includes(NODE_RELEASE_KEY_FINGERPRINT)) {
+  if (!fingerprints.includes(signerFingerprint)) {
     fail('Downloaded Node release key has the wrong fingerprint');
   }
   const status = run('gpg', [
@@ -906,8 +982,8 @@ function verifyNodeReleaseSignature(
     '--decrypt',
     signaturePath,
   ]);
-  if (!status.includes(`[GNUPG:] VALIDSIG ${NODE_RELEASE_KEY_FINGERPRINT} `)) {
-    fail('Node release checksum signature is not from the pinned release key');
+  if (!status.includes(`[GNUPG:] VALIDSIG ${signerFingerprint} `)) {
+    fail('Node release checksum signature is not from an allowed release key');
   }
   if (
     readFileSync(
@@ -923,9 +999,107 @@ function verifyNodeReleaseSignature(
     '--batch',
     '--armor',
     '--export',
-    NODE_RELEASE_KEY_FINGERPRINT,
+    signerFingerprint,
   ]);
   writeFileSync(exportedKeyPath, exported);
+}
+
+// Shared by build and check: download the signed checksums, identify the
+// signing key among docker-node's pinned key list, fetch only that key by
+// fingerprint, and verify. Returns the fingerprint that actually signed.
+async function verifyNodeReleaseChecksums(
+  temporaryRoot,
+  nodeVersion,
+  nodeDirectory,
+  exportedKeyPath,
+) {
+  const allowed = fetchDockerNodeReleaseKeys(temporaryRoot);
+  const checksumsPath = join(nodeDirectory, 'SHASUMS256.txt');
+  const signaturePath = join(nodeDirectory, 'SHASUMS256.txt.asc');
+  for (const name of ['SHASUMS256.txt', 'SHASUMS256.txt.asc']) {
+    await download(
+      `https://nodejs.org/dist/v${nodeVersion}/${name}`,
+      join(nodeDirectory, name),
+    );
+  }
+  const signer = discoverNodeSignerFingerprint(
+    temporaryRoot,
+    signaturePath,
+    allowed,
+  );
+  const keyPath = join(temporaryRoot, 'node-release-key.bin');
+  await download(
+    `https://keys.openpgp.org/vks/v1/by-fingerprint/${signer}`,
+    keyPath,
+  );
+  verifyNodeReleaseSignature(
+    temporaryRoot,
+    keyPath,
+    signaturePath,
+    checksumsPath,
+    exportedKeyPath,
+    signer,
+  );
+  return { signer, allowedKeyCount: allowed.length };
+}
+
+// Check-only path for PR CI: everything the release depends on that a base
+// image bump can break, without pulling images or downloading source tarballs.
+export async function checkBaseImage() {
+  const baseImage = parseDockerfileBase();
+  validateSha256(
+    baseImage.slice(baseImage.indexOf('sha256:') + 7),
+    'base-image digest',
+  );
+  const pins = parseRuntimePackagePins();
+  const oci = inspectOciBase(baseImage);
+  const nodeVersions = new Set();
+  for (const architecture of ['amd64', 'arm64']) {
+    const image = JSON.parse(run('docker', [
+      'buildx',
+      'imagetools',
+      'inspect',
+      '--format',
+      '{{json .Image}}',
+      platformImageReference(baseImage, oci.platforms[architecture].digest),
+    ]));
+    const env = image.config?.Env ?? [];
+    const versions = env
+      .filter(entry => entry.startsWith('NODE_VERSION='))
+      .map(entry => entry.slice('NODE_VERSION='.length));
+    if (versions.length !== 1) {
+      fail(`Expected one NODE_VERSION in the linux/${architecture} image config`);
+    }
+    nodeVersions.add(validateToken(
+      versions[0],
+      /^\d+\.\d+\.\d+$/,
+      `linux/${architecture} NODE_VERSION`,
+    ));
+  }
+  if (nodeVersions.size !== 1) {
+    fail('The amd64 and arm64 Node runtime versions do not match');
+  }
+  const [nodeVersion] = nodeVersions;
+  const temporaryRoot = mkdtempSync(join(tmpdir(), 'unkeep-base-check-'));
+  try {
+    const nodeDirectory = join(temporaryRoot, 'node');
+    mkdirSync(nodeDirectory);
+    const { signer, allowedKeyCount } = await verifyNodeReleaseChecksums(
+      temporaryRoot,
+      nodeVersion,
+      nodeDirectory,
+      join(temporaryRoot, 'exported-key.asc'),
+    );
+    process.stdout.write(
+      `Base image ${baseImage}\n`
+      + `  recipe commit ${DOCKER_NODE_RECIPE_COMMIT}: provenance annotations match\n`
+      + `  runtime pins: ${pins.map(pin => `${pin.name}=${pin.version}`).join(' ')}\n`
+      + `  Node ${nodeVersion} SHASUMS256.txt signed by ${signer} `
+      + `(one of ${allowedKeyCount} docker-node release keys)\n`,
+    );
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
 }
 
 function walkRegularFiles(root) {
@@ -1166,31 +1340,17 @@ async function buildBundle(options) {
     const nodeSourceName = `node-v${nodeVersion}.tar.xz`;
     const nodeMuslName = `node-v${nodeVersion}-linux-x64-musl.tar.xz`;
     const checksumsName = 'SHASUMS256.txt';
-    const checksumsSignatureName = 'SHASUMS256.txt.asc';
     const nodeDirectory = join(bundleRoot, 'node');
-    await download(
-      `https://nodejs.org/dist/v${nodeVersion}/${checksumsName}`,
-      join(nodeDirectory, checksumsName),
-    );
-    await download(
-      `https://nodejs.org/dist/v${nodeVersion}/${checksumsSignatureName}`,
-      join(nodeDirectory, checksumsSignatureName),
+    const releaseKeyPath = join(nodeDirectory, 'node-release-key.asc');
+    const { signer: releaseKeyFingerprint } = await verifyNodeReleaseChecksums(
+      temporaryRoot,
+      nodeVersion,
+      nodeDirectory,
+      releaseKeyPath,
     );
     await download(
       `https://nodejs.org/dist/v${nodeVersion}/${nodeSourceName}`,
       join(nodeDirectory, nodeSourceName),
-    );
-    const releaseKeyPath = join(nodeDirectory, 'node-release-key.asc');
-    await download(
-      `https://keys.openpgp.org/vks/v1/by-fingerprint/${NODE_RELEASE_KEY_FINGERPRINT}`,
-      join(temporaryRoot, 'node-release-key.bin'),
-    );
-    verifyNodeReleaseSignature(
-      temporaryRoot,
-      join(temporaryRoot, 'node-release-key.bin'),
-      join(nodeDirectory, checksumsSignatureName),
-      join(nodeDirectory, checksumsName),
-      releaseKeyPath,
     );
     const checksumLine = readFileSync(
       join(nodeDirectory, checksumsName),
@@ -1266,7 +1426,7 @@ async function buildBundle(options) {
         version: nodeVersion,
         sourceArchive: nodeSourceName,
         sourceSha256: expectedNodeHash,
-        releaseKeyFingerprint: NODE_RELEASE_KEY_FINGERPRINT,
+        releaseKeyFingerprint,
         amd64MuslArchive: nodeMuslName,
         amd64MuslSha256: muslChecksum,
         amd64RuntimeSha256: amd64.nodeSha256,
@@ -1851,6 +2011,8 @@ async function main() {
       fail('build requires --version, --revision, and --output');
     }
     await buildBundle(options);
+  } else if (command === 'check') {
+    await checkBaseImage();
   } else if (command === 'verify') {
     if (!options.version || !options.revision || !options.assets) {
       fail('verify requires --version, --revision, and --assets');
@@ -1887,7 +2049,7 @@ async function main() {
   } else {
     fail(
       'Usage: container-source-bundle.mjs '
-      + '<build|verify|bind|verify-binding> [options]',
+      + '<build|check|verify|bind|verify-binding> [options]',
     );
   }
 }

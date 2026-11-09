@@ -8,7 +8,14 @@ Because UnKeep is still `0.x`, minor releases may include breaking changes.
 
 ## [Unreleased]
 
-No changes yet.
+### Changed
+
+- Pull request CI now checks the Node base image's provenance, runtime package
+  pins and Node release signature whenever the Dockerfile or the
+  corresponding-source script changes, so a base-image bump no longer first
+  fails during a release. The release signature is now accepted from the
+  `nodejs/docker-node` release key list at the pinned recipe commit instead of
+  a single key, and the zlib mirror fallback now handles two-part versions.
 
 ## [0.2.3] - 2026-11-08
 
