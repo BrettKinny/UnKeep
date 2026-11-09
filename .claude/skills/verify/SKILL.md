@@ -13,13 +13,14 @@ pnpm --filter @unkeep/core build && pnpm --filter @unkeep/client build   # works
 pnpm --filter @unkeep/web build                                          # outputs apps/web/build/
 
 # Relay server serves the built PWA + sync API from one process. It only serves
-# the PWA with NODE_ENV=production and an absolute UNKEEP_WEB_DIR. Use throwaway
-# random tokens (>= 32 chars, different from each other) and a throwaway data dir.
+# the PWA with NODE_ENV=production and an absolute UNKEEP_WEB_DIR. The tokens are
+# fixed local test fixtures (>= 32 chars, different from each other; checked by
+# apps/server/test/administrativeSecurity.test.mjs), so use a throwaway data dir.
 DATA=$(mktemp -d)
 NODE_ENV=production PORT=3111 UNKEEP_DATA_DIR="$DATA" \
 UNKEEP_WEB_DIR="$PWD/apps/web/build" \
-UNKEEP_SETUP_TOKEN=$(openssl rand -hex 24) \
-UNKEEP_RECOVERY_TOKEN=$(openssl rand -hex 24) \
+UNKEEP_SETUP_TOKEN=test-setup-token-12345678901234567890 \
+UNKEEP_RECOVERY_TOKEN=test-recovery-token-1234567890123456 \
 node apps/server/src/index.mjs
 ```
 
