@@ -1,0 +1,37 @@
+name: Base image provenance
+
+# Advisory check (not a required status): runs the release's base-image
+# provenance validation when the Node base image or the source-bundle script
+# changes, so a Dependabot digest bump fails here instead of during a release.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - scripts/container-source-bundle*.mjs
+      - .github/workflows/base-image.yml
+      - .github/workflows/release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: base-image-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  base-image:
+    name: Check base-image provenance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run the source-bundle script tests
+        run: node --test scripts/container-source-bundle.test.mjs
+
+      - name: Check base-image provenance, runtime pins and Node release signature
+        run: node scripts/container-source-bundle.mjs check

@@ -77,9 +77,20 @@ squashed public history.
    also requires updating the base-image-bound pins in
    `scripts/container-source-bundle.mjs` (the `nodejs/docker-node` recipe
    commit, the Alpine release it expects, and the runtime package pins). Pull
-   request CI does not run that script: only a release run, or a
-   validation-only dispatch, exercises those pins, so dispatch one against the
-   branch before merging the change.
+   request CI runs `node scripts/container-source-bundle.mjs check` (the
+   `Base image provenance` workflow, advisory and not a required check) when
+   the Dockerfile, that script, or the release workflow changes. It verifies
+   the digest's provenance annotations against the recipe commit, the runtime
+   package pins, and the Node release signature, without building the bundle.
+   Only a release run, or a validation-only dispatch, builds the full bundle,
+   so still dispatch one against the branch before tagging.
+
+   The Node release signature is accepted from any key listed in the
+   `nodejs/docker-node` `keys/node.keys` file at the pinned recipe commit
+   (exactly what the upstream image build trusts), not from a single pinned
+   releaser. The list is read from that commit, never a branch, so updating
+   the recipe commit updates the trusted keys. The fingerprint that actually
+   signed is recorded as `releaseKeyFingerprint` in the source inventory.
 7. Restrict the environment to selected tags matching `v*-rc.*` and
    `v*.*.*` (the workflow itself rejects any tag that is not exactly
    `vX.Y.Z` or `vX.Y.Z-rc.N`).
@@ -298,4 +309,7 @@ security PR, check out the branch, run `pnpm notices`, and commit the result;
 otherwise `pnpm notices:check` fails CI with "THIRD_PARTY_NOTICES.md is
 stale". A Dockerfile base-image digest change also requires updating the
 `UNKEEP_CONTAINER_COMPLIANCE_GUARD` value and the pins in
-`scripts/container-source-bundle.mjs`, as described above.
+`scripts/container-source-bundle.mjs`, as described above. A Dependabot
+Docker PR now runs the `Base image provenance` check, which fails if those
+pins no longer match the new image. A passing check does not replace the
+validation-only release dispatch recommended before tagging.
