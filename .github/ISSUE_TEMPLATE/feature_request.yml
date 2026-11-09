@@ -4,6 +4,11 @@ title: "[Feature]: "
 labels:
   - enhancement
 body:
+  - type: markdown
+    attributes:
+      value: >-
+        UnKeep is in maintenance mode: security and bug fixes continue, but new
+        features are unlikely. Requests are still read and kept for reference.
   - type: textarea
     id: problem
     attributes:

@@ -14,6 +14,13 @@ Your private, self-hosted notes vault — with a useful scratchpad for agents.</
   <a href="SECURITY.md">Security</a>
 </p>
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/desktop-dark.png">
+    <img src="docs/images/desktop-light.png" alt="UnKeep in a desktop browser: pinned notes above a grid of coloured notes and checklists with labels" width="880">
+  </picture>
+</p>
+
 UnKeep is a single-user, Keep-style notes app that you host yourself. It is an
 installable PWA that works offline, syncs through one small container you run,
 and encrypts notes and attachments on your devices before they leave. The
@@ -29,7 +36,8 @@ Google and Google Keep are trademarks of Google LLC.
 > been reviewed and used daily on a home server, but it is not a polished
 > commercial product or a substitute for an independent security audit. Keep
 > tested backups, and read the [threat model](THREAT_MODEL.md) before trusting
-> it with important data.
+> it with important data. It is in [maintenance mode](#project-status-and-scope):
+> security and bug fixes continue, but new features are unlikely.
 
 ## Features
 
@@ -49,6 +57,12 @@ Google and Google Keep are trademarks of Google LLC.
   individually revocable.
 - **Agent access** through the `unkeep` CLI with scoped, revocable
   credentials.
+
+<p align="center">
+  <img src="docs/images/phone-grid.png" alt="UnKeep's note grid on a phone" width="240">
+  &nbsp;
+  <img src="docs/images/phone-editor.png" alt="A checklist open in UnKeep's editor on a phone" width="240">
+</p>
 
 ## Get started
 
@@ -119,7 +133,13 @@ and drop-in instructions for coding agents.
 The [threat model](THREAT_MODEL.md) states the exact boundary.
 Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
-## Not there yet
+## Project status and scope
+
+UnKeep is in **maintenance mode**. It does what its maintainer needs and is in
+daily use, so it keeps getting security fixes, dependency and base-image
+updates, and fixes for bugs that affect real use. New features are unlikely.
+Bug reports are welcome; open an issue before starting on anything bigger than
+a bug fix.
 
 UnKeep is one vault for one person. It has no shared editing, reminders,
 drawing, OCR, voice notes, note history, or scheduled backups. Markdown
