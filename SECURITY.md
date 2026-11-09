@@ -6,15 +6,15 @@ until a fix is available.
 
 ## Supported versions
 
-During the public preview, the latest published release candidate receives
-security fixes. After a stable `0.2.0`, only the latest patch of the latest
-`0.x` minor release will be supported. Superseded candidates, older minors, and
-development snapshots do not normally receive backports.
+Only the latest patch of the latest `0.x` minor release receives security
+fixes. UnKeep is in maintenance mode, and security fixes remain a priority.
+Older releases, release candidates, and development snapshots do not normally
+receive backports.
 
 | Version | Security support |
 | --- | --- |
-| Latest published release or release candidate | Yes |
-| Superseded candidates, older releases, and tags | No |
+| Latest stable release (the `latest` image tag) | Yes |
+| Older releases, release candidates, and other tags | No |
 | `main` and development branches | Best effort; not a supported release |
 
 Self-hosted operators are responsible for applying updates. A fix may require a

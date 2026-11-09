@@ -1,8 +1,9 @@
 # Support
 
-UnKeep is a community-maintained, self-hosted project. Support is best effort;
-there is no uptime, response-time, data-recovery, or backward-compatibility
-service-level agreement.
+UnKeep is a community-maintained, self-hosted project in maintenance mode.
+Support is best effort; there is no uptime, response-time, data-recovery, or
+backward-compatibility service-level agreement. Security fixes and bugs that
+affect real use come first; new features are unlikely.
 
 ## Before asking
 
