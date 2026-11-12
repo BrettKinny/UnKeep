@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SHORTCUTS, SHORTCUT_GROUPS, matchShortcut, shortcutsFor } from './shortcuts.js';
+import { SHORTCUTS, SHORTCUT_GROUPS, isSaveChord, matchShortcut, prefersAutofocusComposer, shortcutsFor } from './shortcuts.js';
 
 const allKeys = SHORTCUTS.flatMap(shortcut => shortcut.keys);
 
@@ -97,5 +97,37 @@ describe('matchShortcut', () => {
     expect(matchShortcut({ key: 'ArrowDown' }, inTrash)?.action).toBe('move-down');
     expect(matchShortcut({ key: 'Enter' }, inTrash)?.action).toBe('open');
     expect(matchShortcut({ key: '/' }, inTrash)?.action).toBe('search');
+  });
+});
+
+describe('isSaveChord', () => {
+  it('accepts Ctrl+Enter and Cmd+Enter only', () => {
+    expect(isSaveChord({ key: 'Enter', ctrlKey: true })).toBe(true);
+    expect(isSaveChord({ key: 'Enter', metaKey: true })).toBe(true);
+    expect(isSaveChord({ key: 'Enter' })).toBe(false);
+    expect(isSaveChord({ key: 'Enter', ctrlKey: true, altKey: true })).toBe(false);
+    expect(isSaveChord({ key: 'a', ctrlKey: true })).toBe(false);
+  });
+
+  it('is listed in the help dialog without a global key binding', () => {
+    const save = shortcutsFor('composer');
+    expect(save).toHaveLength(1);
+    expect(save[0].display).toContain('Enter');
+    expect(matchShortcut({ key: 'Enter', ctrlKey: true })).toBeNull();
+  });
+});
+
+describe('prefersAutofocusComposer', () => {
+  it('asks for a hover-capable fine pointer', () => {
+    const queries: string[] = [];
+    const desktop = (query: string) => { queries.push(query); return { matches: true }; };
+    expect(prefersAutofocusComposer(desktop)).toBe(true);
+    expect(queries).toEqual(['(hover: hover) and (pointer: fine)']);
+  });
+
+  it('is off for touch devices and when matchMedia is unavailable or throws', () => {
+    expect(prefersAutofocusComposer(() => ({ matches: false }))).toBe(false);
+    expect(prefersAutofocusComposer(undefined)).toBe(false);
+    expect(prefersAutofocusComposer(() => { throw new Error('nope'); })).toBe(false);
   });
 });

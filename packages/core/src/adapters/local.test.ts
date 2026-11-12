@@ -321,6 +321,60 @@ describe('LocalOnlyAdapter schema boundaries', () => {
     }
   });
 
+  it('queues a brand-new note synchronously without a read round trip', async () => {
+    const adds: Note[] = [];
+    const get = vi.fn();
+    const pendingWrites: unknown[] = [];
+    const stores = {
+      notes: {
+        get,
+        add: (value: Note) => {
+          adds.push(value);
+          return {} as IDBRequest<IDBValidKey>;
+        },
+      },
+      'pending-sync': {
+        put: (value: unknown) => {
+          pendingWrites.push(value);
+          return {} as IDBRequest<IDBValidKey>;
+        },
+      },
+    };
+    const transaction = {
+      objectStore: (name: keyof typeof stores) => stores[name] as unknown as IDBObjectStore,
+    } as unknown as IDBTransaction;
+    const db = {
+      transaction: vi.fn(() => transaction),
+      close: vi.fn(),
+    } as unknown as IDBDatabase;
+    vi.stubGlobal('indexedDB', {
+      open: () => successfulRequest(db) as unknown as IDBOpenDBRequest,
+    });
+
+    try {
+      const adapter = new LocalOnlyAdapter();
+      await adapter.init({});
+      const value = {
+        id: 'fresh-note',
+        content: 'Pasted and saved',
+        createdAt: 1,
+        updatedAt: 1,
+        pinned: false,
+        archived: false,
+      };
+      const saving = adapter.saveNoteWithPendingSync(value, { expected: null });
+      // Both writes are issued in the same turn, so a window closed right
+      // after saving cannot abort the transaction before they are queued.
+      expect(adds).toHaveLength(1);
+      expect(pendingWrites).toHaveLength(1);
+      expect(get).not.toHaveBeenCalled();
+      transaction.oncomplete?.({} as Event);
+      await expect(saving).resolves.toMatchObject({ id: 'fresh-note' });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('does not clear a newer queued snapshot when an older cross-tab push finishes', async () => {
     const queued = {
       id: 'shared-note',

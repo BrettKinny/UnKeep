@@ -6,7 +6,7 @@
  * can be unit tested against plain objects.
  */
 
-export type ShortcutContext = 'global' | 'grid';
+export type ShortcutContext = 'global' | 'grid' | 'composer';
 
 export type ShortcutAction =
   | 'help'
@@ -19,7 +19,8 @@ export type ShortcutAction =
   | 'move-right'
   | 'open'
   | 'pin'
-  | 'trash';
+  | 'trash'
+  | 'save-note';
 
 export interface ShortcutDefinition {
   action: ShortcutAction;
@@ -61,9 +62,19 @@ export const SHORTCUTS: ShortcutDefinition[] = [
   { action: 'trash', keys: ['Delete', 'Backspace'], display: ['Del', 'Backspace'], description: 'Move the selected note to Trash', context: 'grid', requiresSelection: true, notInTrash: true },
 ];
 
+// Handled by the composer itself (see `isSaveChord`), so it has no global keys.
+SHORTCUTS.push({
+  action: 'save-note',
+  keys: [],
+  display: ['Ctrl/⌘', 'Enter'],
+  description: 'Save the new note and keep typing (Esc saves and closes)',
+  context: 'composer',
+});
+
 export const SHORTCUT_GROUPS: { title: string; context: ShortcutContext }[] = [
   { title: 'Global', context: 'global' },
   { title: 'Note grid', context: 'grid' },
+  { title: 'New note', context: 'composer' },
 ];
 
 export function shortcutsFor(context: ShortcutContext): ShortcutDefinition[] {
@@ -124,4 +135,26 @@ export function matchShortcut(event: ShortcutKeyEvent, options: MatchOptions = {
   if (match.notInTrash && options.inTrash) return null;
 
   return match;
+}
+
+/** Ctrl+Enter (or Cmd+Enter on macOS) saves the note being composed. */
+export function isSaveChord(event: ShortcutKeyEvent): boolean {
+  return event.key === 'Enter' && Boolean(event.ctrlKey || event.metaKey) && !event.altKey;
+}
+
+/**
+ * True on devices with a hover-capable fine pointer (desktops, laptops), where
+ * focusing the composer on launch is welcome. Phones and tablets would pop up
+ * the on-screen keyboard on every open, so they are excluded.
+ */
+export function prefersAutofocusComposer(
+  matchMedia: ((query: string) => { matches: boolean }) | undefined =
+    typeof window === 'undefined' ? undefined : window.matchMedia?.bind(window),
+): boolean {
+  if (!matchMedia) return false;
+  try {
+    return matchMedia('(hover: hover) and (pointer: fine)').matches;
+  } catch {
+    return false;
+  }
 }

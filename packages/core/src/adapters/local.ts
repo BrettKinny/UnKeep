@@ -385,6 +385,12 @@ export class LocalOnlyAdapter implements DurableNoteStorageAdapter {
     await completion;
   }
 
+  private async readNoteRecord(id: string): Promise<Note | undefined> {
+    const transaction = this.getDB().transaction(STORE_NAME, 'readonly');
+    const stored = await requestResult(transaction.objectStore(STORE_NAME).get(id));
+    return stored === undefined ? undefined : normalizeNoteRecord(stored);
+  }
+
   async saveNoteWithPendingSync(
     note: Note,
     options: { beforeAttachments?: Note; expected?: Note | null } = {},
@@ -397,6 +403,28 @@ export class LocalOnlyAdapter implements DurableNoteStorageAdapter {
     const transaction = db.transaction([STORE_NAME, PENDING_SYNC_STORE_NAME], 'readwrite');
     const completion = transactionCompletion(transaction, 'Atomic note and sync queue write failed');
     const notes = transaction.objectStore(STORE_NAME);
+    if (expected === null) {
+      // A brand-new note is written with `add` so the transaction needs no read
+      // round trip first: the write is already queued with the database when
+      // this call returns, so closing the window right after creating a note
+      // cannot abort it before it reaches IndexedDB.
+      let duplicate = false;
+      const addRequest = notes.add(normalized);
+      addRequest.onerror = event => {
+        if (addRequest.error?.name !== 'ConstraintError') return;
+        event.preventDefault();
+        duplicate = true;
+        transaction.abort();
+      };
+      transaction.objectStore(PENDING_SYNC_STORE_NAME).put(pending);
+      try {
+        await completion;
+      } catch (error) {
+        if (!duplicate) throw error;
+        throw new LocalNoteConflictError(await this.readNoteRecord(normalized.id));
+      }
+      return pending;
+    }
     if (Object.hasOwn(options, 'expected')) {
       const stored = await requestResult(notes.get(normalized.id));
       const current = stored === undefined ? undefined : normalizeNoteRecord(stored);

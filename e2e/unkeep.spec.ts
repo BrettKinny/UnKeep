@@ -17,6 +17,46 @@ const IMAGE_BYTES = Buffer.from(
   'base64',
 );
 
+/** The composer is either collapsed (a button) or expanded and autofocused on desktop. */
+function composerReady(target: Page) {
+  return target.getByRole('button', { name: 'Create a new note' })
+    .or(target.getByLabel('Note content'));
+}
+
+/** Leave the composer expanded with the cursor in the content field. */
+async function openComposer(target: Page) {
+  const content = target.getByLabel('Note content');
+  const create = target.getByRole('button', { name: 'Create a new note' });
+  await expect(composerReady(target)).toBeVisible();
+  if (await create.isVisible()) await create.click();
+  // An empty composer stays expanded after focus leaves it; put the cursor back.
+  await content.focus();
+  await expect(content).toBeFocused();
+}
+
+/** Contents of every note in the local IndexedDB working copy. */
+async function storedNoteContents(target: Page): Promise<string[]> {
+  return target.evaluate(async () => {
+    const contents: string[] = [];
+    for (const info of await indexedDB.databases()) {
+      if (!info.name?.startsWith('unkeep-vault-')) continue;
+      const db: IDBDatabase = await new Promise((resolve, reject) => {
+        const request = indexedDB.open(info.name!);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      const notes: Array<{ content?: string }> = await new Promise((resolve, reject) => {
+        const request = db.transaction('notes').objectStore('notes').getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      db.close();
+      contents.push(...notes.map(note => note.content ?? ''));
+    }
+    return contents;
+  });
+}
+
 interface RecoveryKitV2Fixture {
   version: 2;
   instanceId: string;
@@ -144,7 +184,7 @@ test.describe.serial('UnKeep browser vault', () => {
     await expect.poll(async () => (await relayStatus()).initialized).toBe(false);
 
     await initialize.click();
-    await expect(page.getByRole('button', { name: 'Create a new note' })).toBeVisible();
+    await expect(composerReady(page)).toBeVisible();
     await expect.poll(async () => (await relayStatus()).initialized).toBe(true);
   });
 
@@ -174,14 +214,14 @@ test.describe.serial('UnKeep browser vault', () => {
       await recoveryPage.getByRole('button', { name: 'Associate kit with this relay' }).click();
       await recoveryPage.getByLabel('Operator recovery token').fill('playwright-recovery-token-00000001');
       await recoveryPage.getByRole('button', { name: 'Recover access' }).click();
-      await expect(recoveryPage.getByRole('button', { name: 'Create a new note' })).toBeVisible();
+      await expect(composerReady(recoveryPage)).toBeVisible();
     } finally {
       await recoveryContext.close();
     }
   });
 
   test('persists a created and edited note across a full reload', async () => {
-    await page.getByRole('button', { name: 'Create a new note' }).click();
+    await openComposer(page);
     await page.getByLabel('Note title').fill(NOTE_TITLE);
     await page.getByLabel('Note content').fill('Created through the public browser interface.');
     await page.getByRole('button', { name: 'Close' }).click();
@@ -199,7 +239,7 @@ test.describe.serial('UnKeep browser vault', () => {
     await expect(page.getByText(EDITED_CONTENT, { exact: true })).toBeVisible();
 
     await page.reload();
-    await expect(page.getByRole('button', { name: 'Create a new note' })).toBeVisible();
+    await expect(composerReady(page)).toBeVisible();
     await expect(page.getByRole('button', { name: `Edit note: ${EDITED_TITLE}` })).toBeVisible();
     await expect(page.getByText(EDITED_CONTENT, { exact: true })).toBeVisible();
   });
@@ -210,7 +250,7 @@ test.describe.serial('UnKeep browser vault', () => {
       body: '<title>External link target</title>',
     }));
 
-    await page.getByRole('button', { name: 'Create a new note' }).click();
+    await openComposer(page);
     await page.getByLabel('Note title').fill(LINK_NOTE_TITLE);
     await page.getByLabel('Note content').fill(LINK_NOTE_URL);
     await page.getByRole('button', { name: 'Close' }).click();
@@ -244,7 +284,7 @@ test.describe.serial('UnKeep browser vault', () => {
   });
 
   test('refreshes the open editor after converting changed checklist items to text', async () => {
-    await page.getByRole('button', { name: 'Create a new note' }).click();
+    await openComposer(page);
     await page.getByLabel('Note title').fill('Checklist editor snapshot');
     await page.getByLabel('Note content').fill('Original checklist item');
     await page.getByRole('button', { name: 'Close' }).click();
@@ -261,7 +301,7 @@ test.describe.serial('UnKeep browser vault', () => {
   test('preserves saved text when a second tab pins an older snapshot', async () => {
     const title = 'Shared tab edit protection';
     const valuableText = 'This text was saved by the first tab and must not be overwritten.';
-    await page.getByRole('button', { name: 'Create a new note' }).click();
+    await openComposer(page);
     await page.getByLabel('Note title').fill(title);
     await page.getByLabel('Note content').fill('Original text before the second tab opened.');
     await page.getByRole('button', { name: 'Close' }).click();
@@ -331,7 +371,7 @@ test.describe.serial('UnKeep browser vault', () => {
   });
 
   test('moves and restores a note from the expanded editor', async () => {
-    await page.getByRole('button', { name: 'Create a new note' }).click();
+    await openComposer(page);
     await page.getByLabel('Note title').fill(MODAL_DELETE_TITLE);
     await page.getByRole('button', { name: 'Close' }).click();
 
@@ -437,7 +477,7 @@ test.describe.serial('UnKeep browser vault', () => {
           return true;
         }
       })).toBe(true);
-      await expect(page.getByRole('button', { name: 'Create a new note' })).toBeVisible();
+      await expect(composerReady(page)).toBeVisible();
       await expect(page.getByRole('button', { name: `Edit note: ${EDITED_TITLE}` })).toBeVisible();
       await expect(page.getByRole('img', { name: IMAGE_NAME })).toBeVisible();
     } finally {
@@ -481,14 +521,21 @@ test.describe.serial('UnKeep browser vault', () => {
     await expect(savedCards).toHaveCount(2);
   });
 
+
   test('drives the note grid from the keyboard', async () => {
     await page.goto('/');
-    await expect(page.getByRole('button', { name: 'Create a new note' })).toBeVisible();
+    await expect(composerReady(page)).toBeVisible();
     const shortcutsDialog = page.getByRole('dialog', { name: 'Keyboard shortcuts' });
     const cards = page.locator('[data-note-id]');
     const active = page.locator('[data-note-id].outline-2');
     const noteCount = await cards.count();
     expect(noteCount).toBeGreaterThan(1);
+
+    // The composer holds the cursor on load, so arrows would type into it.
+    // Escape leaves it and hands the keyboard to the grid.
+    await expect(page.getByLabel('Note content')).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('button', { name: 'Create a new note' })).toBeVisible();
 
     // `?` opens the help, Escape closes it; the app menu offers it too.
     await page.keyboard.press('?');
@@ -579,5 +626,33 @@ test.describe.serial('UnKeep browser vault', () => {
     await expect(page.getByLabel('Note content')).toBeFocused();
     await page.keyboard.press('Escape');
     await expect(cards).toHaveCount(noteCount);
+  });
+
+  test('opens with the cursor in the composer; Ctrl+Enter saves and keeps it ready', async () => {
+    await page.goto('/');
+    const content = page.getByLabel('Note content');
+    await expect(content).toBeFocused();
+
+    const first = 'Pasted straight after opening the app';
+    await page.keyboard.insertText(first);
+    await page.keyboard.press('Control+Enter');
+    await expect(page.getByText(first, { exact: true })).toBeVisible();
+    // The composer stays open, empty and focused for the next paste.
+    await expect(content).toBeFocused();
+    await expect(content).toHaveValue('');
+
+    const second = 'Second paste without touching the mouse';
+    await page.keyboard.insertText(second);
+    await page.keyboard.press('Control+Enter');
+    await expect(page.getByText(second, { exact: true })).toBeVisible();
+
+    // Closing the window right after saving must not lose either note. The save
+    // is not debounced, so it lands in the IndexedDB working copy within a few
+    // milliseconds; wait for that (not a timer) before the reload.
+    await expect.poll(() => storedNoteContents(page)).toContain(second);
+    await page.reload();
+    await expect(page.getByText(first, { exact: true })).toBeVisible();
+    await expect(page.getByText(second, { exact: true })).toBeVisible();
+    await expect(page.getByLabel('Note content')).toBeFocused();
   });
 });
