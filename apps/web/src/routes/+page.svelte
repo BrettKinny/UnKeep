@@ -15,7 +15,7 @@
   import { listPendingShares, removePendingShares } from '$lib/shareTarget';
   import { toastStore } from '$lib/toast.svelte';
   import { trashNoteWithUndo } from '$lib/noteActions';
-  import { isActivatableTarget, isTextEntryTarget, matchShortcut, type ShortcutAction } from '$lib/shortcuts';
+  import { isActivatableTarget, isTextEntryTarget, matchShortcut, prefersAutofocusComposer, type ShortcutAction } from '$lib/shortcuts';
   import { nextNoteId, readNoteRects, type Direction } from '$lib/gridNavigation';
 
   type ContentView = 'notes' | 'trash';
@@ -198,6 +198,7 @@
     await noteStore.init(vault.ownerId, vault.migrateLegacy);
     await noteStore.enableEncryptedSync(vault.session, vault.masterKey);
     vaultReady = true;
+    void autofocusComposer();
     const pending = listPendingShares();
     const matching = pending.filter(share => share.targetInstanceId === vault.session.instanceId);
     const unbound = pending.filter(share => share.targetInstanceId === null);
@@ -236,9 +237,28 @@
   }
 
   function showNotes() {
+    const fromTrash = contentView !== 'notes';
     contentView = 'notes';
     selectedTrashIds = new Set();
     editingNote = null;
+    if (fromTrash) void autofocusComposer();
+  }
+
+  /**
+   * Put the cursor in the new-note composer when the notes view appears, on
+   * desktop-style devices only. Runs on explicit view entry, never on re-render
+   * or sync, and never over a dialog, search results or the trash.
+   */
+  async function autofocusComposer() {
+    if (!prefersAutofocusComposer()) return;
+    await tick();
+    if (!vaultReady || contentView !== 'notes' || noteStore.searchQuery.trim()) return;
+    if (editingNote || showImporter || showAccessManager || showShortcuts
+      || deleteConfirmation !== null || menuOpen) return;
+    // Do not steal focus the user already moved (e.g. into search).
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body && isTextEntryTarget(active)) return;
+    await noteInput?.focusInput();
   }
 
   function showTrash() {

@@ -3,6 +3,7 @@
   import type { NoteColor } from '@unkeep/core';
   import { noteStore } from '$lib/noteStore.svelte';
   import { colorMap } from '$lib/colors';
+  import { isSaveChord } from '$lib/shortcuts';
   import ColorPicker from './ColorPicker.svelte';
   import PinIcon from './PinIcon.svelte';
 
@@ -24,8 +25,11 @@
     inputEl?.focus();
   }
 
-  function handleClose() {
-    if (content.trim() || title.trim()) {
+  /** Create the note (when non-empty) and reset the draft; returns whether one was saved. */
+  function commitDraft(): boolean {
+    const hasText = Boolean(content.trim() || title.trim());
+    if (hasText) {
+      // createNote writes the local working copy straight away (no debounce).
       noteStore.createNote(content.trim(), title.trim(), { pinned, color });
       content = '';
       title = '';
@@ -33,6 +37,11 @@
     pinned = false;
     color = 'default';
     showColorPicker = false;
+    return hasText;
+  }
+
+  function handleClose() {
+    commitDraft();
     expanded = false;
   }
 
@@ -42,7 +51,13 @@
       inputEl?.focus();
       return;
     }
-    if (e.key === 'Escape' || (e.ctrlKey && e.key === 'Enter')) {
+    if (isSaveChord(e)) {
+      // Save and stay ready for the next paste: the composer stays open, empty and focused.
+      e.preventDefault();
+      if (commitDraft()) inputEl?.focus();
+      return;
+    }
+    if (e.key === 'Escape') {
       handleClose();
       inputEl?.blur();
     }
@@ -61,6 +76,9 @@
         onfocusout={(e) => {
           // Stay open while focus moves between the draft's own fields and controls.
           if (e.relatedTarget instanceof Node && draftEl?.contains(e.relatedTarget)) return;
+          // An empty draft stays put: collapsing it on mousedown would shift the
+          // grid under the pointer and swallow the click that caused the blur.
+          if (!content.trim() && !title.trim() && !pinned && color === 'default') return;
           handleClose();
         }}
       >

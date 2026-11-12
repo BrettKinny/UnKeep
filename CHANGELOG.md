@@ -8,6 +8,16 @@ Because UnKeep is still `0.x`, minor releases may include breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- The new-note composer takes focus when the notes view opens (on launch, after
+  unlock, and when returning from Trash) on devices with a hover-capable fine
+  pointer, so you can open UnKeep, paste and save straight away. Phones and
+  tablets are excluded to avoid raising the on-screen keyboard on every launch.
+- Ctrl+Enter (Cmd+Enter on macOS) saves the note and leaves the composer open,
+  empty and focused for the next paste. Esc still saves and closes the
+  composer. The shortcut is listed in the `?` shortcuts dialog.
+
 ### Changed
 
 - Pull request CI now checks the Node base image's provenance, runtime package
