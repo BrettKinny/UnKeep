@@ -8,6 +8,8 @@ Because UnKeep is still `0.x`, minor releases may include breaking changes.
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-11-12
+
 ### Added
 
 - The new-note composer takes focus when the notes view opens (on launch, after
@@ -318,7 +320,8 @@ collaboration.
 
 - Initial client-side encryption and input-hardening work.
 
-[Unreleased]: https://github.com/BrettKinny/UnKeep/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/BrettKinny/UnKeep/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/BrettKinny/UnKeep/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/BrettKinny/UnKeep/compare/v0.2.1...v0.2.3
 [0.2.2]: https://github.com/BrettKinny/UnKeep/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/BrettKinny/UnKeep/compare/v0.2.0-rc.4...v0.2.1
