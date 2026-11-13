@@ -65,17 +65,32 @@ test('only image promotion receives an OIDC identity', () => {
   assert.equal(jobPermissions(jobs.get('promote_image')).get('contents'), 'write');
 });
 
-test('every external write requires the reviewed release guards', () => {
+test('the single release approval guards everything public', () => {
   const jobs = workflowJobs(workflow);
   assert.equal(jobs.has('draft_release'), false);
-  for (const name of ['stage_container', 'promote_image', 'finalize_release']) {
+  const promote = jobs.get('promote_image');
+  assert.ok(promote, 'promote_image job must exist');
+  assert.equal(jobEnvironment(promote), 'release');
+  assert.match(promote, /UNKEEP_RELEASE_GUARD/);
+  assert.match(promote, /UNKEEP_IMMUTABLE_RELEASES_GUARD/);
+  assert.match(promote, /BrettKinny\/UnKeep:immutable-releases-reviewed:v1/);
+  assert.match(promote, /UNKEEP_CONTAINER_COMPLIANCE_GUARD/);
+  assert.match(promote, /validated=release-environment-v1/);
+  // Staging pushes untagged digests and publication only verifies; neither
+  // needs (or may depend on) the protected environment, so only one approval.
+  for (const name of ['stage_container', 'finalize_release']) {
     const block = jobs.get(name);
     assert.ok(block, `${name} job must exist`);
-    assert.equal(jobEnvironment(block), 'release');
-    assert.match(block, /UNKEEP_IMMUTABLE_RELEASES_GUARD/);
-    assert.match(block, /BrettKinny\/UnKeep:immutable-releases-reviewed:v1/);
-    assert.match(block, /UNKEEP_CONTAINER_COMPLIANCE_GUARD/);
+    assert.equal(jobEnvironment(block), undefined);
+    assert.doesNotMatch(block, /\bvars\.UNKEEP_/);
   }
+  const finalize = jobs.get('finalize_release');
+  assert.match(finalize, /^      - promote_image$/m);
+  assert.match(finalize, /needs\.promote_image\.outputs\.release_gate == 'release-environment-v1'/);
+  assert.equal(
+    [...jobs.values()].filter(block => jobEnvironment(block) === 'release').length,
+    1,
+  );
 });
 
 test('container sources are built without publication authority and bound before writes', () => {

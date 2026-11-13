@@ -597,7 +597,6 @@ jobs:
       - container-sources
     runs-on: ubuntu-24.04
     timeout-minutes: 90
-    environment: release
     permissions:
       contents: read
       packages: write
@@ -606,7 +605,6 @@ jobs:
       arm64_digest: ${{ steps.image-arm64.outputs.digest }}
       base_digest: ${{ needs.container-sources.outputs.base_digest }}
       release_attempt: ${{ steps.release_environment.outputs.attempt }}
-      release_gate: ${{ steps.release_environment.outputs.validated }}
       source_binding_sha256: ${{ steps.source_binding.outputs.binding_sha256 }}
       source_bundle_sha256: ${{ needs.container-sources.outputs.bundle_sha256 }}
       source_metadata_sha256: ${{ needs.container-sources.outputs.metadata_sha256 }}
@@ -619,36 +617,19 @@ jobs:
       RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
-      - name: Verify protected release environment configuration
+      # Staging pushes untagged platform digests only and runs without the
+      # protected environment. The reviewed-guard checks and the single manual
+      # approval happen in promote_image, before any tag or release is public.
+      - name: Record the release attempt and validate the base digest
         id: release_environment
         shell: bash
-        env:
-          CONTAINER_COMPLIANCE_GUARD: ${{ vars.UNKEEP_CONTAINER_COMPLIANCE_GUARD }}
-          IMMUTABLE_RELEASES_GUARD: ${{ vars.UNKEEP_IMMUTABLE_RELEASES_GUARD }}
-          RELEASE_GUARD: ${{ vars.UNKEEP_RELEASE_GUARD }}
         run: |
           set -euo pipefail
           if [[ ! "$BASE_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
             echo "::error::The source producer returned an invalid base-image digest"
             exit 1
           fi
-          expected_compliance_guard="BrettKinny/UnKeep:container-compliance:${BASE_DIGEST}:v1"
-          if [[ "$RELEASE_GUARD" != "BrettKinny/UnKeep:release:v1" ]]; then
-            echo "::error::The protected release environment is missing its UNKEEP_RELEASE_GUARD sentinel"
-            exit 1
-          fi
-          if [[ "$IMMUTABLE_RELEASES_GUARD" != "BrettKinny/UnKeep:immutable-releases-reviewed:v1" ]]; then
-            echo "::error::Release immutability must be verified by an administrator before publication"
-            echo "::error::Leave UNKEEP_IMMUTABLE_RELEASES_GUARD unset until that review is complete"
-            exit 1
-          fi
-          if [[ "$CONTAINER_COMPLIANCE_GUARD" != "$expected_compliance_guard" ]]; then
-            echo "::error::GHCR publication is blocked until the exact container source and notice review is complete"
-            echo "::error::Leave UNKEEP_CONTAINER_COMPLIANCE_GUARD unset until that review is documented"
-            exit 1
-          fi
           echo "attempt=$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
-          echo "validated=release-environment-v1" >> "$GITHUB_OUTPUT"
 
       - name: Check out the validated commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -970,9 +951,7 @@ jobs:
 
   promote_image:
     name: Draft, promote, and attest release
-    if: >-
-      needs.prepare.outputs.publish == 'true' &&
-      needs.stage_container.outputs.release_gate == 'release-environment-v1'
+    if: needs.prepare.outputs.publish == 'true'
     needs:
       - prepare
       - stage_container
@@ -986,6 +965,7 @@ jobs:
       packages: write
     outputs:
       image_digest: ${{ steps.image.outputs.digest }}
+      release_gate: ${{ steps.release_environment.outputs.validated }}
     env:
       AMD64_DIGEST: ${{ needs.stage_container.outputs.amd64_digest }}
       ARM64_DIGEST: ${{ needs.stage_container.outputs.arm64_digest }}
@@ -997,6 +977,7 @@ jobs:
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - name: Verify protected release environment configuration
+        id: release_environment
         env:
           CONTAINER_COMPLIANCE_GUARD: ${{ vars.UNKEEP_CONTAINER_COMPLIANCE_GUARD }}
           IMMUTABLE_RELEASES_GUARD: ${{ vars.UNKEEP_IMMUTABLE_RELEASES_GUARD }}
@@ -1014,6 +995,7 @@ jobs:
             echo "::error::Re-run all jobs so the immutable release slot is inventoried again"
             exit 1
           fi
+          echo "validated=release-environment-v1" >> "$GITHUB_OUTPUT"
 
       - name: Check out the validated commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1296,14 +1278,13 @@ jobs:
     name: Verify and publish GitHub release
     if: >-
       needs.prepare.outputs.publish == 'true' &&
-      needs.stage_container.outputs.release_gate == 'release-environment-v1'
+      needs.promote_image.outputs.release_gate == 'release-environment-v1'
     needs:
       - prepare
       - stage_container
       - promote_image
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    environment: release
     permissions:
       contents: write
     env:
@@ -1314,19 +1295,15 @@ jobs:
       RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
-      - name: Verify protected release environment configuration
+      # No environment: this job runs only after promote_image succeeded in the
+      # protected environment (the single approval) and vouched for it through
+      # the release_gate output. It then re-verifies digests and attestations.
+      - name: Verify the promotion handoff
         env:
-          CONTAINER_COMPLIANCE_GUARD: ${{ vars.UNKEEP_CONTAINER_COMPLIANCE_GUARD }}
-          IMMUTABLE_RELEASES_GUARD: ${{ vars.UNKEEP_IMMUTABLE_RELEASES_GUARD }}
-          RELEASE_GUARD: ${{ vars.UNKEEP_RELEASE_GUARD }}
           STAGED_RELEASE_ATTEMPT: ${{ needs.stage_container.outputs.release_attempt }}
         run: |
           set -euo pipefail
           test "$BASE_DIGEST" != ""
-          expected_compliance_guard="BrettKinny/UnKeep:container-compliance:${BASE_DIGEST}:v1"
-          test "$RELEASE_GUARD" = "BrettKinny/UnKeep:release:v1"
-          test "$IMMUTABLE_RELEASES_GUARD" = "BrettKinny/UnKeep:immutable-releases-reviewed:v1"
-          test "$CONTAINER_COMPLIANCE_GUARD" = "$expected_compliance_guard"
           if [[ "$STAGED_RELEASE_ATTEMPT" != "$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" ]]; then
             echo "::error::Publication jobs cannot resume across workflow attempts"
             echo "::error::Re-run all jobs so the immutable release slot is inventoried again"
