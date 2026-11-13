@@ -113,24 +113,31 @@ The external-write chain uses these permissions:
 
 | Order | Job | Environment | Declared permissions |
 | --- | --- | --- | --- |
-| 1 | `stage_container` | `release` | `contents: read`, `packages: write` |
+| 1 | `stage_container` | none | `contents: read`, `packages: write` |
 | 2 | `promote_image` | `release` | `contents: write`, `packages: write`, `attestations: write`, `id-token: write` |
-| 3 | `finalize_release` | `release` | `contents: write` |
+| 3 | `finalize_release` | none | `contents: write` |
 
 Draft creation and image promotion intentionally share one protected job and
 short-lived token because a draft created by one job's token is not reliably
 visible to another job's token. The combined job revalidates the tag, staged
 assets, source binding, draft metadata, and unused immutable image tags before
 promotion. The jobs form one dependency chain and cannot publish independently.
-Each checks its environment guards and the validated output sentinel from
-`stage_container`. The staging job binds downstream writes to the same source
-SHA, workflow run, and run attempt, preventing a later job from being rerun in
-a new attempt to bypass the fresh release-slot inventory.
+Only `promote_image` uses the `release` environment, so a release needs exactly
+one approval, given just before anything becomes public. That job checks the
+`UNKEEP_RELEASE_GUARD`, immutable-release, and container-compliance guards and
+only then emits the `release_gate` sentinel. `stage_container` runs without the
+environment and pushes untagged platform digests only (no tag, so nothing is
+discoverable by name); it binds downstream writes to the same source SHA,
+workflow run, and run attempt. `finalize_release` also runs without the
+environment, requires `promote_image` to have succeeded with the sentinel, and
+re-verifies digests, attestations, checksums, and assets before publishing, so
+it can publish only what the approved promotion vouched for. Binding to the run
+attempt prevents a later job from being rerun in a new attempt to bypass the
+fresh release-slot inventory.
 
-GitHub may request approval separately for the sequential deployment jobs.
-That repeated approval is intentional: review the completed prior stage and
-any draft incident record before approving the next one. An approval does not
-broaden a job's token permissions or authorize later jobs out of order.
+Review the staged candidate (the `stage_container` log and the staging
+manifest) before approving the promotion. An approval does not broaden the
+job's token permissions.
 
 The guards are configuration interlocks, not authentication. They do not
 replace tag protection, required reviewers, release immutability, or the
@@ -180,11 +187,11 @@ All handoffs are treated as untrusted input. Expected filenames, versions,
 checksums, job-output digests, the staging manifest, and the promoted-image
 record bind each step to the previously verified candidate.
 
-1. `stage_container` verifies the protected environment, immutable-release
-   review, and container-compliance guards. It inventories GHCR, requires an
+1. `stage_container` (no environment, untagged digests only) inventories GHCR, requires an
    unused version and source-SHA image-tag slot, validates the source bundle
    and notices, and stages the release assets. A registry error fails closed.
-2. `promote_image` creates or validates the GitHub prerelease draft and uploads
+2. `promote_image` (the one approval) verifies the protected environment,
+   immutable-release review, and container-compliance guards, then creates or validates the GitHub prerelease draft and uploads
    the checked assets, then promotes only the verified platform digests to the
    version and source-SHA tags (plus the eligible moving tags for a stable
    release) and attaches provenance attestations. One token

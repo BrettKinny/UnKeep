@@ -8,6 +8,13 @@ Because UnKeep is still `0.x`, minor releases may include breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- The release workflow now needs one manual approval instead of three. Only
+  `promote_image` (the job that creates the public image tags and release
+  draft) uses the protected `release` environment; staging pushes untagged
+  digests and the final publish job only verifies what promotion vouched for.
+
 ## [0.2.4] - 2026-11-12
 
 ### Added
